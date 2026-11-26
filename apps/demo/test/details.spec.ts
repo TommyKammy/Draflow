@@ -118,12 +118,12 @@ test('changes Merge mode without losing a hidden key and validates HTTP paramete
     await page.locator('.node-card[aria-pressed=true]').dblclick();
     if (name === 'Merge') {
       await dialog.getByLabel('Mode', { exact: true }).selectOption('mergeByKey');
-      await dialog.getByLabel('Key Field').fill('customer');
+      await dialog.getByRole('textbox', { name: 'Key Field', exact: true }).fill('customer');
       await dialog.getByLabel('Mode', { exact: true }).selectOption('chooseBranch');
-      await expect(dialog.getByLabel('Key Field')).toHaveCount(0);
+      await expect(dialog.getByRole('textbox', { name: 'Key Field', exact: true })).toHaveCount(0);
       await dialog.getByLabel('Branch', { exact: true }).selectOption('input2');
       await dialog.getByLabel('Mode', { exact: true }).selectOption('mergeByKey');
-      await expect(dialog.getByLabel('Key Field')).toHaveValue('customer');
+      await expect(dialog.getByRole('textbox', { name: 'Key Field', exact: true })).toHaveValue('customer');
     } else {
       await dialog.getByRole('button', { name: 'Close' }).click();
       await expect(dialog.getByLabel('URL', { exact: true })).toBeFocused();

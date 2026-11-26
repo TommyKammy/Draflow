@@ -393,7 +393,7 @@ export class Evaluator {
       if (key === 'json') return object.json;
       if (key === 'binary') return object.binary;
       if (key === 'item') return object.item;
-      if (key === 'all' || key === 'first' || key === 'last' || key === 'itemMatching') {
+      if (key === 'all' || key === 'first' || key === 'last' || key === 'itemFrom' || key === 'itemMatching') {
         return this.#boundMethod(object, key);
       }
       return undefined;
@@ -401,7 +401,7 @@ export class Evaluator {
 
     if (object instanceof InputProxy) {
       if (key === 'item') return object.item;
-      if (key === 'all' || key === 'first' || key === 'last') {
+      if (key === 'all' || key === 'first' || key === 'last' || key === 'itemFrom') {
         return this.#boundMethod(object, key);
       }
       return undefined;
@@ -481,6 +481,9 @@ export class Evaluator {
       throw new ExpressionSecurityError(`Access to "${name}" is not allowed`, this.#source);
     }
 
+    if (name === 'itemFrom' && (receiver instanceof InputProxy || receiver instanceof NodeProxy)) {
+      return receiver.itemFrom(args[0], args[1], args[2]);
+    }
     if (receiver instanceof NodeProxy) {
       switch (name) {
         case 'all':

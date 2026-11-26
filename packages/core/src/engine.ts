@@ -141,13 +141,19 @@ export class ExecutionEngine {
   readonly #env: Record<string, string>;
   readonly #limits: ExecutionLimits;
 
-  readonly #previews?: WeakMap<TaskData, (itemIndex: number) => ExpressionContext>;
+  readonly #previews?: WeakMap<TaskData, (itemIndex: number, port: string, slot: number) => ExpressionContext>;
 
-  preview(task: TaskData, value: string, itemIndex = 0, params?: WorkflowNode['parameters']): unknown {
-    const context = this.#previews?.get(task)?.(itemIndex);
-    if (!context || !task.input?.main?.[0]?.[itemIndex]) throw new Error('No preview input');
+  preview(task: TaskData, value: string, itemIndex = 0, params?: WorkflowNode['parameters'], port = 'main', slot = 0): unknown {
+    const context = this.#previews?.get(task)?.(itemIndex, port, slot);
+    if (!context || !task.input?.[port]?.[slot]?.[itemIndex]) throw new Error('No preview input');
     if (params) context.params = params;
     return this.expression.resolveString(value, context);
+  }
+
+  previewAncestor(task: TaskData, name: string, itemIndex: number, port = 'main', slot = 0): Item | undefined {
+    if (!task.input?.[port]?.[slot]?.[itemIndex]) return undefined;
+    const item = this.#previews?.get(task)?.(itemIndex, port, slot).resolveItem?.(name);
+    return item && structuredClone(item);
   }
 
   constructor(options: ExecutionEngineOptions) {
@@ -263,10 +269,10 @@ export class ExecutionEngine {
     const runItemSources = new Map<string, ItemSources>();
     for (const entry of stack) nextRunIndices.set(entry.nodeId, 1);
     const rememberPreview = (task: TaskData, node: WorkflowNode, entry: ExecEntry) => {
-      this.#previews?.set(task, index => this.#expressionContext({
+      this.#previews?.set(task, (index, port, slot) => this.#expressionContext({
         node, entry, workflow, graph, runData, currentRunIndices, itemSourcesByRun: runItemSources,
         runId: run.runId, mode: run.mode, timezone,
-      }, index, task.input));
+      }, index, task.input, port, slot));
     };
     let lastKey = '';
     let status: RunStatus = 'success';
@@ -734,9 +740,9 @@ export class ExecutionEngine {
     node: WorkflowNode; entry: ExecEntry; graph: WorkflowGraph; workflow: Workflow; runData: RunData;
     currentRunIndices: Map<string, number>; itemSourcesByRun: Map<string, ItemSources>;
     runId: string; mode: ExecutionMode; timezone: string;
-  }, itemIndex: number, portData = input.entry.input): ExpressionContext {
+  }, itemIndex: number, portData = input.entry.input, port = 'main', slot = 0): ExpressionContext {
     const { node, entry, graph, workflow, runData } = input;
-    const items = primaryItems(portData);
+    const items = portItems(portData, port, slot);
     const item = items[itemIndex] ?? items[0] ?? { json: {} };
     return {
       item,
@@ -755,8 +761,10 @@ export class ExecutionEngine {
             : tasks[runIndex];
         return task?.output?.['main']?.[outputIndex] ?? [];
       },
-      resolveItem: (name) =>
-        resolveItemLineage(name, itemIndex, entry, graph, runData, input.itemSourcesByRun),
+      resolveItem: (name, index = itemIndex, inputPort = port, inputSlot = slot) => {
+        if (!portItems(portData, inputPort, inputSlot)[index]) return undefined;
+        return resolveItemLineage(name, index, entry, graph, runData, input.itemSourcesByRun, inputPort, inputSlot);
+      },
       nodeNames: [...graph.byName.keys()],
       vars: this.#vars,
       timezone: input.timezone,
@@ -1300,11 +1308,12 @@ function resolveItemLineage(
   graph: WorkflowGraph,
   runData: RunData,
   itemSourcesByRun: Map<string, ItemSources>,
+  port: string, slot: number,
 ): Item | undefined {
   const target = graph.byName.get(targetName) ?? graph.nodes.get(targetName);
   if (target === undefined) return undefined;
 
-  const itemSource = entry.itemSources?.['main']?.[0]?.[itemIndex];
+  const itemSource = entry.itemSources?.[port]?.[slot]?.[itemIndex];
   if (itemSource !== undefined && itemSource !== null) {
     const task = runData[itemSource.source.node]?.[itemSource.source.runIndex];
     const items = task?.output?.[itemSource.source.port]?.[itemSource.source.index] ?? [];
@@ -1321,7 +1330,7 @@ function resolveItemLineage(
     }
   }
 
-  const source = entry.source[0] ?? null;
+  const source = entry.source[slot] ?? null;
   if (source === null) return undefined;
 
   const task = runData[source.node]?.[source.runIndex];

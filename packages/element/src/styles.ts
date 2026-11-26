@@ -52,6 +52,20 @@ export const styles = `
     border:1px solid GrayText; border-radius:10px; padding:1rem; overscroll-behavior:contain }
   .node-details::backdrop { background:#0006 }
   .details-panes { display:grid; grid-template-columns:minmax(0,1fr) minmax(16rem,1.4fr) minmax(0,1fr); gap:1rem; margin-top:1rem }
+  .details-panes>section {min-width:0}
+  .data-scroll,.mapping-fields {overflow:auto;max-height:18rem;max-width:100%}
+  .data-scroll table {border-collapse:separate;border-spacing:0;font-size:.85rem}
+  .data-scroll th,.data-scroll td {padding:.25rem .5rem;text-align:start;border-bottom:1px solid GrayText;white-space:nowrap}
+  .data-scroll thead {position:sticky;top:0;background:Canvas}
+  .node-details dl {display:grid;grid-template-columns:auto 1fr;gap:.25rem;overflow:auto}
+  .node-details dd {margin:0}
+  .details-panes>section mark {background:color-mix(in srgb,Highlight 15%,Canvas);color:CanvasText}
+  .details-panes>section>div>div>label {display:inline-flex;align-items:center;gap:.3rem}
+  .details-panes input[type=number] {width:6rem}
+  .node-details .mapping-fields {display:flex;flex-wrap:wrap;gap:.25rem;margin:.4rem 0}
+  .mapping-fields button:not([aria-pressed=true]) {color:CanvasText;background:Canvas;border:1px solid GrayText}
+  .node-details:not([data-mapping]) .insert-mapping {display:none}
+  .node-details small[data-type]::after {content:" · " attr(data-type);opacity:.7}
   .node-details nav { display:flex; gap:.35rem }
   .node-details nav button:not([aria-pressed=true]) { color:CanvasText; background:Canvas; border:1px solid GrayText }
   .node-details h3,.node-details h4 { margin:.5rem 0 }
