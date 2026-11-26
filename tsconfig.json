@@ -3,6 +3,7 @@
   "references": [
     { "path": "packages/core" },
     { "path": "packages/nodes" },
+    { "path": "packages/runtime" },
     { "path": "packages/element" },
     { "path": "packages/storage" }
   ]
