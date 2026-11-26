@@ -74,6 +74,9 @@ export const styles = `
   .view-controls button { background:transparent; color:CanvasText; font-size:13px; padding:5px 9px; min-width:30px }
   .view-controls button:hover { background:color-mix(in srgb, CanvasText 8%, Canvas) }
   .view-controls span { font:12px/1.5 ui-monospace,monospace; min-width:4ch; text-align:center }
+  .expression-suggestions {max-height:10rem;overflow:auto;background:Canvas;color:CanvasText;border:1px solid GrayText}
+  .expression-suggestions [role=option] {padding:.35rem .6rem;cursor:pointer;overflow-wrap:anywhere}
+  .expression-suggestions [aria-selected=true] {background:Highlight;color:HighlightText}
   .command-palette {box-sizing:border-box;width:min(26rem,94vw);max-height:90dvh;overflow:auto;background:Canvas;color:CanvasText;border:1px solid GrayText;border-radius:8px}
   .command-palette input {box-sizing:border-box;width:100%;font:inherit;padding:.45rem}
   .command-palette [role=listbox] {margin:.5rem 0;max-height:50dvh;overflow:auto}

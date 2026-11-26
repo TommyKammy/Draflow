@@ -17,13 +17,19 @@ export function fieldPath(path: FieldPath) {
   }).join('');
 }
 
+export function itemAccessor(input?: Mapping['input']) {
+  return input ? '.itemFrom(' + quoted(input.port) + ', ' + input.slot + ', $itemIndex).json' : '.item.json';
+}
+
+export function mappingRoot(ancestor?: string, input?: Mapping['input']) {
+  if (ancestor !== undefined) return '$(' + quoted(ancestor) + ')' + itemAccessor(input);
+  return input ? '$input' + itemAccessor(input) : '$json';
+}
+
 export function insertMapping(mapping: Mapping, original: string, range?: [number, number], dataPath?: 'single' | 'multiple') {
   const path = fieldPath(mapping.path);
   if (dataPath) return dataPath === 'multiple' && original && range ? original + ', ' + path : path;
-  const ancestor = mapping.ancestor === undefined ? undefined : '$(' + quoted(mapping.ancestor) + ')';
-  const root = mapping.input
-    ? (ancestor ?? '$input') + '.itemFrom(' + quoted(mapping.input.port) + ', ' + mapping.input.slot + ', $itemIndex).json'
-    : ancestor ? ancestor + '.item.json' : '$json';
+  const root = mappingRoot(mapping.ancestor, mapping.input);
   const token = '{{ ' + root + (path.startsWith('[') ? '' : '.') + path + ' }}';
   if (!range) return '=' + token;
   const [start, end] = range;

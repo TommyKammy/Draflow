@@ -1,5 +1,6 @@
 export type Locale = 'en' | 'ja';
 const japanese: Record<string, string> = {
+  Suggest: '補完', 'Expression suggestions': '式の補完候補',
   'Run workflow': '実行', 'Command palette': 'コマンドパレット', Commands: 'コマンド', 'Search commands': 'コマンドを検索', 'No matching commands': '一致するコマンドがありません',
   'Add node': 'ノードを追加', 'Insert node': '接続にノードを挿入', 'Tidy Up': '自動整列', 'Fit view': '全体表示',
   Group: 'グループ', 'Group nodes': 'グループ化', 'Edit group': 'グループを編集', 'Group name': 'グループ名',

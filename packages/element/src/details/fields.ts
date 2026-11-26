@@ -1,3 +1,5 @@
+import { bindCompletion } from './completion-view.js';
+import type { CompletionData } from './completion.js';
 import type { Translate } from '../locale.js';
 import { insertMapping, type Mapping } from './mapping.js';
 import { isPlainObject, isParameterVisible, type ExpressionEngine, type JsonObject, type JsonValue,
@@ -21,6 +23,7 @@ type Values = Record<string, ParamValue>;
 interface Context {
   t: Translate;
   expression: ExpressionEngine;
+  completion(): CompletionData;
   previews: (() => void)[];
   preview(value: string): { text: string; type?: string };
   node: WorkflowNode;
@@ -237,6 +240,9 @@ export function renderFields(parent: HTMLElement, schemas: ParamSchema[], values
     }
     text.oninput = read;
     label.append(text);
+    if (!field.noExpression && (text instanceof HTMLTextAreaElement || text.type === 'text')) {
+      bindCompletion(text, parent, ctx.completion, ctx.t);
+    }
     parent.append(preview);
     bindMapping(text);
   }

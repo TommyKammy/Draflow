@@ -18,3 +18,4 @@ export { DraflowDateTime } from './expression/date.js';
 export { parseExpressionSource } from './expression/parser.js';
 export { compileTemplate, evaluateTemplate } from './expression/template.js';
 export type { CompiledTemplate, TemplateSegment } from './expression/template.js';
+export { extensionMethodNames } from './expression/functions.js';
