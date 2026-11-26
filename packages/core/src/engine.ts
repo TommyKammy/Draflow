@@ -1,0 +1,1043 @@
+import {
+  ExecutionCanceledError,
+  ExecutionLimitError,
+  ExecutionTimeoutError,
+  NodeNotFoundError,
+  NodeTypeNotFoundError,
+  WorkflowValidationError,
+  serializeError,
+} from './errors.js';
+import { ExpressionEngine } from './expression/index.js';
+import type { ExpressionContext } from './expression/context.js';
+import { buildGraph, downstreamOf, upstreamOf, type WorkflowGraph } from './graph.js';
+import type {
+  CredentialReader,
+  FetchLike,
+  Logger,
+  NodeContext,
+  NodeHelpers,
+  NodeOutput,
+  NodeType,
+  ItemContext,
+} from './node.js';
+import { NodeRegistry, resolveNodeSettings } from './registry.js';
+import type {
+  Connection,
+  ExecutionMode,
+  Item,
+  JsonObject,
+  JsonValue,
+  ParamValue,
+  PortData,
+  RunData,
+  RunOptions,
+  RunResult,
+  RunStatus,
+  SerializedError,
+  SourceRef,
+  TaskData,
+  Workflow,
+  WorkflowNode,
+} from './types.js';
+import { assertValidWorkflow } from './validate.js';
+import { cloneJson, createId, isPlainObject, sleep as defaultSleep } from './utils.js';
+
+export interface CredentialProvider {
+  get(id: string): Promise<Record<string, string> | null>;
+}
+
+export interface Clock {
+  now(): number;
+  sleep(ms: number, signal?: AbortSignal): Promise<void>;
+}
+
+export interface ExecutionLimits {
+  maxNodeExecutions: number;
+  maxItemsPerNode: number;
+  executionTimeout: number;
+}
+
+export interface ExecutionEngineOptions {
+  registry: NodeRegistry;
+  expression?: ExpressionEngine;
+  fetch?: FetchLike;
+  clock?: Clock;
+  random?: () => number;
+  uuid?: () => string;
+  credentials?: CredentialProvider;
+  logger?: Logger;
+  vars?: Record<string, JsonValue>;
+  env?: Record<string, string>;
+  limits?: Partial<ExecutionLimits>;
+}
+
+export interface EngineEvents {
+  'run:start': {
+    runId: string;
+    workflowId: string;
+    mode: ExecutionMode;
+    startedAt: number;
+  };
+  'node:start': {
+    runId: string;
+    nodeId: string;
+    nodeName: string;
+    runIndex: number;
+    itemCount: number;
+  };
+  'node:finish': {
+    runId: string;
+    nodeId: string;
+    nodeName: string;
+    runIndex: number;
+    task: TaskData;
+  };
+  'run:finish': {
+    runId: string;
+    result: RunResult;
+  };
+}
+
+export interface RunHandle {
+  id: string;
+  done: Promise<RunResult>;
+  cancel(): void;
+  on<K extends keyof EngineEvents>(event: K, handler: (payload: EngineEvents[K]) => void): () => void;
+}
+
+interface ExecEntry {
+  nodeId: string;
+  input: PortData;
+  source: Array<SourceRef | null>;
+  runIndex: number;
+}
+
+const DEFAULT_LIMITS: ExecutionLimits = {
+  maxNodeExecutions: 10_000,
+  maxItemsPerNode: 10_000,
+  executionTimeout: 300_000,
+};
+
+export class ExecutionEngine {
+  readonly registry: NodeRegistry;
+  readonly expression: ExpressionEngine;
+  readonly #fetch: FetchLike;
+  readonly #clock: Clock;
+  readonly #random: () => number;
+  readonly #uuid: () => string;
+  readonly #credentials: CredentialProvider | undefined;
+  readonly #logger: Logger;
+  readonly #vars: Record<string, JsonValue>;
+  readonly #env: Record<string, string>;
+  readonly #limits: ExecutionLimits;
+
+  constructor(options: ExecutionEngineOptions) {
+    this.registry = options.registry;
+    this.expression = options.expression ?? new ExpressionEngine();
+    this.#fetch =
+      options.fetch ??
+      ((input, init) => {
+        if (typeof fetch !== 'function') {
+          return Promise.reject(new Error('No fetch implementation is available'));
+        }
+        return fetch(input, init);
+      });
+    this.#clock = options.clock ?? {
+      now: () => Date.now(),
+      sleep: (ms, signal) => defaultSleep(ms, signal),
+    };
+    this.#random = options.random ?? (() => Math.random());
+    this.#uuid = options.uuid ?? (() => createId('run'));
+    this.#credentials = options.credentials;
+    this.#logger = options.logger ?? noopLogger;
+    this.#vars = options.vars ?? {};
+    this.#env = options.env ?? {};
+    this.#limits = { ...DEFAULT_LIMITS, ...options.limits };
+  }
+
+  run(workflow: Workflow, options: RunOptions = {}): RunHandle {
+    assertValidWorkflow(workflow, this.registry);
+    const graph = buildGraph(workflow);
+    const runId = options.runId ?? this.#uuid();
+    const startedAt = this.#clock.now();
+    const bus = new EventBus();
+    const controller = new AbortController();
+    const mode: ExecutionMode = options.mode ?? 'manual';
+
+    if (options.signal !== undefined) {
+      if (options.signal.aborted) controller.abort();
+      else options.signal.addEventListener('abort', () => controller.abort(), { once: true });
+    }
+
+    const done = this.#execute(workflow, graph, options, {
+      runId,
+      startedAt,
+      mode,
+      controller,
+      bus,
+    });
+
+    return {
+      id: runId,
+      done,
+      cancel: () => controller.abort(),
+      on: <K extends keyof EngineEvents>(event: K, handler: (payload: EngineEvents[K]) => void) =>
+        bus.on(event, handler as (payload: unknown) => void),
+    };
+  }
+
+  async #execute(
+    workflow: Workflow,
+    graph: WorkflowGraph,
+    options: RunOptions,
+    run: {
+      runId: string;
+      startedAt: number;
+      mode: ExecutionMode;
+      controller: AbortController;
+      bus: EventBus;
+    },
+  ): Promise<RunResult> {
+    const timezone = workflow.settings.timezone ?? 'UTC';
+    const timeout =
+      workflow.settings.executionTimeout ?? this.#limits.executionTimeout;
+    const maxItems = workflow.settings.maxItemsPerNode ?? this.#limits.maxItemsPerNode;
+    const pinData = options.pinData ?? workflow.pinData ?? {};
+    const runData = cloneRunData(options.runData ?? {});
+    const dirty = computeDirtySet(graph, options);
+    const destination = options.destinationNodeId;
+    const allowed =
+      destination === undefined
+        ? undefined
+        : upstreamOf(graph, destination, {
+            includeSelf: options.destinationMode !== 'exclusive',
+          });
+
+    if (destination !== undefined && !graph.nodes.has(destination)) {
+      throw new NodeNotFoundError(destination);
+    }
+
+    const stack = buildStartStack(workflow, graph, options, allowed, this.registry);
+    const waiting = new Map<string, ExecEntry>();
+    const queued = new Set<ExecEntry>();
+    let executionIndex = nextExecutionIndex(runData);
+    let lastKey = '';
+    let status: RunStatus = 'success';
+    let error: SerializedError | undefined;
+
+    run.bus.emit('run:start', {
+      runId: run.runId,
+      workflowId: workflow.id,
+      mode: run.mode,
+      startedAt: run.startedAt,
+    });
+
+    try {
+      let executions = 0;
+
+      while (true) {
+        if (run.controller.signal.aborted) {
+          status = 'canceled';
+          error = serializeError(new ExecutionCanceledError());
+          break;
+        }
+
+        if (this.#clock.now() - run.startedAt > timeout) {
+          status = 'canceled';
+          error = serializeError(new ExecutionTimeoutError(timeout));
+          break;
+        }
+
+        if (stack.length === 0) {
+          if (!promoteWaiting(waiting, queued, graph, this.registry, stack)) break;
+        }
+
+        const entry = stack.shift();
+        if (entry === undefined) break;
+
+        if (waiting.get(entry.nodeId) === entry) waiting.delete(entry.nodeId);
+        queued.delete(entry);
+
+        if (allowed !== undefined && !allowed.has(entry.nodeId)) continue;
+        if (
+          destination !== undefined &&
+          options.destinationMode === 'exclusive' &&
+          entry.nodeId === destination
+        ) {
+          continue;
+        }
+
+        const node = graph.nodes.get(entry.nodeId);
+        if (node === undefined) throw new NodeNotFoundError(entry.nodeId);
+
+        const key = `${entry.nodeId}:${entry.runIndex}`;
+        if (key === lastKey) {
+          throw new ExecutionLimitError(
+            `Stopped execution because node "${node.name}" appears to be in an endless loop`,
+          );
+        }
+        lastKey = key;
+
+        executions += 1;
+        if (executions > this.#limits.maxNodeExecutions) {
+          throw new ExecutionLimitError(
+            `Execution exceeded ${this.#limits.maxNodeExecutions} node executions`,
+          );
+        }
+
+        const primary = primaryItems(entry.input);
+        if (primary.length > maxItems) {
+          throw new ExecutionLimitError(
+            `Node "${node.name}" received ${primary.length} items, above the limit of ${maxItems}`,
+          );
+        }
+
+        const nodeType = this.registry.get(node.type, node.typeVersion);
+        if (nodeType === undefined) throw new NodeTypeNotFoundError(node.type, node.typeVersion);
+
+        const settings = resolveNodeSettings(node);
+
+        const existing = runData[node.id]?.[entry.runIndex];
+        if (
+          existing !== undefined &&
+          existing.status === 'success' &&
+          options.runData !== undefined &&
+          !dirty.has(node.id)
+        ) {
+          run.bus.emit('node:start', {
+            runId: run.runId,
+            nodeId: node.id,
+            nodeName: node.name,
+            runIndex: entry.runIndex,
+            itemCount: primary.length,
+          });
+          run.bus.emit('node:finish', {
+            runId: run.runId,
+            nodeId: node.id,
+            nodeName: node.name,
+            runIndex: entry.runIndex,
+            task: existing,
+          });
+          if (destination !== undefined && entry.nodeId === destination) break;
+          this.#route(graph, node, existing.output ?? { main: [[]] }, entry.runIndex, runData, waiting, queued, stack, allowed, options.runData !== undefined);
+          continue;
+        }
+
+        const task = await this.#runNode({
+          workflow,
+          graph,
+          node,
+          nodeType,
+          entry,
+          runData,
+          pinData,
+          mode: run.mode,
+          runId: run.runId,
+          timezone,
+          startedAt: run.startedAt,
+          signal: run.controller.signal,
+          executionIndex,
+        });
+        executionIndex += 1;
+
+        if (task.status === 'success' || task.status === 'error') {
+          const tasks = runData[node.id] ?? [];
+          tasks[entry.runIndex] = task;
+          runData[node.id] = tasks;
+        }
+
+        run.bus.emit('node:finish', {
+          runId: run.runId,
+          nodeId: node.id,
+          nodeName: node.name,
+          runIndex: entry.runIndex,
+          task,
+        });
+
+        if (task.status === 'error' && settings.onError === 'stop') {
+          status = 'error';
+          error = task.error;
+          break;
+        }
+
+        const output = task.output ?? { main: [[]] };
+        if (destination !== undefined && entry.nodeId === destination) break;
+        this.#route(graph, node, output, entry.runIndex, runData, waiting, queued, stack, allowed, options.runData !== undefined);
+      }
+    } catch (caught) {
+      if (run.controller.signal.aborted) {
+        status = 'canceled';
+        error = serializeError(new ExecutionCanceledError());
+      } else {
+        status = 'error';
+        error = serializeError(caught);
+      }
+    }
+
+    const result: RunResult = {
+      id: run.runId,
+      workflowId: workflow.id,
+      status,
+      startedAt: run.startedAt,
+      stoppedAt: this.#clock.now(),
+      runData,
+    };
+    if (error !== undefined) result.error = error;
+    run.bus.emit('run:finish', { runId: run.runId, result });
+    return result;
+  }
+
+  async #runNode(input: {
+    workflow: Workflow;
+    graph: WorkflowGraph;
+    node: WorkflowNode;
+    nodeType: NodeType;
+    entry: ExecEntry;
+    runData: RunData;
+    pinData: Record<string, Item[]>;
+    mode: ExecutionMode;
+    runId: string;
+    timezone: string;
+    startedAt: number;
+    signal: AbortSignal;
+    executionIndex: number;
+  }): Promise<TaskData> {
+    const { node, nodeType, entry, runData, pinData, graph, workflow } = input;
+    const settings = resolveNodeSettings(node);
+    const startTime = this.#clock.now();
+    const stampedInput = stampInput(entry.input);
+
+    if (settings.executeOnce && entry.runIndex > 0) {
+      const previous = runData[node.id]?.[0];
+      return {
+        nodeId: node.id,
+        runIndex: entry.runIndex,
+        startTime,
+        executionTime: 0,
+        executionIndex: input.executionIndex,
+        status: 'success',
+        input: stampedInput,
+        output: previous?.output ?? { main: [primaryItems(stampedInput)] },
+        ...(entry.source.length > 0 ? { source: entry.source } : {}),
+        hints: [],
+      };
+    }
+
+    if (node.disabled === true) {
+      return {
+        nodeId: node.id,
+        runIndex: entry.runIndex,
+        startTime,
+        executionTime: 0,
+        executionIndex: input.executionIndex,
+        status: 'success',
+        input: stampedInput,
+        output: { main: [primaryItems(stampedInput)] },
+        ...(entry.source.length > 0 ? { source: entry.source } : {}),
+        hints: [],
+      };
+    }
+
+    const pinned = pinData[node.id];
+    if (pinned !== undefined && pinned.length > 0) {
+      const output = normalizeOutput(pinned);
+      return {
+        nodeId: node.id,
+        runIndex: entry.runIndex,
+        startTime,
+        executionTime: 0,
+        executionIndex: input.executionIndex,
+        status: 'success',
+        input: stampedInput,
+        output,
+        ...(entry.source.length > 0 ? { source: entry.source } : {}),
+        hints: [],
+      };
+    }
+
+    const context = this.#createContext({
+      workflow,
+      graph,
+      node,
+      nodeType,
+      entry,
+      input: stampedInput,
+      runData,
+      mode: input.mode,
+      runId: input.runId,
+      timezone: input.timezone,
+      startedAt: input.startedAt,
+      signal: input.signal,
+      pinData,
+    });
+
+    if (nodeType.execute === undefined) {
+      return {
+        nodeId: node.id,
+        runIndex: entry.runIndex,
+        startTime,
+        executionTime: this.#clock.now() - startTime,
+        executionIndex: input.executionIndex,
+        status: 'success',
+        input: stampedInput,
+        output: { main: [primaryItems(stampedInput)] },
+        ...(entry.source.length > 0 ? { source: entry.source } : {}),
+        hints: [],
+      };
+    }
+
+    let output: PortData | undefined;
+    let caught: unknown;
+    const maxTries = settings.retryOnFail ? settings.maxTries : 1;
+
+    for (let attempt = 0; attempt < maxTries; attempt += 1) {
+      if (attempt > 0) {
+        try {
+          await this.#clock.sleep(settings.waitBetweenTries, input.signal);
+        } catch {
+          caught = new ExecutionCanceledError();
+          break;
+        }
+      }
+
+      try {
+        const result = await nodeType.execute(context);
+        output = normalizeOutput(result);
+        caught = undefined;
+        break;
+      } catch (error) {
+        caught = error;
+        if (input.signal.aborted) break;
+      }
+    }
+
+    const executionTime = this.#clock.now() - startTime;
+
+    if (caught !== undefined) {
+      const serialized = serializeError(caught);
+      const errorItem: Item = {
+        json: { error: serialized.message },
+        error: serialized,
+        pairedItem: { item: 0 },
+      };
+
+      if (settings.onError === 'errorOutput') {
+        return {
+          nodeId: node.id,
+          runIndex: entry.runIndex,
+          startTime,
+          executionTime,
+          executionIndex: input.executionIndex,
+          status: 'error',
+          input: stampedInput,
+          output: { main: [[]], error: [[errorItem]] },
+          error: serialized,
+          ...(entry.source.length > 0 ? { source: entry.source } : {}),
+          hints: [],
+        };
+      }
+
+      if (settings.onError === 'continue') {
+        return {
+          nodeId: node.id,
+          runIndex: entry.runIndex,
+          startTime,
+          executionTime,
+          executionIndex: input.executionIndex,
+          status: 'error',
+          input: stampedInput,
+          output: { main: [primaryItems(stampedInput)] },
+          error: serialized,
+          ...(entry.source.length > 0 ? { source: entry.source } : {}),
+          hints: [],
+        };
+      }
+
+      return {
+        nodeId: node.id,
+        runIndex: entry.runIndex,
+        startTime,
+        executionTime,
+        executionIndex: input.executionIndex,
+        status: 'error',
+        input: stampedInput,
+        ...(output === undefined ? {} : { output }),
+        error: serialized,
+        ...(entry.source.length > 0 ? { source: entry.source } : {}),
+        hints: [],
+      };
+    }
+
+    const normalized = output ?? { main: [[]] };
+    const withAlways = settings.alwaysOutputData
+      ? ensureAlwaysOutputData(normalized, stampedInput)
+      : normalized;
+
+    return {
+      nodeId: node.id,
+      runIndex: entry.runIndex,
+      startTime,
+      executionTime,
+      executionIndex: input.executionIndex,
+      status: 'success',
+      input: stampedInput,
+      output: addMissingPairing(withAlways, stampedInput),
+      ...(entry.source.length > 0 ? { source: entry.source } : {}),
+      hints: [],
+    };
+  }
+
+  #createContext(input: {
+    workflow: Workflow;
+    graph: WorkflowGraph;
+    node: WorkflowNode;
+    nodeType: NodeType;
+    entry: ExecEntry;
+    input: PortData;
+    runData: RunData;
+    mode: ExecutionMode;
+    runId: string;
+    timezone: string;
+    startedAt: number;
+    signal: AbortSignal;
+    pinData: Record<string, Item[]>;
+  }): NodeContext {
+    const { node, nodeType, entry, input: portData, runData, graph, workflow } = input;
+    const items = primaryItems(portData);
+    const engine = this;
+
+    const makeExpressionContext = (itemIndex: number): ExpressionContext => {
+      const item = items[itemIndex] ?? items[0] ?? { json: {} };
+      const context: ExpressionContext = {
+        item,
+        itemIndex,
+        runIndex: entry.runIndex,
+        input: (port = 'main', index = 0) => portItems(portData, port, index),
+        nodeOutput: (name, outputIndex = 0, runIndex) => {
+          const target = graph.byName.get(name) ?? graph.nodes.get(name);
+          if (target === undefined) throw new NodeNotFoundError(name);
+          const tasks = runData[target.id];
+          if (tasks === undefined) return [];
+          const task = runIndex === undefined ? tasks[tasks.length - 1] : tasks[runIndex];
+          return task?.output?.['main']?.[outputIndex] ?? [];
+        },
+        nodeNames: [...graph.byName.keys()],
+        vars: engine.#vars,
+        timezone: input.timezone,
+        execution: { id: input.runId, mode: input.mode },
+        workflow: { id: workflow.id, name: workflow.name },
+        params: node.parameters,
+        env: engine.#env,
+        now: new Date(engine.#clock.now()),
+      };
+      return context;
+    };
+
+    const param = <T = ParamValue>(name: string, itemIndex = 0, fallback?: T): T => {
+      const raw = node.parameters[name];
+      if (raw === undefined) {
+        const schema = nodeType.parameters.find((parameter) => parameter.name === name);
+        if (schema?.default !== undefined) {
+          return engine.expression.resolve(schema.default, makeExpressionContext(itemIndex)) as T;
+        }
+        return fallback as T;
+      }
+      return engine.expression.resolve(raw, makeExpressionContext(itemIndex)) as T;
+    };
+
+    const resolveValue = <T,>(value: T, itemIndex = 0): T =>
+      engine.expression.resolve(value, makeExpressionContext(itemIndex)) as T;
+
+    const context: NodeContext = {
+      items,
+      itemCount: items.length,
+      runIndex: entry.runIndex,
+      mode: input.mode,
+      param,
+      resolve: resolveValue,
+      input: (port = 'main', index = 0) => portItems(portData, port, index),
+      firstInput: (port = 'main', index = 0) => portItems(portData, port, index)[0],
+      forItem: (index): ItemContext => ({
+        item: items[index] ?? { json: {} },
+        itemIndex: index,
+        param: <T = ParamValue>(name: string, fallback?: T) => param<T>(name, index, fallback),
+        resolve: <T,>(value: T) => resolveValue(value, index),
+      }),
+      each: async (fn) => {
+        const snapshot = [...items];
+        for (let index = 0; index < snapshot.length; index += 1) {
+          const item = snapshot[index];
+          if (item === undefined) continue;
+          await fn(item, context.forItem(index), index);
+        }
+      },
+      output: (value) => (Array.isArray(value) ? value : [value]),
+      helpers: this.#helpers(input.signal),
+      credentials: this.#credentialsFor(node),
+      logger: this.#logger,
+      signal: input.signal,
+      vars: this.#vars,
+      workflow: { id: workflow.id, name: workflow.name, timezone: input.timezone },
+      execution: { id: input.runId, mode: input.mode, startedAt: input.startedAt },
+    };
+
+    return context;
+  }
+
+  #helpers(signal: AbortSignal): NodeHelpers {
+    return {
+      fetch: this.#fetch,
+      now: () => this.#clock.now(),
+      sleep: (ms, abort) => this.#clock.sleep(ms, abort ?? signal),
+      random: this.#random,
+      uuid: this.#uuid,
+      hash: async (algo, data) => {
+        const bytes =
+          typeof data === 'string' ? new TextEncoder().encode(data) : new Uint8Array(data);
+        const digest = await crypto.subtle.digest(
+          algo === 'sha1' ? 'SHA-1' : 'SHA-256',
+          bytes,
+        );
+        return [...new Uint8Array(digest)]
+          .map((byte) => byte.toString(16).padStart(2, '0'))
+          .join('');
+      },
+      base64Encode: (value) => {
+        const bytes = new TextEncoder().encode(value);
+        let binary = '';
+        for (const byte of bytes) binary += String.fromCharCode(byte);
+        return btoa(binary);
+      },
+      base64Decode: (value) => {
+        const binary = atob(value);
+        const bytes = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+        return new TextDecoder().decode(bytes);
+      },
+    };
+  }
+
+  #credentialsFor(node: WorkflowNode): CredentialReader {
+    const provider = this.#credentials;
+    return {
+      get: async (slot) => {
+        if (provider === undefined) return null;
+        const id = node.credentials?.[slot];
+        if (id === undefined) return null;
+        return provider.get(id);
+      },
+    };
+  }
+
+  #route(
+    graph: WorkflowGraph,
+    node: WorkflowNode,
+    output: PortData,
+    runIndex: number,
+    runData: RunData,
+    waiting: Map<string, ExecEntry>,
+    queued: Set<ExecEntry>,
+    stack: ExecEntry[],
+    allowed: Set<string> | undefined,
+    reuse: boolean,
+  ): void {
+    for (const connection of graph.outgoing.get(node.id) ?? []) {
+      if (connection.from.port !== 'main' && connection.from.port !== 'error') continue;
+      if (allowed !== undefined && !allowed.has(connection.to.node)) continue;
+
+      const items = portItems(output, connection.from.port, connection.from.index);
+      if (items.length === 0) continue;
+
+      const target = graph.nodes.get(connection.to.node);
+      if (target === undefined) continue;
+
+      let entry = waiting.get(target.id);
+      if (entry === undefined) {
+        entry = {
+          nodeId: target.id,
+          input: {},
+          source: [],
+          runIndex: reuse ? 0 : runData[target.id]?.length ?? 0,
+        };
+        waiting.set(target.id, entry);
+      }
+
+      appendPortItems(entry.input, connection.to.port, connection.to.index, items);
+      entry.source[connection.to.index] = {
+        node: node.id,
+        port: connection.from.port,
+        index: connection.from.index,
+        runIndex,
+      };
+
+      if (isReady(target, this.registry, entry.input)) {
+        fillOptionalInputs(target, this.registry, entry.input);
+        if (!queued.has(entry) && (allowed === undefined || allowed.has(target.id))) {
+          queued.add(entry);
+          stack.push(entry);
+        }
+      }
+    }
+  }
+}
+
+class EventBus {
+  readonly #handlers = new Map<string, Set<(payload: unknown) => void>>();
+
+  on(event: string, handler: (payload: unknown) => void): () => void {
+    let handlers = this.#handlers.get(event);
+    if (handlers === undefined) {
+      handlers = new Set();
+      this.#handlers.set(event, handlers);
+    }
+    handlers.add(handler);
+    return () => {
+      handlers?.delete(handler);
+    };
+  }
+
+  emit(event: string, payload: unknown): void {
+    for (const handler of this.#handlers.get(event) ?? []) {
+      handler(payload);
+    }
+  }
+}
+
+function buildStartStack(
+  workflow: Workflow,
+  graph: WorkflowGraph,
+  options: RunOptions,
+  allowed: Set<string> | undefined,
+  registry: NodeRegistry,
+): ExecEntry[] {
+  const triggerData = options.triggerData ?? { main: [[{ json: {} }]] };
+  const startNodeId = options.startNodeId;
+
+  if (startNodeId !== undefined) {
+    const node = graph.nodes.get(startNodeId);
+    if (node === undefined) throw new NodeNotFoundError(startNodeId);
+    return [
+      {
+        nodeId: node.id,
+        input: clonePortData(triggerData),
+        source: [null],
+        runIndex: 0,
+      },
+    ];
+  }
+
+  const candidates = graph.startNodes.filter((node) => {
+    const nodeType = registry.get(node.type, node.typeVersion);
+    if (nodeType === undefined) return true;
+    return nodeType.ports.inputs.length === 0 || nodeType.meta.category === 'trigger';
+  });
+
+  const starts = (candidates.length > 0 ? candidates : graph.startNodes).filter(
+    (node) => allowed === undefined || allowed.has(node.id),
+  );
+
+  if (starts.length === 0) {
+    if (allowed !== undefined && allowed.size === 0) return [];
+    throw new WorkflowValidationError('Workflow has no start node');
+  }
+
+  return starts.map((node) => ({
+    nodeId: node.id,
+    input: clonePortData(triggerData),
+    source: [null],
+    runIndex: 0,
+  }));
+}
+
+function promoteWaiting(
+  waiting: Map<string, ExecEntry>,
+  queued: Set<ExecEntry>,
+  graph: WorkflowGraph,
+  registry: NodeRegistry,
+  stack: ExecEntry[],
+): boolean {
+  let promoted = false;
+  for (const [nodeId, entry] of [...waiting.entries()]) {
+    const node = graph.nodes.get(nodeId);
+    if (node === undefined) {
+      waiting.delete(nodeId);
+      continue;
+    }
+    if (!isReady(node, registry, entry.input)) continue;
+    fillOptionalInputs(node, registry, entry.input);
+    if (queued.has(entry)) continue;
+    queued.add(entry);
+    stack.push(entry);
+    promoted = true;
+  }
+  return promoted;
+}
+
+function isReady(node: WorkflowNode, registry: NodeRegistry, input: PortData): boolean {
+  const nodeType = registry.get(node.type, node.typeVersion);
+  if (nodeType === undefined) return false;
+
+  for (const port of nodeType.ports.inputs) {
+    const count = portCount(nodeType, 'inputs', port.type);
+    for (let index = 0; index < count; index += 1) {
+      const items = input[port.type]?.[index];
+      if (items === undefined || items === null) {
+        if (port.required !== false) return false;
+      }
+    }
+  }
+  return true;
+}
+
+function fillOptionalInputs(node: WorkflowNode, registry: NodeRegistry, input: PortData): void {
+  const nodeType = registry.get(node.type, node.typeVersion);
+  if (nodeType === undefined) return;
+  for (const port of nodeType.ports.inputs) {
+    const count = portCount(nodeType, 'inputs', port.type);
+    for (let index = 0; index < count; index += 1) {
+      const portData = (input[port.type] ??= []);
+      if (portData[index] === undefined || portData[index] === null) {
+        portData[index] = [];
+      }
+    }
+  }
+}
+
+function portCount(nodeType: NodeType, direction: 'inputs' | 'outputs', type: string): number {
+  return nodeType.ports[direction].filter((port) => port.type === type).length;
+}
+
+function appendPortItems(input: PortData, port: string, index: number, items: Item[]): void {
+  const ports = (input[port] ??= []);
+  const current = ports[index] ?? [];
+  ports[index] = [...current, ...items];
+}
+
+function primaryItems(input: PortData): Item[] {
+  return portItems(input, 'main', 0);
+}
+
+function portItems(input: PortData, port: string, index: number): Item[] {
+  return input[port]?.[index] ?? [];
+}
+
+function clonePortData(input: PortData): PortData {
+  return deepClone(input);
+}
+
+function cloneRunData(input: RunData): RunData {
+  return deepClone(input);
+}
+
+function deepClone<T>(value: T): T {
+  if (typeof structuredClone === 'function') return structuredClone(value);
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function stampInput(input: PortData): PortData {
+  const result: PortData = {};
+  for (const [port, ports] of Object.entries(input)) {
+    result[port] = ports.map((items, portIndex) => {
+      if (items === null) return null;
+      return items.map((item, itemIndex) => {
+        if (item.pairedItem !== undefined) return item;
+        return { ...item, pairedItem: { item: itemIndex, input: portIndex } };
+      });
+    });
+  }
+  return result;
+}
+
+function addMissingPairing(output: PortData, input: PortData): PortData {
+  const count = primaryItems(input).length;
+  const result: PortData = {};
+  for (const [port, ports] of Object.entries(output)) {
+    result[port] = ports.map((items) => {
+      if (items === null) return null;
+      return items.map((item, index) => {
+        if (item.pairedItem !== undefined) return item;
+        if (count === items.length) return { ...item, pairedItem: { item: index } };
+        return item;
+      });
+    });
+  }
+  return result;
+}
+
+function normalizeOutput(output: unknown): PortData {
+  if (output === undefined || output === null) return { main: [[]] };
+  if (!Array.isArray(output)) {
+    if (isPlainObject(output)) {
+      if ('json' in output) return { main: [[output as unknown as Item]] };
+      if (Object.values(output).some((value) => Array.isArray(value))) {
+        return output as unknown as PortData;
+      }
+    }
+    return { main: [[]] };
+  }
+  if (output.length === 0) return { main: [[]] };
+
+  const first = output[0];
+  if (Array.isArray(first)) {
+    return {
+      main: output.map((entry) => (Array.isArray(entry) ? entry : [entry as Item])),
+    };
+  }
+
+  if (isItem(first)) return { main: [output as Item[]] };
+
+  const ports: PortData = {};
+  for (const [port, value] of Object.entries(output as unknown as Record<string, unknown>)) {
+    if (!Array.isArray(value)) continue;
+    ports[port] = value.map((entry) => (Array.isArray(entry) ? entry : [entry as Item]));
+  }
+  return ports;
+}
+
+function isItem(value: unknown): value is Item {
+  return isPlainObject(value) && isPlainObject(value.json);
+}
+
+function ensureAlwaysOutputData(output: PortData, input: PortData): PortData {
+  const main = output.main ?? [];
+  const first = main[0];
+  if (first !== undefined && first !== null && first.length > 0) return output;
+
+  const paired: Array<{ item: number; input: number }> = [];
+  for (const [port, ports] of Object.entries(input)) {
+    ports.forEach((items, portIndex) => {
+      if (items === null) return;
+      items.forEach((_item, itemIndex) => {
+        paired.push({ item: itemIndex, input: portIndex });
+        void port;
+      });
+    });
+  }
+
+  const result: PortData = { ...output, main: [[{ json: {}, pairedItem: paired }]] };
+  return result;
+}
+
+function nextExecutionIndex(runData: RunData): number {
+  let max = -1;
+  for (const tasks of Object.values(runData)) {
+    for (const task of tasks) max = Math.max(max, task.executionIndex);
+  }
+  return max + 1;
+}
+
+function computeDirtySet(graph: WorkflowGraph, options: RunOptions): Set<string> {
+  const dirty = new Set<string>();
+  for (const nodeId of options.dirtyNodeIds ?? []) {
+    dirty.add(nodeId);
+    for (const downstream of downstreamOf(graph, nodeId)) dirty.add(downstream);
+  }
+  return dirty;
+}
+
+const noopLogger: Logger = {
+  debug: () => undefined,
+  info: () => undefined,
+  warn: () => undefined,
+  error: () => undefined,
+};

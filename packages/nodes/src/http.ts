@@ -1,0 +1,184 @@
+import {
+  isPlainObject,
+  toJsonValue,
+  type Item,
+  type JsonObject,
+  type NodeType,
+} from '@draflow/core';
+import { pairing, toJsonObject } from './helpers.js';
+
+export const httpRequestNode: NodeType = {
+  type: 'draflow.httpRequest',
+  version: 1,
+  meta: {
+    label: 'HTTP Request',
+    category: 'network',
+    description: 'Makes an HTTP request and returns the response data',
+    icon: 'globe',
+  },
+  ports: {
+    inputs: [{ type: 'main', required: true }],
+    outputs: [{ type: 'main' }],
+  },
+  parameters: [
+    {
+      name: 'method',
+      label: 'Method',
+      type: 'select',
+      default: 'GET',
+      options: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD'].map((value) => ({
+        label: value,
+        value,
+      })),
+    },
+    {
+      name: 'url',
+      label: 'URL',
+      type: 'string',
+      default: '',
+      required: true,
+      placeholder: 'https://api.example.com/items',
+    },
+    {
+      name: 'headers',
+      label: 'Headers',
+      type: 'json',
+      default: {},
+      description: 'JSON object of request headers',
+    },
+    {
+      name: 'body',
+      label: 'Body',
+      type: 'json',
+      default: {},
+      description: 'JSON object or string sent as the request body',
+    },
+    {
+      name: 'responseFormat',
+      label: 'Response Format',
+      type: 'select',
+      default: 'json',
+      options: [
+        { label: 'JSON', value: 'json' },
+        { label: 'Text', value: 'text' },
+      ],
+    },
+    {
+      name: 'timeout',
+      label: 'Timeout (ms)',
+      type: 'number',
+      default: 30_000,
+      min: 1,
+      max: 300_000,
+    },
+  ],
+  async execute(ctx) {
+    const output: Item[] = [];
+
+    await ctx.each(async (input, itemCtx, index) => {
+      const method = itemCtx.param<string>('method', 'GET').toUpperCase();
+      const url = itemCtx.param<string>('url', '');
+      if (url === '') throw new Error('URL is required');
+
+      const headers = normalizeHeaders(itemCtx.param<unknown>('headers', {}));
+      const bodyValue = itemCtx.param<unknown>('body', {});
+      const responseFormat = itemCtx.param<string>('responseFormat', 'json');
+      const timeout = itemCtx.param<number>('timeout', 30_000);
+
+      const init: RequestInit = {
+        method,
+        headers,
+      };
+      if (method !== 'GET' && method !== 'HEAD' && bodyValue !== undefined && bodyValue !== null) {
+        if (typeof bodyValue === 'string') {
+          init.body = bodyValue;
+        } else {
+          init.body = JSON.stringify(bodyValue);
+          if (headers['content-type'] === undefined && headers['Content-Type'] === undefined) {
+            headers['content-type'] = 'application/json';
+          }
+        }
+      }
+
+      const response = await fetchWithTimeout(
+        ctx.helpers.fetch,
+        url,
+        init,
+        timeout,
+        ctx.signal,
+      );
+
+      if (!response.ok) {
+        const text = await response.text().catch(() => '');
+        throw new Error(
+          `HTTP ${response.status} ${response.statusText}${text === '' ? '' : `: ${text.slice(0, 500)}`}`,
+        );
+      }
+
+      const json = await readResponse(response, responseFormat);
+      output.push({ json, pairedItem: pairing(input, index) });
+    });
+
+    return output;
+  },
+};
+
+function normalizeHeaders(value: unknown): Record<string, string> {
+  if (!isPlainObject(value)) return {};
+  const headers: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (entry === undefined || entry === null) continue;
+    headers[key] = String(entry);
+  }
+  return headers;
+}
+
+async function readResponse(response: Response, format: string): Promise<JsonObject> {
+  if (format === 'text') {
+    return { data: await response.text() };
+  }
+
+  const contentType = response.headers.get('content-type') ?? '';
+  if (!contentType.includes('json')) {
+    const text = await response.text();
+    try {
+      return toJsonObject(JSON.parse(text));
+    } catch {
+      return { data: text };
+    }
+  }
+
+  const parsed: unknown = await response.json();
+  if (isPlainObject(parsed)) return toJsonValue(parsed) as JsonObject;
+  return { data: toJsonValue(parsed) };
+}
+
+async function fetchWithTimeout(
+  fetchFn: (input: string, init?: RequestInit) => Promise<Response>,
+  url: string,
+  init: RequestInit,
+  timeout: number,
+  signal: AbortSignal,
+): Promise<Response> {
+  const controller = new AbortController();
+  let timedOut = false;
+
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, Math.max(1, timeout));
+
+  const onAbort = (): void => controller.abort();
+  signal.addEventListener('abort', onAbort, { once: true });
+
+  try {
+    return await fetchFn(url, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (timedOut) throw new Error(`Request timed out after ${timeout} ms`);
+    if (signal.aborted) throw new Error('Request aborted');
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener('abort', onAbort);
+  }
+}
