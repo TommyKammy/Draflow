@@ -1,4 +1,5 @@
 import type { NodeType } from '@draflow/core';
+import { pairing } from './helpers.js';
 
 export const noOpNode: NodeType = {
   type: 'draflow.noOp',
@@ -15,6 +16,6 @@ export const noOpNode: NodeType = {
   },
   parameters: [],
   execute(ctx) {
-    return [...ctx.items];
+    return ctx.items.map((item, index) => ({ ...item, pairedItem: pairing(item, index) }));
   },
 };

@@ -68,6 +68,35 @@ async function run(
 }
 
 describe('standard nodes', () => {
+  it.each([0, 1, 2])('preserves the filtered source across %i NoOp nodes', async (count) => {
+    const source = node('source', 'draflow.manualTrigger', 'Source', 0);
+    const filter = node('filter', 'draflow.filter', 'Filter', 1, {
+      conditions: { conditions: [{ left: '={{ $json.id }}', operator: 'equals', right: 'c' }] },
+    });
+    const passes = Array.from({ length: count }, (_, i) => node('p' + i, 'draflow.noOp', 'Pass ' + i, i + 2));
+    const set = node('set', 'draflow.set', 'Set', count + 2, {
+      assignments: [{ name: 'origin', value: '={{ $("Source").item.json.id }}' }],
+    });
+    const nodes = [source, filter, ...passes, set];
+    const edges = nodes.slice(1).map((target, i) => connect(nodes[i]!.id, target.id));
+    const result = await run(workflow(nodes, edges), seed({ id: 'a' }, { id: 'b' }, { id: 'c' }));
+    expect(result.status).toBe('success');
+    expect(result.runData.set?.[0]?.output?.main?.[0]?.map(item => item.json))
+      .toEqual([{ id: 'c', origin: 'c' }]);
+  });
+
+  it.each(['filter', 'if'])('compares resolved null values in %s', async (type) => {
+    const wf = workflow([
+      node('s', 'draflow.manualTrigger', 'Source', 0),
+      node('n', 'draflow.' + type, 'Compare', 1, {
+        conditions: { conditions: [{ left: '={{ $json.value }}', operator: 'equals', right: '={{ null }}' }] },
+      }),
+    ], [connect('s', 'n')]);
+    const result = await run(wf, seed({ value: null }, { value: '' }));
+    expect(result.status).toBe('success');
+    expect(result.runData.n?.[0]?.output?.main?.[0]?.map(item => item.json)).toEqual([{ value: null }]);
+  });
+
   it('edits fields with expressions', async () => {
     const wf = workflow(
       [

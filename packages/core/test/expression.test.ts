@@ -42,6 +42,33 @@ function evaluate(source: string): unknown {
 }
 
 describe('ExpressionEngine', () => {
+  it.each([
+    ['={{ [1, "]",] }}', [1, ']']],
+    ['={{ "a(b".replace("(", ")",) }}', 'a)b'],
+    ['={{ {a: 1, "}": 2,} }}', { a: 1, '}': 2 }],
+  ])('parses punctuation-looking literals in %s', (source, expected) => {
+    expect(evaluate(String(source))).toEqual(expected);
+  });
+
+  it.each(['0099-01-01', '0000-02-29'])('preserves the ISO year in %s', date => {
+    expect(evaluate(`={{ DateTime.fromISO("${date}").toISO() }}`)).toBe(date + 'T00:00:00.000Z');
+  });
+
+  it.each([
+    ['0099-01-01Z', '0099-01-01T00:00:00.000Z'],
+    ['0000-02-29Z', '0000-02-29T00:00:00.000Z'],
+    ['-000001-01-01', '-000001-01-01T00:00:00.000Z'],
+    ['+010000-01-01', '+010000-01-01T00:00:00.000Z'],
+    ['2026-01-01T24:00:00+09:00', '2026-01-01T15:00:00.000Z'],
+  ])('round-trips the ISO instant %s', (input, expected) => {
+    expect(evaluate(`={{ DateTime.fromISO("${input}").toISO() }}`)).toBe(expected);
+  });
+
+  it.each(['-000000-01-01', '+999999-01-01', '2025-02-30', '2026-00-01', '2025-02-29T12:00:00Z', '2026-01-01T25:00'])
+    ('rejects invalid ISO date %s', date => {
+      expect(() => evaluate(`={{ DateTime.fromISO("${date}") }}`)).toThrow(/Invalid ISO date/);
+    });
+
   it('returns plain strings unchanged', () => {
     expect(evaluate('hello')).toBe('hello');
     expect(evaluate('https://example.com')).toBe('https://example.com');

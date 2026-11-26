@@ -101,7 +101,7 @@ export function evaluateFilter(
 
   const results = conditions.map((condition) => {
     const left = resolve(condition.left);
-    const right = resolve(condition.right ?? '');
+    const right = resolve(condition.right === undefined ? '' : condition.right);
     return matchCondition(condition, left, right, loose);
   });
 

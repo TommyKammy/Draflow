@@ -48,9 +48,13 @@ class Parser {
     return token;
   }
 
-  #match(value: string): boolean {
+  #atPunctuation(value: string): boolean {
     const token = this.#peek();
-    if (token.type === 'punct' && token.value === value) {
+    return token.type === 'punct' && token.value === value;
+  }
+
+  #match(value: string): boolean {
+    if (this.#atPunctuation(value)) {
       this.#next();
       return true;
     }
@@ -339,7 +343,7 @@ class Parser {
     while (true) {
       args.push(this.#parseExpression());
       if (this.#match(',')) {
-        if (this.#peek().value === ')') break;
+        if (this.#atPunctuation(')')) break;
         continue;
       }
       break;
@@ -382,7 +386,7 @@ class Parser {
           break;
       }
 
-      if (this.#peek().value === '=>') {
+      if (this.#atPunctuation('=>')) {
         this.#next();
         const body = this.#parseExpression();
         return {
@@ -427,13 +431,13 @@ class Parser {
     this.#next();
 
     const params: string[] = [];
-    if (this.#peek().value !== ')') {
+    if (!this.#atPunctuation(')')) {
       try {
         while (true) {
           const param = this.#expectIdentifier();
           params.push(param.value);
           if (this.#match(',')) {
-            if (this.#peek().value === ')') break;
+            if (this.#atPunctuation(')')) break;
             continue;
           }
           break;
@@ -444,13 +448,13 @@ class Parser {
       }
     }
 
-    if (this.#peek().value !== ')') {
+    if (!this.#atPunctuation(')')) {
       this.#index = startIndex;
       return undefined;
     }
     this.#next();
 
-    if (this.#peek().value !== '=>') {
+    if (!this.#atPunctuation('=>')) {
       this.#index = startIndex;
       return undefined;
     }
@@ -476,7 +480,7 @@ class Parser {
     while (true) {
       elements.push(this.#parseExpression());
       if (this.#match(',')) {
-        if (this.#peek().value === ']') break;
+        if (this.#atPunctuation(']')) break;
         continue;
       }
       break;
@@ -519,7 +523,7 @@ class Parser {
       }
 
       if (this.#match(',')) {
-        if (this.#peek().value === '}') break;
+        if (this.#atPunctuation('}')) break;
         continue;
       }
       break;

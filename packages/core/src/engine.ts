@@ -9,7 +9,7 @@ import {
 } from './errors.js';
 import { ExpressionEngine } from './expression/index.js';
 import type { ExpressionContext } from './expression/context.js';
-import { buildGraph, downstreamOf, upstreamOf, type WorkflowGraph } from './graph.js';
+import { buildGraph, downstreamOf, hasPath, upstreamOf, type WorkflowGraph } from './graph.js';
 import type {
   CredentialReader,
   FetchLike,
@@ -229,11 +229,8 @@ export class ExecutionEngine {
       workflow.settings.executionTimeout ?? this.#limits.executionTimeout;
     const maxItems = workflow.settings.maxItemsPerNode ?? this.#limits.maxItemsPerNode;
     const pinData = options.pinData ?? workflow.pinData ?? {};
-    const runData = cloneRunData(options.runData ?? {});
+    const runData: RunData = Object.create(null);
     const dirty = computeDirtySet(graph, options);
-    if (options.runData !== undefined) {
-      for (const nodeId of dirty) delete runData[nodeId];
-    }
     const destination = options.destinationNodeId;
     const allowed =
       destination === undefined
@@ -253,7 +250,6 @@ export class ExecutionEngine {
     const currentRunIndices = new Map<string, number>();
     const runItemSources = new Map<string, ItemSources>();
     for (const entry of stack) nextRunIndices.set(entry.nodeId, 1);
-    let executionIndex = nextExecutionIndex(runData);
     let lastKey = '';
     let status: RunStatus = 'success';
     let error: SerializedError | undefined;
@@ -273,6 +269,15 @@ export class ExecutionEngine {
     }
 
     try {
+      for (const [nodeId, tasks] of Object.entries(options.runData ?? {})) {
+        if (dirty.has(nodeId)) continue;
+        for (const task of tasks) {
+          const limitError = outputLimitError(graph.nodes.get(nodeId)?.name ?? nodeId, task.output, maxItems);
+          if (limitError !== undefined) throw limitError;
+        }
+        runData[nodeId] = deepClone(tasks);
+      }
+      let executionIndex = nextExecutionIndex(runData);
       let executions = 0;
 
       while (true) {
@@ -413,6 +418,12 @@ export class ExecutionEngine {
           currentRunIndices,
           itemSourcesByRun: runItemSources,
         });
+        const limitError = outputLimitError(node.name, task.output, maxItems);
+        if (limitError !== undefined) {
+          delete task.output;
+          task.status = 'error';
+          task.error = serializeError(limitError);
+        }
         executionIndex += 1;
 
         if (task.status === 'success' || task.status === 'error') {
@@ -439,7 +450,7 @@ export class ExecutionEngine {
           break;
         }
 
-        if (task.status === 'error' && settings.onError === 'stop') {
+        if (task.status === 'error' && (limitError !== undefined || settings.onError === 'stop')) {
           status = 'error';
           error = task.error;
           break;
@@ -1001,41 +1012,36 @@ function promoteWaiting(
   registry: NodeRegistry,
   stack: ExecEntry[],
 ): boolean {
-  let promoted = false;
-  for (const [nodeId, entry] of [...waiting.entries()]) {
+  if (waiting.size === 0) return false;
+  // Drain the earliest ready join and its outgoing work before releasing later
+  // joins. An intermediate node may not have received its first input yet.
+  for (const nodeId of graph.topologicalOrder) {
+    const entry = waiting.get(nodeId);
     const node = graph.nodes.get(nodeId);
-    if (node === undefined) {
-      waiting.delete(nodeId);
-      continue;
-    }
-    if (!isReady(node, registry, entry.input)) continue;
-    if (hasPendingProducer(nodeId, graph, waiting, queued, stack)) continue;
+    if (entry === undefined || node === undefined || !isReady(node, registry, entry.input)) continue;
     fillOptionalInputs(node, registry, entry.input);
-    if (queued.has(entry)) continue;
     queued.add(entry);
     stack.push(entry);
-    promoted = true;
+    return true;
   }
-  return promoted;
-}
-
-function hasPendingProducer(
-  targetId: string,
-  graph: WorkflowGraph,
-  waiting: Map<string, ExecEntry>,
-  queued: Set<ExecEntry>,
-  stack: ExecEntry[],
-): boolean {
-  for (const edge of graph.incoming.get(targetId) ?? []) {
-    const sourceId = edge.from.node;
-    if (sourceId === targetId) continue;
-    if (waiting.has(sourceId)) return true;
-    if (stack.some((entry) => entry.nodeId === sourceId)) return true;
-    for (const entry of queued) {
-      if (entry.nodeId === sourceId) return true;
+  // Cycles and their descendants have no topological rank. Among runnable
+  // joins, prefer a strict ancestor, keeping arrival order inside a cycle.
+  let selected: ExecEntry | undefined;
+  for (const entry of waiting.values()) {
+    const node = graph.nodes.get(entry.nodeId);
+    if (node === undefined || !isReady(node, registry, entry.input)) continue;
+    if (
+      selected === undefined ||
+      (hasPath(graph, entry.nodeId, selected.nodeId) && !hasPath(graph, selected.nodeId, entry.nodeId))
+    ) {
+      selected = entry;
     }
   }
-  return false;
+  if (selected === undefined) return false;
+  fillOptionalInputs(graph.nodes.get(selected.nodeId)!, registry, selected.input);
+  queued.add(selected);
+  stack.push(selected);
+  return true;
 }
 
 function isReady(node: WorkflowNode, registry: NodeRegistry, input: PortData): boolean {
@@ -1111,8 +1117,22 @@ function clonePortData(input: PortData): PortData {
   return deepClone(input);
 }
 
-function cloneRunData(input: RunData): RunData {
-  return deepClone(input);
+function outputLimitError(
+  nodeName: string,
+  output: PortData | undefined,
+  limit: number,
+): ExecutionLimitError | undefined {
+  if (output === undefined) return;
+  let count = 0;
+  for (const ports of Object.values(output)) {
+    for (const items of ports) count += items?.length ?? 0;
+  }
+  if (count > limit) {
+    return new ExecutionLimitError(
+      `Node "${nodeName}" produced ${count} items, above the limit of ${limit}`,
+    );
+  }
+  return undefined;
 }
 
 function deepClone<T>(value: T): T {

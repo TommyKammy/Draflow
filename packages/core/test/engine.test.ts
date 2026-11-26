@@ -108,6 +108,55 @@ async function execute(
 }
 
 describe('ExecutionEngine', () => {
+  it.each([
+    { partial: false, feedback: false },
+    { partial: true, feedback: false },
+    { partial: true, feedback: true },
+  ])('collects nested fan-in (partial: $partial, feedback edge: $feedback)', async ({ partial, feedback }) => {
+    const steps = ['a', 'b', 'join', 'bridge', 'end'].map((id, i) => {
+      const step = node(id, echoType.type, id, i + 2);
+      step.parameters.suffix = id === 'a' || id === 'b' ? id : '={{ $json.suffix }}';
+      return step;
+    });
+    const wf = workflow(
+      [node('t', triggerType.type, 'Trigger', 0), node('gate', branchType.type, 'Gate', 1), ...steps],
+      [
+        connect('t', 'gate'),
+        ...(feedback ? [connect('gate', 'gate', 'main', 1)] : []),
+        connect('gate', 'end'), connect('gate', 'a'), connect('gate', 'b'),
+        connect('a', 'join'), connect('b', 'join'), connect('join', 'bridge'), connect('bridge', 'end'),
+      ],
+    );
+    const result = await execute(wf, partial ? { destinationNodeId: 'end' } : {});
+    expect(result.status).toBe('success');
+    expect(result.runData.end).toHaveLength(1);
+    const items = result.runData.end?.[0]?.output?.main?.[0];
+    expect(items?.map(item => item.json.suffix)).toEqual([undefined, 'a', 'b']);
+  });
+
+  it.each(['fresh', 'pinned', 'cached'])('rejects oversized %s terminal output', async mode => {
+    const items = [1, 2, 3].map(id => ({ json: { id } }));
+    const source = { ...triggerType, execute: () => items };
+    const engine = new ExecutionEngine({ registry: new NodeRegistry().registerAll([source]) });
+    const wf = workflow([node('s', source.type, 'Source', 0)], []);
+    const previous = await engine.run(wf).done;
+    wf.settings.maxItemsPerNode = 2;
+    const options = {
+      ...(mode === 'cached' ? { runData: previous.runData } : {}),
+      ...(mode === 'pinned' ? { pinData: { s: items } } : {}),
+    };
+    const handle = engine.run(wf, options);
+    const events: string[] = [];
+    handle.on('node:start', () => events.push('start'));
+    handle.on('node:finish', ({ task }) => events.push(task.status));
+    const result = await handle.done;
+    expect(events).toEqual(mode === 'cached' ? [] : ['start', 'error']);
+    expect(result.status).toBe('error');
+    expect(result.error?.message).toMatch(/limit of 2/);
+    expect(result.runData.s?.[0]?.output).toBeUndefined();
+    expect(previous.runData.s?.[0]?.output?.main?.[0]).toHaveLength(3);
+  });
+
   it('runs a linear workflow and records run data', async () => {
     const wf = workflow(
       [node('t', triggerType.type, 'Trigger', 0), node('a', echoType.type, 'A', 200), node('b', echoType.type, 'B', 400)],

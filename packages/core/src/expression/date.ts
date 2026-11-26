@@ -64,21 +64,9 @@ export class DraflowDateTime {
 
   static fromISO(value: string, timeZone = 'UTC'): DraflowDateTime {
     const trimmed = value.trim();
-    const hasOffset = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(trimmed);
-
-    if (hasOffset) {
-      const millis = Date.parse(trimmed);
-      if (!Number.isFinite(millis)) {
-        throw new Error(`Invalid ISO date "${value}"`);
-      }
-      return new DraflowDateTime(millis, timeZone);
-    }
-
     const match =
-      /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?)?$/.exec(
-        trimmed,
-      );
-    if (match === null) {
+      /^(\d{4}|[+-]\d{6})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?)?(Z|[+-]\d{2}:?\d{2})?$/i.exec(trimmed);
+    if (match === null || match[1] === '-000000') {
       throw new Error(`Invalid ISO date "${value}"`);
     }
 
@@ -92,7 +80,27 @@ export class DraflowDateTime {
       millisecond: Number((match[7] ?? '0').padEnd(3, '0').slice(0, 3)),
       weekday: 1,
     };
-    return new DraflowDateTime(zonedTimeToUtc(parts, timeZone), timeZone);
+    if (
+      parts.month < 1 || parts.month > 12 ||
+      parts.day < 1 || parts.day > daysInMonth(parts.year, parts.month) ||
+      parts.hour > 24 || parts.minute > 59 || parts.second > 59 ||
+      (parts.hour === 24 && (parts.minute !== 0 || parts.second !== 0 || /[1-9]/.test(match[7] ?? '')))
+    ) {
+      throw new Error(`Invalid ISO date "${value}"`);
+    }
+    const offset = match[8];
+    let millis: number;
+    if (offset === undefined) {
+      millis = zonedTimeToUtc(parts, timeZone);
+    } else {
+      // Supply the time explicitly so Date.parse uses its ISO parser for early years.
+      const timestamp = match[4] === undefined
+        ? `${match[1]}-${match[2]}-${match[3]}T00:00:00${offset}`
+        : trimmed.replace(' ', 'T');
+      millis = Date.parse(timestamp);
+    }
+    if (!Number.isFinite(millis)) throw new Error(`Invalid ISO date "${value}"`);
+    return new DraflowDateTime(millis, timeZone);
   }
 
   toMillis(): number {
@@ -102,7 +110,10 @@ export class DraflowDateTime {
   toISO(): string {
     const parts = getParts(this.#millis, this.timeZone);
     const offset = getOffsetMinutes(this.#millis, this.timeZone);
-    const base = `${pad(parts.year, 4)}-${pad(parts.month, 2)}-${pad(parts.day, 2)}T${pad(parts.hour, 2)}:${pad(parts.minute, 2)}:${pad(parts.second, 2)}.${pad(parts.millisecond, 3)}`;
+    const year = parts.year >= 0 && parts.year <= 9999
+      ? pad(parts.year, 4)
+      : `${parts.year < 0 ? '-' : '+'}${pad(Math.abs(parts.year), 6)}`;
+    const base = `${year}-${pad(parts.month, 2)}-${pad(parts.day, 2)}T${pad(parts.hour, 2)}:${pad(parts.minute, 2)}:${pad(parts.second, 2)}.${pad(parts.millisecond, 3)}`;
     if (offset === 0) return `${base}Z`;
     return `${base}${formatOffset(offset, ':')}`;
   }
@@ -348,6 +359,7 @@ export function getParts(millis: number, timeZone: string): DateTimeParts {
     formatter = new Intl.DateTimeFormat('en-US', {
       timeZone,
       year: 'numeric',
+      era: 'short',
       month: '2-digit',
       day: '2-digit',
       hour: '2-digit',
@@ -365,7 +377,7 @@ export function getParts(millis: number, timeZone: string): DateTimeParts {
   }
 
   return {
-    year: Number(values.year ?? 1970),
+    year: values.era === 'BC' ? 1 - Number(values.year) : Number(values.year ?? 1970),
     month: Number(values.month ?? 1),
     day: Number(values.day ?? 1),
     hour: Number(values.hour ?? 0),
@@ -377,18 +389,15 @@ export function getParts(millis: number, timeZone: string): DateTimeParts {
 }
 
 export function zonedTimeToUtc(parts: DateTimeParts, timeZone: string): number {
-  const naive = Date.UTC(
-    parts.year,
-    parts.month - 1,
-    parts.day,
-    parts.hour,
-    parts.minute,
-    parts.second,
-    parts.millisecond,
-  );
+  const date = new Date(0);
+  date.setUTCFullYear(parts.year, parts.month - 1, parts.day);
+  date.setUTCHours(parts.hour, parts.minute, parts.second, parts.millisecond);
+  const naive = date.getTime();
+  if (!Number.isFinite(naive)) return NaN;
 
   let offset = getOffsetMinutes(naive, timeZone);
   let result = naive - offset * 60_000;
+  if (!Number.isFinite(new Date(result).getTime())) return NaN;
   const corrected = getOffsetMinutes(result, timeZone);
   if (corrected !== offset) {
     offset = corrected;
@@ -461,7 +470,9 @@ export function diff(fromMillis: number, toMillis: number, unit: DateUnit): numb
 }
 
 function daysInMonth(year: number, month: number): number {
-  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+  const date = new Date(0);
+  date.setUTCFullYear(year, month, 0);
+  return date.getUTCDate();
 }
 
 function weekdayNumber(value: string | undefined): number {
