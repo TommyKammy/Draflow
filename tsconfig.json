@@ -5,6 +5,7 @@
     { "path": "packages/nodes" },
     { "path": "packages/runtime" },
     { "path": "packages/element" },
-    { "path": "packages/storage" }
+    { "path": "packages/storage" },
+    { "path": "apps/server" }
   ]
 }

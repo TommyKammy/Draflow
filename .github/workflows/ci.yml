@@ -33,6 +33,12 @@ jobs:
       - run: pnpm size
       - run: pnpm bench:expression
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+      - name: SQLite host on the minimum supported Node version
+        run: node --test apps/server/test/*.test.mjs
+
 
   browser:
     runs-on: ubuntu-latest
