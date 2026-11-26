@@ -1,8 +1,8 @@
 import type { Workflow } from '@draflow/core';
 import { cardHeight, cardWidth, type Point } from './scene.js';
 
-const columnWidth = Math.ceil((cardWidth + 48) / 16) * 16;
-const rowHeight = Math.ceil((cardHeight + 32) / 16) * 16;
+import { groupsOf } from '../store/groups.js';
+import { groupBox } from './group-box.js';
 
 // Iterative Kosaraju. The reverse pass numbers SCCs in topological order,
 // so a single forward pass below computes their longest-path layers.
@@ -46,6 +46,38 @@ function components(out: number[][], incoming: number[][]) {
 }
 
 export function tidyPositions(workflow: Workflow, selection: ReadonlySet<string>) {
+  const groups = groupsOf(workflow);
+  if (!groups?.length) return layout(workflow, selection, cardWidth, cardHeight);
+  const nodes = new Map(workflow.nodes.map(n => [n.id, n]));
+  const unit = new Map<string, string>(), origins = new Map<string, Point>();
+  const selected = new Set(selection);
+  let width = cardWidth, height = cardHeight;
+  for (const group of groups) {
+    const rep = group.members[0]!;
+    const box = groupBox(group.members, nodes);
+    origins.set(rep, box);
+    width = Math.max(width, box.width); height = Math.max(height, box.height);
+    for (const id of group.members) unit.set(id, rep);
+    if (group.members.some(id => selection.has(id))) selected.add(rep);
+  }
+  const projected = { ...workflow, nodes: workflow.nodes.filter(n => !unit.has(n.id) || unit.get(n.id) === n.id)
+    .map(n => origins.has(n.id) ? { ...n, position: origins.get(n.id)! } : n),
+    connections: workflow.connections.map(e => ({ ...e, from: { ...e.from, node: unit.get(e.from.node) ?? e.from.node },
+      to: { ...e.to, node: unit.get(e.to.node) ?? e.to.node } })) };
+  const positions = layout(projected, selected, width, height);
+  const result = new Map<string, Point>();
+  for (const node of workflow.nodes) {
+    const rep = unit.get(node.id) ?? node.id, target = positions.get(rep);
+    if (!target) continue;
+    const origin = origins.get(rep) ?? node.position;
+    result.set(node.id, { x: target.x + node.position.x - origin.x, y: target.y + node.position.y - origin.y });
+  }
+  return result;
+}
+
+function layout(workflow: Workflow, selection: ReadonlySet<string>, width: number, height: number) {
+  const columnWidth = Math.ceil((width + 48) / 16) * 16;
+  const rowHeight = Math.ceil((height + 32) / 16) * 16;
   const positions = new Map<string, Point>();
   const nodes = selection.size ? workflow.nodes.filter(n => selection.has(n.id)) : workflow.nodes;
   if (!nodes.length) return positions;
@@ -96,14 +128,14 @@ export function tidyPositions(workflow: Workflow, selection: ReadonlySet<string>
   for (const { id, position } of workflow.nodes) {
     if (index.has(id)) continue;
     const x = position.x - originX, y = position.y - originY;
-    const left = Math.floor((x - cardWidth) / columnWidth) + 1;
-    const top = Math.floor((y - cardHeight) / rowHeight) + 1;
+    const left = Math.floor((x - width) / columnWidth) + 1;
+    const top = Math.floor((y - height) / rowHeight) + 1;
     for (const col of [left, left + 1]) {
-      if (col < 0 || col >= members.length || col >= (x + cardWidth) / columnWidth) continue;
+      if (col < 0 || col >= members.length || col >= (x + width) / columnWidth) continue;
       const rows = blocked.get(col) ?? new Set<number>();
       blocked.set(col, rows);
       for (const row of [top, top + 1]) {
-        if (row >= 0 && row < (y + cardHeight) / rowHeight) rows.add(row);
+        if (row >= 0 && row < (y + height) / rowHeight) rows.add(row);
       }
     }
   }

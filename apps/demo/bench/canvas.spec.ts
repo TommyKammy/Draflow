@@ -1,10 +1,10 @@
 import { expect, test } from '@playwright/test';
 import type {} from '@draflow/element/define';
 
-test('canvas baseline on the production embed', async ({ page, browser }, info) => {
+for (const annotated of [false, true]) test(annotated ? 'canvas with folded groups and sticky notes' : 'canvas baseline on the production embed', async ({ page, browser }, info) => {
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Manual → Set' })).toBeVisible();
-  const rendering = await page.evaluate(async () => {
+  const rendering = await page.evaluate(async annotated => {
     const editor = document.querySelector('draflow-editor')!;
     const root = editor.shadowRoot!;
     const sample = editor.workflow!;
@@ -21,7 +21,10 @@ test('canvas baseline on the production embed', async ({ page, browser }, info) 
             to: { node: String(i + stride), port: 'main', index: 0 } });
         }
       }
-      return { ...sample, nodes, connections };
+      const groups = Array.from({ length: Math.floor(size / 20) }, (_, i) => ({ id: 'g' + i, label: 'Group ' + i,
+        members: [String(i * 20), String(i * 20 + 1)], collapsed: true }));
+      const notes = groups.map((g, i) => ({ id: 'n' + i, text: g.label, x: -256, y: i * 144, width: 196, height: 112, color: 'yellow' }));
+      return { ...sample, nodes, connections, ...(annotated && { meta: { draflowEditor: { version: 1, groups, notes } } }) };
     }
     const times: Record<string, number[]> = {};
     for (const size of [50, 200]) {
@@ -41,9 +44,9 @@ test('canvas baseline on the production embed', async ({ page, browser }, info) 
       times['render' + size] = samples;
     }
     return { times, nodes: root.querySelectorAll('.node-card').length, edges: root.querySelectorAll('path').length };
-  });
+  }, annotated);
   expect(rendering.nodes).toBe(200);
-  expect(rendering.edges).toBe(500);
+  expect(rendering.edges).toBe(annotated ? 490 : 500);
   // Time the actual toolbar action through the first painted layout. Restore
   // the original fixture between samples and for the existing motion baseline.
   const tidy = page.getByRole('button', { name: '自動整列' });
@@ -146,7 +149,7 @@ test('canvas baseline on the production embed', async ({ page, browser }, info) 
     const percentile = (p: number) => +sorted[Math.ceil(p * sorted.length) - 1]!.toFixed(2);
     return [name, { samples: sorted.length, medianMs: percentile(0.5), p95Ms: percentile(0.95) }];
   }));
-  const report = { chromium: browser.version(), viewport: page.viewportSize(), dpr: 1, measurements };
+  const report = { annotated, chromium: browser.version(), viewport: page.viewportSize(), dpr: 1, measurements };
   console.log(JSON.stringify(report, null, 2));
   await info.attach('canvas-baseline.json', { body: JSON.stringify(report), contentType: 'application/json' });
   expect(measurements.firstRender50!.medianMs).toBeLessThan(100);

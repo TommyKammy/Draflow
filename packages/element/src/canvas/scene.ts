@@ -1,3 +1,5 @@
+import { groupsOf, type Group } from '../store/groups.js';
+import { groupBox, visibleBox, type Box } from './group-box.js';
 import type { Connection, NodePortRef, NodeRegistry, PortDef, Workflow, WorkflowNode } from '@draflow/core';
 
 export const cardWidth = 180;
@@ -34,21 +36,14 @@ function anchor(card: Card, ref: NodePortRef, output: boolean): Point {
 }
 
 const zero = { x: 0, y: 0 };
-function edgePath(edge: Connection, source: Card, target: Card, sourceOffset: Point, targetOffset: Point,
-  include?: (x: number, y: number) => void) {
-  const a = anchor(source, edge.from, true);
-  const b = anchor(target, edge.to, false);
-  a.x += sourceOffset.x;
-  a.y += sourceOffset.y;
-  b.x += targetOffset.x;
-  b.y += targetOffset.y;
+function edgePath(a: Point, b: Point, top: number, include?: (x: number, y: number) => void) {
   const bend = Math.max(20, Math.min(100, Math.abs(b.x - a.x) / 2));
   let d: string;
   if (a.x <= b.x) {
     d = `M ${a.x} ${a.y} C ${a.x + bend} ${a.y} ${b.x - bend} ${b.y} ${b.x} ${b.y}`;
   } else {
     // Route feedback above the cards, including a self-loop at the same height.
-    const y = Math.min(source.node.position.y + sourceOffset.y, target.node.position.y + targetOffset.y) - 24;
+    const y = top - 24;
     const right = a.x + 20, left = b.x - 20;
     d = `M ${a.x} ${a.y} Q ${right} ${a.y} ${right} ${a.y - 12} V ${y + 12} Q ${right} ${y} ${right - 12} ${y} H ${left + 12} Q ${left} ${y} ${left} ${y + 12} V ${b.y - 12} Q ${left} ${b.y} ${b.x} ${b.y}`;
     include?.(left, y);
@@ -63,6 +58,14 @@ export class CanvasScene {
   readonly #edges = document.createElementNS(svgNS, 'svg');
   readonly #paths = new Map<string, SVGPathElement>();
   #connections: Connection[] = [];
+  groups: Group[] | undefined = [];
+  owner = new Map<string, string>();
+  boxes = new Map<string, Box>();
+  collapsed = new Set<string>();
+  #boundaryOutputs = new Map<string, Point>();
+  #boundaryInputs = new Map<string, Point>();
+  #nodes = new Map<string, WorkflowNode>();
+  positionGroup?: (id: string, box: Box) => void;
   bounds: Bounds | undefined;
   #locale: keyof typeof words = 'en';
   #pins: Workflow['pinData'];
@@ -75,16 +78,31 @@ export class CanvasScene {
     this.world.append(this.#edges);
   }
 
-  setWorkflow(workflow: Workflow, registry: NodeRegistry) {
+  setWorkflow(workflow: Workflow, registry: NodeRegistry, overrides: ReadonlyMap<string, boolean>) {
     this.#pins = workflow.pinData;
     this.#connections = workflow.connections;
     this.bounds = undefined;
+    this.groups = groupsOf(workflow);
+    this.owner.clear(); this.boxes.clear(); this.collapsed.clear(); this.#nodes.clear();
+    if (this.groups?.length) {
+      for (const n of workflow.nodes) this.#nodes.set(n.id, n);
+      for (const group of this.groups) {
+        const folded = overrides.get(group.id) ?? group.collapsed;
+        const box = visibleBox(groupBox(group.members, this.#nodes), folded);
+        if (folded) this.collapsed.add(group.id);
+        this.boxes.set(group.id, box);
+        this.include(box.x, box.y); this.include(box.x + box.width, box.y + box.height);
+        for (const id of group.members) this.owner.set(id, group.id);
+      }
+    }
     const oldCards = new Set(this.cards.keys());
     for (const node of workflow.nodes) {
       oldCards.delete(node.id);
-      this.include(node.position.x, node.position.y);
-      this.include(node.position.x + cardWidth, node.position.y + cardHeight);
+      const hidden = this.collapsed.has(this.owner.get(node.id)!);
+      if (!hidden) this.include(node.position.x, node.position.y);
+      if (!hidden) this.include(node.position.x + cardWidth, node.position.y + cardHeight);
       const previous = this.cards.get(node.id);
+      if (previous) previous.element.hidden = hidden;
       if (previous?.node === node) continue;
       const type = registry.get(node.type, node.typeVersion);
       const inputs = type?.ports.inputs ?? [];
@@ -93,6 +111,7 @@ export class CanvasScene {
         outputs.push({ type: 'error' });
       }
       const element = this.cards.get(node.id)?.element ?? document.createElement('button');
+      element.hidden = hidden;
       element.type = 'button';
       element.className = 'node-card';
       element.dataset.nodeId = node.id;
@@ -127,15 +146,40 @@ export class CanvasScene {
       this.cards.get(id)?.element.remove();
       this.cards.delete(id);
     }
+    this.#boundaryOutputs.clear();
+    this.#boundaryInputs.clear();
+    if (this.collapsed.size) {
+      const inputs = new Map<string, string[]>(), outputs = new Map<string, string[]>();
+      function append(lists: Map<string, string[]>, group: string | undefined, edgeId: string) {
+        if (group === undefined) return;
+        const edges = lists.get(group);
+        if (edges) edges.push(edgeId);
+        else lists.set(group, [edgeId]);
+      }
+      for (const edge of workflow.connections) {
+        const from = this.foldedGroup(edge.from.node), to = this.foldedGroup(edge.to.node);
+        if (from === to) continue;
+        append(outputs, from, edge.id); append(inputs, to, edge.id);
+      }
+      for (const [lists, anchors] of [[inputs, this.#boundaryInputs], [outputs, this.#boundaryOutputs]] as const) {
+        for (const [group, edges] of lists) {
+          const box = this.boxes.get(group)!;
+          const x = box.x + (lists === outputs ? box.width : 0);
+          edges.forEach((edge, i) => anchors.set(edge, { x, y: box.y + box.height * (i + 1) / (edges.length + 1) }));
+        }
+      }
+    }
     const oldEdges = new Set(this.#paths.keys());
     for (const edge of workflow.connections) {
       const source = this.cards.get(edge.from.node);
       const target = this.cards.get(edge.to.node);
       if (!source || !target) continue;
+      const from = this.foldedGroup(edge.from.node), to = this.foldedGroup(edge.to.node);
+      if (from !== undefined && from === to) continue;
       oldEdges.delete(edge.id);
       const path = this.#paths.get(edge.id) ?? document.createElementNS(svgNS, 'path');
       path.dataset.edgeId = edge.id;
-      const d = edgePath(edge, source, target, zero, zero, (x, y) => this.include(x, y));
+      const d = this.route(edge, source, target, zero, zero, (x, y) => this.include(x, y));
       if (path.getAttribute('d') !== d) path.setAttribute('d', d);
       if (!path.parentNode) this.#edges.append(path);
       this.#paths.set(edge.id, path);
@@ -147,17 +191,35 @@ export class CanvasScene {
     this.setLocale(this.#locale);
   }
 
+  private foldedGroup(node: string) {
+    const id = this.owner.get(node);
+    return id !== undefined && this.collapsed.has(id) ? id : undefined;
+  }
+
+  private route(edge: Connection, source: Card, target: Card, sourceOffset: Point, targetOffset: Point,
+    include?: (x: number, y: number) => void) {
+    const a = this.#boundaryOutputs.get(edge.id) ?? anchor(source, edge.from, true);
+    const b = this.#boundaryInputs.get(edge.id) ?? anchor(target, edge.to, false);
+    const sourceTop = this.boxes.get(this.foldedGroup(edge.from.node)!)?.y ?? source.node.position.y;
+    const targetTop = this.boxes.get(this.foldedGroup(edge.to.node)!)?.y ?? target.node.position.y;
+    return edgePath({ x: a.x + sourceOffset.x, y: a.y + sourceOffset.y }, { x: b.x + targetOffset.x, y: b.y + targetOffset.y },
+      Math.min(sourceTop + sourceOffset.y, targetTop + targetOffset.y), include);
+  }
+
   previewMove(ids: Set<string>) {
     const cards = [...ids].map(id => this.cards.get(id)!);
     const adjacent = this.#connections.filter(edge => ids.has(edge.from.node) || ids.has(edge.to.node));
+    const affected = new Set([...ids].map(id => this.owner.get(id)));
+    const groups = this.groups?.filter(g => affected.has(g.id)) ?? [];
     return (offset: Point) => {
+      for (const g of groups) this.positionGroup?.(g.id, visibleBox(groupBox(g.members, this.#nodes, ids, offset), this.collapsed.has(g.id)));
       for (const card of cards) {
         card.element.style.transform = offset.x || offset.y ? `translate(${offset.x}px,${offset.y}px)` : '';
       }
       for (const edge of adjacent) {
         const source = this.cards.get(edge.from.node), target = this.cards.get(edge.to.node);
         if (!source || !target) continue;
-        this.#paths.get(edge.id)?.setAttribute('d', edgePath(edge, source, target,
+        this.#paths.get(edge.id)?.setAttribute('d', this.route(edge, source, target,
           ids.has(edge.from.node) ? offset : zero, ids.has(edge.to.node) ? offset : zero));
       }
     };

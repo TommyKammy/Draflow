@@ -1,9 +1,12 @@
+import type { Group } from '../store/groups.js';
 import type { Note } from '../store/notes.js';
 import { parseWorkflow, type NodePortRef, type Workflow } from '@draflow/core';
 import { compatible, fragment, type Edit } from '../store/edit.js';
 import type { CanvasScene, Point } from './scene.js';
 
 export interface EditActions {
+  editGroup(group: Group): void;
+  selectionChanged(): void;
   openNote(note: Note): void;
   openDetails(id: string): void;
   enabled(): boolean;

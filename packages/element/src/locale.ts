@@ -1,5 +1,7 @@
 export type Locale = 'en' | 'ja';
 const japanese: Record<string, string> = {
+  Group: 'グループ', 'Group nodes': 'グループ化', 'Edit group': 'グループを編集', 'Group name': 'グループ名',
+  Ungroup: 'グループ解除', Expand: '展開', Collapse: '折りたたむ',
   'Add sticky note': '付箋を追加', 'Sticky note': '付箋', 'Move sticky note': '付箋を移動', 'Note text': '本文',
   Color: '色', yellow: '黄色', blue: '青', green: '緑', pink: 'ピンク', Width: '幅', Height: '高さ', Save: '保存', Delete: '削除',
   'Connect nodes': 'ノードを接続', 'Output port': '出力ポート', 'Input port': '入力ポート',
