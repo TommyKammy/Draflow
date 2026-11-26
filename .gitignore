@@ -1,0 +1,68 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+.pnpm-debug.log*
+
+# Build output
+dist/
+build/
+out/
+*.tsbuildinfo
+*.tsbuildinfo.*
+
+# Tests, coverage, browser artifacts
+coverage/
+.nyc_output/
+test-results/
+playwright-report/
+blob-report/
+.vitest/
+*.lcov
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+secrets.json
+credentials.json
+.npmrc
+.npmrc.*
+!.npmrc.example
+
+# Local n8n analysis workspaces (kept outside the repository)
+/n8n/
+/n8n-rea-artifact/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor and local tooling
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.opencode/
+.claude/
+.cache/
+.tmp/
+tmp/
+
+# Package and profiling artifacts
+*.tgz
+*.cpuprofile
+*.heapsnapshot
