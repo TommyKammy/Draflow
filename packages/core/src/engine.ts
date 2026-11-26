@@ -109,8 +109,16 @@ interface ExecEntry {
   nodeId: string;
   input: PortData;
   source: Array<SourceRef | null>;
+  itemSources?: ItemSources;
   runIndex: number;
 }
+
+interface ItemSource {
+  source: SourceRef;
+  itemIndex: number;
+}
+
+type ItemSources = Record<string, Array<Array<ItemSource | null>>>;
 
 const DEFAULT_LIMITS: ExecutionLimits = {
   maxNodeExecutions: 10_000,
@@ -243,6 +251,7 @@ export class ExecutionEngine {
     const queued = new Set<ExecEntry>();
     const nextRunIndices = new Map<string, number>();
     const currentRunIndices = new Map<string, number>();
+    const runItemSources = new Map<string, ItemSources>();
     for (const entry of stack) nextRunIndices.set(entry.nodeId, 1);
     let executionIndex = nextExecutionIndex(runData);
     let lastKey = '';
@@ -355,6 +364,9 @@ export class ExecutionEngine {
             task: existing,
           });
           markCurrentRunIndex(currentRunIndices, node.id, entry.runIndex);
+          if (entry.itemSources !== undefined) {
+            runItemSources.set(`${node.id}:${entry.runIndex}`, entry.itemSources);
+          }
           if (destination !== undefined && entry.nodeId === destination) break;
           this.#route(
             graph,
@@ -393,6 +405,7 @@ export class ExecutionEngine {
           signal: run.controller.signal,
           executionIndex,
           currentRunIndices,
+          itemSourcesByRun: runItemSources,
         });
         executionIndex += 1;
 
@@ -402,6 +415,9 @@ export class ExecutionEngine {
           runData[node.id] = tasks;
         }
         markCurrentRunIndex(currentRunIndices, node.id, entry.runIndex);
+        if (entry.itemSources !== undefined) {
+          runItemSources.set(`${node.id}:${entry.runIndex}`, entry.itemSources);
+        }
 
         run.bus.emit('node:finish', {
           runId: run.runId,
@@ -477,6 +493,7 @@ export class ExecutionEngine {
     signal: AbortSignal;
     executionIndex: number;
     currentRunIndices: Map<string, number>;
+    itemSourcesByRun: Map<string, ItemSources>;
   }): Promise<TaskData> {
     const { node, nodeType, entry, runData, pinData, graph, workflow } = input;
     const settings = resolveNodeSettings(node);
@@ -546,6 +563,7 @@ export class ExecutionEngine {
       signal: input.signal,
       pinData,
       currentRunIndices: input.currentRunIndices,
+      itemSourcesByRun: input.itemSourcesByRun,
     });
 
     const execute = nodeType.execute;
@@ -687,6 +705,7 @@ export class ExecutionEngine {
     signal: AbortSignal;
     pinData: Record<string, Item[]>;
     currentRunIndices: Map<string, number>;
+    itemSourcesByRun: Map<string, ItemSources>;
   }): NodeContext {
     const { node, nodeType, entry, input: portData, runData, graph, workflow } = input;
     const items = primaryItems(portData);
@@ -711,7 +730,8 @@ export class ExecutionEngine {
               : tasks[runIndex];
           return task?.output?.['main']?.[outputIndex] ?? [];
         },
-        resolveItem: (name) => resolveItemLineage(name, itemIndex, entry, graph, runData),
+        resolveItem: (name) =>
+          resolveItemLineage(name, itemIndex, entry, graph, runData, input.itemSourcesByRun),
         nodeNames: [...graph.byName.keys()],
         vars: engine.#vars,
         timezone: input.timezone,
@@ -862,6 +882,18 @@ export class ExecutionEngine {
 
       if (items.length > 0) {
         appendPortItems(entry.input, connection.to.port, connection.to.index, items);
+        appendItemSources(
+          entry,
+          connection.to.port,
+          connection.to.index,
+          items.length,
+          {
+            node: node.id,
+            port: connection.from.port,
+            index: connection.from.index,
+            runIndex,
+          },
+        );
       } else {
         const ports = (entry.input[connection.to.port] ??= []);
         ports[connection.to.index] ??= [];
@@ -1023,6 +1055,21 @@ function appendPortItems(input: PortData, port: string, index: number, items: It
   ports[index] = [...current, ...items];
 }
 
+function appendItemSources(
+  entry: ExecEntry,
+  port: string,
+  index: number,
+  count: number,
+  source: SourceRef,
+): void {
+  const itemSources = (entry.itemSources ??= {});
+  const portSources = (itemSources[port] ??= []);
+  const sources = (portSources[index] ??= []);
+  for (let itemIndex = 0; itemIndex < count; itemIndex += 1) {
+    sources.push({ source, itemIndex });
+  }
+}
+
 function primaryItems(input: PortData): Item[] {
   return portItems(input, 'main', 0);
 }
@@ -1176,9 +1223,27 @@ function resolveItemLineage(
   entry: ExecEntry,
   graph: WorkflowGraph,
   runData: RunData,
+  itemSourcesByRun: Map<string, ItemSources>,
 ): Item | undefined {
   const target = graph.byName.get(targetName) ?? graph.nodes.get(targetName);
   if (target === undefined) return undefined;
+
+  const itemSource = entry.itemSources?.['main']?.[0]?.[itemIndex];
+  if (itemSource !== undefined && itemSource !== null) {
+    const task = runData[itemSource.source.node]?.[itemSource.source.runIndex];
+    const items = task?.output?.[itemSource.source.port]?.[itemSource.source.index] ?? [];
+    const item = items[itemSource.itemIndex];
+    if (item !== undefined) {
+      return followLineage(
+        item,
+        itemSource.source,
+        target.id,
+        runData,
+        itemSourcesByRun,
+        0,
+      );
+    }
+  }
 
   const source = entry.source[0] ?? null;
   if (source === null) return undefined;
@@ -1188,7 +1253,7 @@ function resolveItemLineage(
   const item = items[itemIndex];
   if (item === undefined) return undefined;
 
-  return followLineage(item, source, target.id, runData, 0);
+  return followLineage(item, source, target.id, runData, itemSourcesByRun, 0);
 }
 
 function followLineage(
@@ -1196,6 +1261,7 @@ function followLineage(
   source: SourceRef | null,
   targetId: string,
   runData: RunData,
+  itemSourcesByRun: Map<string, ItemSources>,
   depth: number,
 ): Item | undefined {
   if (source === null || depth > 64) return undefined;
@@ -1213,12 +1279,39 @@ function followLineage(
 
   for (const pairing of pairings) {
     const inputIndex = pairing.input ?? 0;
+    const taskSources = itemSourcesByRun.get(`${source.node}:${source.runIndex}`);
+    const perItem = taskSources?.['main']?.[inputIndex]?.[pairing.item];
+    if (perItem !== undefined && perItem !== null) {
+      const nextTask = runData[perItem.source.node]?.[perItem.source.runIndex];
+      const nextItems =
+        nextTask?.output?.[perItem.source.port]?.[perItem.source.index] ?? [];
+      const nextItem = nextItems[perItem.itemIndex];
+      if (nextItem !== undefined) {
+        const found = followLineage(
+          nextItem,
+          perItem.source,
+          targetId,
+          runData,
+          itemSourcesByRun,
+          depth + 1,
+        );
+        if (found !== undefined) return found;
+      }
+    }
+
     const inputItems = task.input?.main?.[inputIndex] ?? [];
     const nextItem = inputItems[pairing.item];
     if (nextItem === undefined) continue;
 
     const nextSource = task.source?.[inputIndex] ?? null;
-    const found = followLineage(nextItem, nextSource, targetId, runData, depth + 1);
+    const found = followLineage(
+      nextItem,
+      nextSource,
+      targetId,
+      runData,
+      itemSourcesByRun,
+      depth + 1,
+    );
     if (found !== undefined) return found;
   }
 

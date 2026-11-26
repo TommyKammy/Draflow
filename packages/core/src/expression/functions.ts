@@ -5,6 +5,7 @@ import { DraflowDateTime } from './date.js';
 export interface ExtensionContext {
   source: string;
   timezone: string;
+  nowMillis: number;
   invoke(fn: unknown, args: unknown[]): unknown;
 }
 
@@ -400,7 +401,10 @@ function callDateTime(
     case 'diffTo':
       return value.diffTo(asDateTime(args[0], ctx), unitArg(args[1]));
     case 'diffToNow':
-      return value.diffToNow(unitArg(args[0]));
+      return value.diffTo(
+        DraflowDateTime.fromMillis(ctx.nowMillis, value.timeZone),
+        unitArg(args[0]),
+      );
     case 'beginningOf':
       return value.beginningOf(beginningArg(args[0]));
     case 'endOfMonth':

@@ -708,6 +708,72 @@ describe('ExecutionEngine', () => {
     expect(([] as unknown[])[0]).toBeUndefined();
   });
 
+  it('preserves per-item producer lineage across same-port fan-in', async () => {
+    const seedType: NodeType = {
+      ...triggerType,
+      type: 'test.seedTwo',
+      execute() {
+        return [{ json: { id: 'a' } }, { json: { id: 'b' } }];
+      },
+    };
+    const choose = (type: string, id: string): NodeType => ({
+      ...echoType,
+      type,
+      execute(ctx) {
+        const output: Item[] = [];
+        ctx.items.forEach((item, index) => {
+          if (item.json.id === id) {
+            output.push({ ...item, pairedItem: { item: index, input: 0 } });
+          }
+        });
+        return output;
+      },
+    });
+    const joinType: NodeType = {
+      ...echoType,
+      type: 'test.lineageJoin',
+      parameters: [{ name: 'sourceId', label: 'Source', type: 'string', default: '' }],
+      execute(ctx) {
+        return ctx.items.map((item, index) => ({
+          json: { id: item.json.id ?? null, sourceId: ctx.param<string>('sourceId', index, '') },
+          pairedItem: { item: index, input: 0 },
+        }));
+      },
+    };
+    const local = new NodeRegistry().registerAll([
+      seedType,
+      choose('test.chooseA', 'a'),
+      choose('test.chooseB', 'b'),
+      joinType,
+    ]);
+
+    const joinNode = node('join', joinType.type, 'Join', 400);
+    joinNode.parameters = { sourceId: '={{ $("Seed").item.json.id }}' };
+
+    const wf = workflow(
+      [
+        node('seed', seedType.type, 'Seed', 0),
+        node('a', 'test.chooseA', 'A', 200),
+        node('b', 'test.chooseB', 'B', 200),
+        joinNode,
+      ],
+      [
+        connect('seed', 'a'),
+        connect('seed', 'b'),
+        connect('a', 'join'),
+        connect('b', 'join'),
+      ],
+    );
+
+    const result = await execute(wf, {}, new ExecutionEngine({ registry: local }));
+    expect(result.status).toBe('success');
+    const items = result.runData.join?.[0]?.output?.main?.[0] ?? [];
+    expect(items.map((item) => item.json)).toEqual([
+      { id: 'a', sourceId: 'a' },
+      { id: 'b', sourceId: 'b' },
+    ]);
+  });
+
   it('stops runaway loops at the execution limit', async () => {
     const loopType: NodeType = {
       ...echoType,

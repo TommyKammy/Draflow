@@ -1051,7 +1051,7 @@ export interface CredentialProvider {
 | `element`（キャンバス + NDV + Creator + Logs） | 120 KB |
 | 合計 | **215 KB** |
 
-**実測（Phase 1 完了時点）**: core 36.8 KB gzip + nodes 7.9 KB gzip = **44.8 KB gzip**。
+**実測（Phase 1 完了時点）**: core 37.3 KB gzip + nodes 7.9 KB gzip = **45.2 KB gzip**。
 （`pnpm size` で計測。ファイルごとの gzip 合計なので保守的。）
 | 初回描画（50 ノード） | < 100ms |
 | パン/ズーム（200 ノード / 500 エッジ） | 60fps |

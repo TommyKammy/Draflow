@@ -156,6 +156,12 @@ describe('ExpressionEngine', () => {
     ).toBe('2026-10-26');
   });
 
+  it('uses the injected expression clock for current-date operations', () => {
+    expect(evaluate('={{ DateTime.now().toISO() }}')).toBe('2026-11-26T08:30:00.000Z');
+    expect(evaluate('={{ $now.diffToNow("days") }}')).toBe(0);
+    expect(evaluate('={{ DateTime.now().diffToNow("days") }}')).toBe(0);
+  });
+
   it('counts member and call chains against the evaluation budget', () => {
     const depthLimited = new ExpressionEngine({ timezone: 'UTC', maxDepth: 3 });
     expect(() => depthLimited.resolve('={{ "a".trim().trim().trim() }}', context)).toThrow(

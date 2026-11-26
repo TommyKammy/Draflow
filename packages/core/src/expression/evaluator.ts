@@ -77,6 +77,7 @@ export interface EvaluatorOptions {
   source: string;
   data: Record<string, unknown>;
   timezone?: string;
+  nowMillis?: number;
   maxSteps?: number;
   maxDepth?: number;
 }
@@ -85,6 +86,7 @@ export class Evaluator {
   readonly #source: string;
   readonly #data: Record<string, unknown>;
   readonly #timezone: string;
+  readonly #nowMillis: number;
   readonly #maxSteps: number;
   readonly #maxDepth: number;
   #steps = 0;
@@ -94,6 +96,7 @@ export class Evaluator {
     this.#source = options.source;
     this.#data = options.data;
     this.#timezone = options.timezone ?? 'UTC';
+    this.#nowMillis = options.nowMillis ?? Date.now();
     this.#maxSteps = options.maxSteps ?? 100_000;
     this.#maxDepth = options.maxDepth ?? 64;
   }
@@ -525,6 +528,7 @@ export class Evaluator {
       return callExtension(receiver, name, args, {
         source: this.#source,
         timezone: receiver.timeZone,
+        nowMillis: this.#nowMillis,
         invoke: (fn, values) => this.invoke(fn, values),
       });
     }
@@ -537,6 +541,7 @@ export class Evaluator {
     return callExtension(receiver, name, args, {
       source: this.#source,
       timezone: this.#timezone,
+      nowMillis: this.#nowMillis,
       invoke: (fn, values) => this.invoke(fn, values),
     });
   }

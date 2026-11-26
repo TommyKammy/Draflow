@@ -184,7 +184,7 @@ export function createDataProxy(ctx: ExpressionContext): Record<string, unknown>
       isArray: new HostFunction('Array.isArray', (value) => Array.isArray(value)),
     },
     DateTime: {
-      now: new HostFunction('DateTime.now', () => new DraflowDateTime(Date.now(), timezone)),
+      now: new HostFunction('DateTime.now', () => new DraflowDateTime(nowMillis, timezone)),
       fromISO: new HostFunction('DateTime.fromISO', (value) =>
         DraflowDateTime.fromISO(String(value), timezone),
       ),

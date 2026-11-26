@@ -111,6 +111,7 @@ export class ExpressionEngine {
       source,
       data,
       timezone: ctx.timezone ?? this.timezone,
+      nowMillis: ctx.now?.getTime() ?? Date.now(),
       maxSteps: this.#maxSteps,
       maxDepth: this.#maxDepth,
     });

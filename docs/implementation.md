@@ -16,8 +16,8 @@
 | 実行 | スタック、waiting（複数入力）、runIndex、リトライ、エラー 3 モード、ピン、無効化、executeOnce、部分実行、実行制限 |
 | ノード | Manual / NoOp / Set / If / Filter / Merge / HTTP Request |
 | 永続化 | JSON の読み書き、検証、デフォルト適用 |
-| テスト | 83 tests（core 61 / nodes 22） |
-| サイズ | core 36.8 KB gzip + nodes 7.9 KB gzip = **44.8 KB gzip** |
+| テスト | 85 tests（core 63 / nodes 22） |
+| サイズ | core 37.3 KB gzip + nodes 7.9 KB gzip = **45.2 KB gzip** |
 
 ---
 
@@ -256,11 +256,11 @@ pnpm test
 ✓ packages/core/test/graph.test.ts         (4)
 ✓ packages/core/test/parameters.test.ts    (5)
 ✓ packages/core/test/serialize.test.ts     (7)
-✓ packages/core/test/expression.test.ts   (19)
-✓ packages/core/test/engine.test.ts       (24)
+✓ packages/core/test/expression.test.ts   (20)
+✓ packages/core/test/engine.test.ts       (25)
 ✓ packages/nodes/test/nodes.test.ts       (22)
 ──────────────────────────────────────────────
-83 tests passed
+85 tests passed
 ```
 
 型チェック:
@@ -283,20 +283,20 @@ pnpm size
 ```
 package        files      raw       gzip
 ------------------------------------------
-core              21  173.5 KB   36.8 KB
+core              21  176.2 KB   37.3 KB
 nodes              9   27.3 KB    7.9 KB
 ------------------------------------------
-total                 200.8 KB   44.8 KB
+total                 203.4 KB   45.2 KB
 ```
 
 gzip はファイルごとの gzip の合計（保守的な見積もり）。
-設計目標の 250 KB に対して、コアは **44.8 KB**。
+設計目標の 250 KB に対して、コアは **45.2 KB**。
 
 ---
 
 ## 8.1 Codex レビュー対応
 
-PR #1 のレビュー指摘 13 件、追加 9 件、追加 5 件、追加 4 件、追加 3 件、追加 4 件、合計 38 件をすべて修正し、回帰テストを追加した。
+PR #1 のレビュー指摘 13 件、追加 9 件、追加 5 件、追加 4 件、追加 3 件、追加 4 件、追加 2 件、合計 40 件をすべて修正し、回帰テストを追加した。
 
 | 指摘 | 対応 |
 | --- | --- |
@@ -364,7 +364,14 @@ PR #1 のレビュー指摘 13 件、追加 9 件、追加 5 件、追加 4 件�
 | 外部 abort listener が run 終了後も残る | 実行完了時に forwarding listener を解除 |
 | displayOptions の短縮形 `{ gte: 2 }` が効かない | `_cnd` と短縮形の両方を正規化して評価 |
 
-テストは 79 件から **83 件**に増えている。
+追加レビュー（7 回目）:
+
+| 指摘 | 対応 |
+| --- | --- |
+| 同一入力ポートの fan-in で producer の系譜が上書きされる | item ごとに producer と producer 内 index を保持し、lineage 解決に使用 |
+| `DateTime.now()` / `diffToNow()` が注入時計を無視する | expression context の now を DateTime と diffToNow に伝播 |
+
+テストは 83 件から **85 件**に増えている。
 
 ## 9. デモ
 
