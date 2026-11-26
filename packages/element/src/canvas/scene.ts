@@ -82,8 +82,8 @@ export class CanvasScene {
     const oldCards = new Set(this.cards.keys());
     for (const node of workflow.nodes) {
       oldCards.delete(node.id);
-      this.#include(node.position.x, node.position.y);
-      this.#include(node.position.x + cardWidth, node.position.y + cardHeight);
+      this.include(node.position.x, node.position.y);
+      this.include(node.position.x + cardWidth, node.position.y + cardHeight);
       const previous = this.cards.get(node.id);
       if (previous?.node === node) continue;
       const type = registry.get(node.type, node.typeVersion);
@@ -135,7 +135,7 @@ export class CanvasScene {
       oldEdges.delete(edge.id);
       const path = this.#paths.get(edge.id) ?? document.createElementNS(svgNS, 'path');
       path.dataset.edgeId = edge.id;
-      const d = edgePath(edge, source, target, zero, zero, (x, y) => this.#include(x, y));
+      const d = edgePath(edge, source, target, zero, zero, (x, y) => this.include(x, y));
       if (path.getAttribute('d') !== d) path.setAttribute('d', d);
       if (!path.parentNode) this.#edges.append(path);
       this.#paths.set(edge.id, path);
@@ -163,7 +163,7 @@ export class CanvasScene {
     };
   }
 
-  #include(x: number, y: number) {
+  include(x: number, y: number) {
     const bounds = this.bounds ??= { left: x, right: x, top: y, bottom: y };
     bounds.left = Math.min(bounds.left, x);
     bounds.right = Math.max(bounds.right, x);

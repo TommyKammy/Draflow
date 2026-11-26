@@ -1,3 +1,4 @@
+import { editNote, type Note } from './notes.js';
 import { createConnection, createId, createNode, type Connection, type Item, type NodePortRef, type NodeType, type WorkflowNode, type Workflow } from '@draflow/core';
 import type { Point } from '../canvas/scene.js';
 
@@ -20,6 +21,7 @@ export function creatorPorts(type: NodeType, placement: Placement) {
 }
 
 export type Edit =
+  | { type: 'note'; id: string; value?: Note }
   | { type: 'configure'; node: WorkflowNode; removeErrorOutput?: boolean; removePin?: boolean }
   | { type: 'pin'; id: string; items: Item[] | undefined }
   | { type: 'move'; positions: Map<string, Point> }
@@ -44,6 +46,7 @@ export function fragment(workflow: Workflow, ids: Set<string>): Workflow {
 
 export function applyEdit(w: Workflow, edit: Edit): Workflow {
   switch (edit.type) {
+    case 'note': return editNote(w, edit.id, edit.value);
     case 'pin': {
       const pinData = { ...w.pinData };
       if (edit.items === undefined) delete pinData[edit.id];

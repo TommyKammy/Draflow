@@ -137,3 +137,29 @@ test('tidying and undoing a layout keep the clean upstream HTTP result', async (
     expect(await state.evaluate(s => s.calls)).toBe(1);
   }
 });
+
+test('sticky edits retain pins, the current result and cached HTTP output', async ({ page }) => {
+  const state = await mockHttp(page, 'success');
+  await page.evaluate(() => {
+    const el = document.querySelector('draflow-editor')!;
+    el.workflow = { ...el.workflow!, pinData: { manual: [{ json: { pinned: true } }] } };
+  });
+  const runStep = () => page.evaluate(() => document.querySelector('draflow-editor')!.runNode('set').done.then(r => r.status));
+  expect(await runStep()).toBe('success');
+  const log = page.getByRole('region', { name: 'Execution log' });
+  const initialLog = await log.innerText();
+  const output = page.locator('draflow-editor pre');
+  const initialOutput = await output.innerText();
+  await page.getByRole('button', { name: 'Add sticky note' }).click();
+  const dialog = page.getByRole('dialog');
+  await dialog.getByLabel('Note text').fill('Review');
+  await dialog.getByRole('button', { name: 'Save' }).click();
+  await page.getByRole('button', { name: 'Sticky note · Review' }).click();
+  await dialog.getByLabel('Note text').fill('Reviewed');
+  await dialog.getByRole('button', { name: 'Save' }).click();
+  expect(await log.innerText()).toBe(initialLog);
+  expect(await output.innerText()).toBe(initialOutput);
+  expect(await page.evaluate(() => document.querySelector('draflow-editor')!.workflow!.pinData)).toEqual({ manual: [{ json: { pinned: true } }] });
+  expect(await runStep()).toBe('success');
+  expect(await state.evaluate(s => s.calls)).toBe(1);
+});

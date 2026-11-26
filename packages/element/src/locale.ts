@@ -1,5 +1,7 @@
 export type Locale = 'en' | 'ja';
 const japanese: Record<string, string> = {
+  'Add sticky note': '付箋を追加', 'Sticky note': '付箋', 'Move sticky note': '付箋を移動', 'Note text': '本文',
+  Color: '色', yellow: '黄色', blue: '青', green: '緑', pink: 'ピンク', Width: '幅', Height: '高さ', Save: '保存', Delete: '削除',
   'Connect nodes': 'ノードを接続', 'Output port': '出力ポート', 'Input port': '入力ポート',
   Connect: '接続', Cancel: 'キャンセル', 'No compatible input': '接続可能な入力がありません',
   'Execute previous nodes': '上流ノードを実行', 'Execute step': 'このノードを実行', Stop: '停止',
