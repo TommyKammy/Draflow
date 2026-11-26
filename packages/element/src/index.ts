@@ -1,5 +1,5 @@
 import {
-  ExecutionEngine, NodeRegistry, createWorkflow,
+  ExecutionEngine, NodeRegistry, buildGraph, createWorkflow, downstreamOf,
   type EngineEvents, type ExecutionEngineOptions, type NodeType,
   type RunData, type TaskData, type RunHandle, type RunOptions, type RunResult, type Workflow,
 } from '@draflow/core';
@@ -87,10 +87,10 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
   let cached: RunData | undefined;
   const dirty = new Set<string>();
   const displayed = new Map<string, TaskData>();
-  const oldInputs = new Map<string, TaskData>();
+  const previewInputs = new Map<string, TaskData>();
   const details = nodeDetails({ registry, engine, canEdit,
     get: id => workflow.nodes.find(n => n.id === id),
-    task: id => displayed.get(id) ?? oldInputs.get(id),
+    task: id => previewInputs.get(id),
     output: id => displayed.get(id)?.output,
     commit: (node, control) => {
       const before = workflow.nodes.find(n => n.id === node.id);
@@ -170,13 +170,20 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
         before.disabled !== after.disabled) changed.add(after.id);
     });
     if (structural || changed.size) {
-      const priorInputs = new Map(oldInputs);
-      oldInputs.clear();
-      if (structural) { cached = undefined; dirty.clear(); }
-      else for (const id of changed) {
-        dirty.add(id);
-        const task = displayed.get(id) ?? priorInputs.get(id);
-        if (task) oldInputs.set(id, task);
+      if (structural) {
+        cached = undefined;
+        dirty.clear();
+        previewInputs.clear();
+      } else {
+        // A configuration edit changes this node's output, but not its incoming items.
+        const newlyDirty = [...changed].filter(id => !dirty.has(id));
+        if (newlyDirty.length && previewInputs.size) {
+          const graph = buildGraph(next);
+          for (const id of newlyDirty) {
+            for (const downstream of downstreamOf(graph, id)) previewInputs.delete(downstream);
+          }
+        }
+        for (const id of newlyDirty) dirty.add(id);
       }
       displayed.clear();
       details.refreshData();
@@ -228,7 +235,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     cached = undefined;
     dirty.clear();
     displayed.clear();
-    oldInputs.clear();
+    previewInputs.clear();
     lastControl = undefined;
     title.textContent = workflow.name;
     creator.dialog.close();
@@ -286,7 +293,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     canvas.cancelEdit();
     active = handle;
     displayed.clear();
-    oldInputs.clear();
+    previewInputs.clear();
     details.refresh();
     canvas.scene.resetRun();
     output.textContent = '';
@@ -301,6 +308,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
       }),
       handle.on('node:finish', detail => {
         displayed.set(detail.nodeId, detail.task);
+        previewInputs.set(detail.nodeId, detail.task);
         const count = Object.values(detail.task.output ?? {}).reduce(
           (total, ports) => total + ports.reduce((sum, items) => sum + (items?.length ?? 0), 0), 0,
         );

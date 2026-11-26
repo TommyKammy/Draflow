@@ -160,3 +160,34 @@ test('inspects a step on a narrow screen and groups typing into one undo', async
   await page.getByRole('button', { name: '元に戻す' }).click();
   await expect(page.locator('.node-card')).toHaveCount(2);
 });
+
+test('keeps unaffected preview inputs across edits and invalidates downstream inputs', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.locator('[data-node-id="set"]')).toBeVisible();
+  await page.evaluate(async () => {
+    const editor = document.querySelector('draflow-editor')!;
+    const workflow = editor.workflow!;
+    workflow.nodes.push({ id: 'if', name: 'If', type: 'draflow.if', typeVersion: 1,
+      position: { x: 440, y: 0 }, parameters: { conditions: { combinator: 'and',
+        conditions: [{ left: '={{ $json.message }}', operator: 'equals', right: 'Hello Draflow' }] } } });
+    workflow.connections.push({ id: 'set-if', from: { node: 'set', port: 'main', index: 0 },
+      to: { node: 'if', port: 'main', index: 0 } });
+    editor.workflow = workflow;
+    await editor.run({ triggerData: { main: [[{ json: { amount: 42 } }]] } }).done;
+  });
+  const dialog = page.getByRole('dialog');
+  const branch = page.locator('[data-node-id="if"]');
+  const close = dialog.getByRole('button', { name: 'Close' });
+  await branch.dblclick();
+  await dialog.getByLabel('Right', { exact: true }).fill('changed');
+  await close.click();
+  await page.locator('[data-node-id="set"]').dblclick();
+  const value = dialog.getByLabel('Value', { exact: true });
+  await value.fill('={{ $json.amount }}');
+  await expect(dialog.locator('form').getByText('42', { exact: true })).toBeVisible({ timeout: 2000 });
+  await value.fill('={{ $json.amount + 1 }}');
+  await expect(dialog.locator('form').getByText('43', { exact: true })).toBeVisible({ timeout: 2000 });
+  await close.click();
+  await branch.dblclick();
+  await expect(dialog.getByText('No preview input', { exact: true })).toBeVisible();
+});
