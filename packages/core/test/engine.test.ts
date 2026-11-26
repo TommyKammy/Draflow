@@ -326,6 +326,17 @@ describe('ExecutionEngine', () => {
     expect(result.runData.after).toBeDefined();
   });
 
+  it('executes an unpinned node whose id names an inherited property', async () => {
+    const wf = workflow([node('toString', triggerType.type, 'Trigger', 0)], []);
+    const result = await execute(wf);
+    expect(result.status).toBe('success');
+    expect(result.runData['toString']?.[0]?.output?.main?.[0]?.[0]?.json).toEqual({ started: true });
+
+    const pinData = { toString: [{ json: { pinned: true } }] };
+    const pinned = await execute(wf, { pinData });
+    expect(pinned.runData['toString']?.[0]?.output?.main?.[0]?.[0]?.json).toEqual({ pinned: true });
+  });
+
   it('uses pinned data without executing the node', async () => {
     let calls = 0;
     const counted: NodeType = {

@@ -548,7 +548,7 @@ export class ExecutionEngine {
       };
     }
 
-    const pinned = pinData[node.id];
+    const pinned = Object.hasOwn(pinData, node.id) ? pinData[node.id] : undefined;
     if (pinned !== undefined) {
       const output = normalizeOutput(pinned);
       return {

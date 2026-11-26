@@ -350,11 +350,11 @@ export class Evaluator {
       case '<':
         return lessThan(left, right);
       case '<=':
-        return lessThan(left, right) || relationalEqual(left, right);
+        return lessThanOrEqual(left, right);
       case '>':
         return lessThan(right, left);
       case '>=':
-        return lessThan(right, left) || relationalEqual(left, right);
+        return lessThanOrEqual(right, left);
       case 'in':
         return isIn(left, right);
       default:
@@ -600,17 +600,12 @@ function lessThan(left: unknown, right: unknown): boolean {
   return Number(left) < Number(right);
 }
 
-function relationalEqual(left: unknown, right: unknown): boolean {
-  if (left === right) return true;
-  if (typeof left === 'string' && typeof right === 'string') return false;
-  if (left === null || right === null || left === undefined || right === undefined) {
-    return false;
-  }
-  return Number(left) === Number(right);
+function lessThanOrEqual(left: unknown, right: unknown): boolean {
+  if (typeof left === 'string' && typeof right === 'string') return left <= right;
+  return Number(left) <= Number(right);
 }
 
 function isIn(left: unknown, right: unknown): boolean {
-  if (Array.isArray(right)) return right.some((entry) => entry === left);
-  if (isPlainObject(right)) return Object.prototype.hasOwnProperty.call(right, String(left));
+  if (Array.isArray(right) || isPlainObject(right)) return Object.hasOwn(right, String(left));
   return false;
 }

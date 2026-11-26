@@ -122,6 +122,23 @@ describe('ExpressionEngine', () => {
     expect(evaluate('=before {{ 1 // }}\n + 2 }} after')).toBe('before 3 after');
   });
 
+  it('checks array properties by key with in', () => {
+    expect(evaluate('={{ 0 in [10, 20] }}')).toBe(true);
+    expect(evaluate('={{ 10 in [10, 20] }}')).toBe(false);
+    expect(evaluate('={{ "1" in [10, undefined] }}')).toBe(true);
+    expect(evaluate('={{ "length" in [] }}')).toBe(true);
+  });
+
+  it.each(['<=', '>='])('coerces null and preserves unordered operands for %s', operator => {
+    for (const [left, right] of [['0', 'null'], ['null', '0'], ['null', 'null']]) {
+      expect(evaluate(`={{ ${left} ${operator} ${right} }}`)).toBe(true);
+    }
+    for (const operand of ['undefined', '(0 / 0)']) {
+      expect(evaluate(`={{ ${operand} ${operator} ${operand} }}`)).toBe(false);
+      expect(evaluate(`={{ null ${operator} ${operand} }}`)).toBe(false);
+    }
+  });
+
   it('supports nullish, comparisons, and ternary', () => {
     expect(evaluate('={{ $json.missing ?? "fallback" }}')).toBe('fallback');
     expect(evaluate('={{ $json.age > 18 ? "adult" : "minor" }}')).toBe('adult');
