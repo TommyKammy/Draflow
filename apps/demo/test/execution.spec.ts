@@ -71,7 +71,11 @@ for (const action of ['stop', 'switch'] as const) {
     await expect.poll(() => state.evaluate(s => s.calls)).toBe(1);
     await expect(page.getByRole('button', { name: 'Tidy Up' })).toBeDisabled();
     if (action === 'stop') {
-      await page.getByRole('button', { name: 'Stop', exact: true }).click();
+      await expect(page.getByRole('button', { name: 'Stop', exact: true })).toBeVisible();
+      await page.getByRole('button', { name: 'Command palette' }).click();
+      await expect(page.getByRole('listbox').getByRole('option', { disabled: false })).toHaveCount(2);
+      await expect(page.getByRole('option', { name: 'Fit view' })).toBeEnabled();
+      await page.getByRole('option', { name: 'Stop', exact: true }).click();
       await expect(log).toContainText('canceled');
     } else {
       await state.evaluate(s => s.switchDocument());

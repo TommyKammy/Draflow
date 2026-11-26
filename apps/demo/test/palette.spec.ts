@@ -1,0 +1,93 @@
+import { expect, test } from '@playwright/test';
+import { openEnglishDemo } from './locale.js';
+import type {} from '@draflow/element/define';
+
+test('keyboard search, selection, focus restoration and Node Creator handoff', async ({ page }) => {
+  await openEnglishDemo(page);
+  const canvas = page.locator('.canvas');
+  await canvas.focus();
+  await page.keyboard.press('Control+k');
+  const search = page.getByRole('combobox', { name: 'Search commands' });
+  await expect(search).toBeFocused();
+  await expect(page.getByRole('option', { name: 'Group nodes' })).toBeDisabled();
+  await search.fill('add');
+  await search.press('ArrowDown');
+  await expect(page.getByRole('option', { name: 'Add sticky note' })).toHaveAttribute('aria-selected', 'true');
+  await search.press('ArrowUp');
+  await search.press('Enter');
+  await expect(page.getByRole('searchbox', { name: 'Search nodes' })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await canvas.focus();
+  await page.keyboard.press('Meta+k');
+  await search.fill('不存在');
+  await expect(page.getByText('No matching commands')).toBeVisible();
+  await search.press('Escape');
+  await expect(canvas).toBeFocused();
+  await page.locator('[data-node-id=set]').click();
+  await page.keyboard.press('Control+k');
+  await page.getByRole('option', { name: 'Group nodes' }).click();
+  await expect(page.getByLabel('Group name')).toBeVisible();
+  await page.keyboard.press('Escape');
+  const launcher = page.getByRole('button', { name: 'Command palette' });
+  await launcher.click();
+  await search.fill('整列');
+  await search.press('Enter');
+  await expect(page.getByRole('button', { name: 'Undo', exact: true })).toBeEnabled();
+  await launcher.click();
+  await search.fill('run');
+  await search.press('Enter');
+  await expect(page.getByRole('status')).toHaveText('Set · 1 item');
+});
+
+test.describe('narrow touchscreen', () => {
+  test.use({ viewport: { width: 360, height: 700 }, hasTouch: true });
+  test('Japanese touch search and readonly availability', async ({ page }) => {
+    await page.goto('/');
+    await page.locator('draflow-editor').evaluate(el => el.setAttribute('locale', 'ja'));
+    const launcher = page.getByRole('button', { name: 'コマンドパレット' });
+    await launcher.tap();
+    const search = page.getByRole('combobox', { name: 'コマンドを検索' });
+    await search.fill('付箋');
+    await page.getByRole('option', { name: '付箋を追加' }).tap();
+    await expect(page.getByRole('textbox', { name: '本文' })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await page.locator('draflow-editor').evaluate(el => el.setAttribute('readonly', ''));
+    await launcher.tap();
+    await expect(page.getByRole('listbox').getByRole('option', { disabled: false })).toHaveCount(1);
+    await page.getByRole('option', { name: '全体表示' }).tap();
+    await expect(launcher).toBeFocused();
+  });
+});
+
+test('shortcuts are scoped to the focused editor and respect IME and modal input', async ({ page }) => {
+  await openEnglishDemo(page);
+  await page.evaluate(() => {
+    const editor = document.querySelector('draflow-editor')!;
+    const other = document.createElement('draflow-editor');
+    other.nodeTypes = editor.nodeTypes;
+    other.workflow = editor.workflow;
+    other.setAttribute('locale', 'en');
+    document.body.append(other, document.createElement('input'));
+  });
+  const host = page.locator('body > input');
+  await host.focus();
+  await host.press('Control+k');
+  await expect(host).toBeFocused();
+  const editors = page.locator('draflow-editor');
+  const second = editors.nth(1);
+  const canvas = second.locator('.canvas');
+  await canvas.focus();
+  await canvas.dispatchEvent('keydown', { key: 'k', ctrlKey: true, isComposing: true });
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await canvas.press('Control+k');
+  await expect(second.getByRole('combobox')).toBeFocused();
+  await expect(editors.first().getByRole('dialog')).toHaveCount(0);
+  const search = second.getByRole('combobox');
+  await search.dispatchEvent('keydown', { key: 'Enter', isComposing: true });
+  await expect(search).toBeFocused();
+  await search.press('Escape');
+  await second.locator('[data-node-id=set]').dblclick();
+  await page.keyboard.press('Control+k');
+  await expect(second.locator('.node-details')).toBeVisible();
+  await expect(second.locator('.command-palette')).toBeHidden();
+});

@@ -74,6 +74,13 @@ export const styles = `
   .view-controls button { background:transparent; color:CanvasText; font-size:13px; padding:5px 9px; min-width:30px }
   .view-controls button:hover { background:color-mix(in srgb, CanvasText 8%, Canvas) }
   .view-controls span { font:12px/1.5 ui-monospace,monospace; min-width:4ch; text-align:center }
+  .command-palette {box-sizing:border-box;width:min(26rem,94vw);max-height:90dvh;overflow:auto;background:Canvas;color:CanvasText;border:1px solid GrayText;border-radius:8px}
+  .command-palette input {box-sizing:border-box;width:100%;font:inherit;padding:.45rem}
+  .command-palette [role=listbox] {margin:.5rem 0;max-height:50dvh;overflow:auto}
+  .command-palette [role=option] {padding:.45rem .65rem;cursor:pointer;border-radius:4px}
+  .command-palette [aria-selected=true] {background:Highlight;color:HighlightText}
+  .command-palette [aria-disabled=true] {color:GrayText;cursor:default}
+  .command-palette p:empty {display:none}
   dialog { color-scheme:inherit }
   :where(button,select,input,textarea,summary):focus-visible { outline:2px solid Highlight; outline-offset:2px }
   .node-details { box-sizing:border-box; width:min(74rem,96vw); max-height:90vh; overflow:auto; color:CanvasText; background:Canvas;

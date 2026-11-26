@@ -1,3 +1,4 @@
+import { commandPalette } from './command-palette.js';
 import { groupDialog } from './group-dialog.js';
 import { noteDialog } from './sticky.js';
 import {
@@ -173,7 +174,27 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
   saveState.setAttribute('aria-live', 'polite');
   const retry = tool(() => saves.flush());
   tools.append(add, connect, addNote, group, tidy, remove, backward, forward, saveState, retry);
-  shell.append(header, tools, canvas.panel, outputTitle, status, output, log.panel, groupForm.dialog, sticky.dialog, wiring.dialog, creator.dialog, details.dialog);
+  const palette = commandPalette([
+    { id: 'add', label: () => selectedEdge ? 'Insert node' : 'Add node', control: add },
+    { id: 'fit', label: 'Fit view', control: canvas.fitButton },
+    { id: 'tidy', label: 'Tidy Up', control: tidy },
+    { id: 'group', label: 'Group nodes', control: group },
+    { id: 'note', label: 'Add sticky note', control: addNote },
+    { id: 'run', label: 'Run workflow', control: button },
+    { id: 'stop', label: 'Stop', control: stopButton },
+  ], locale);
+  const commands = tool(() => { commands.focus(); palette.open(); });
+  commands.setAttribute('aria-keyshortcuts', 'Control+K Meta+K');
+  header.append(commands);
+  shell.addEventListener('keydown', e => {
+    if (e.defaultPrevented || e.isComposing || e.keyCode === 229 || e.altKey || e.shiftKey ||
+        !(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'k' || shell.querySelector('dialog[open]')) return;
+    if (e.target instanceof HTMLElement && (e.target.isContentEditable || e.target.closest('input,textarea,select'))) return;
+    e.preventDefault();
+    e.stopPropagation();
+    palette.open();
+  }, { capture: true });
+  shell.append(palette.dialog, header, tools, canvas.panel, outputTitle, status, output, log.panel, groupForm.dialog, sticky.dialog, wiring.dialog, creator.dialog, details.dialog);
   root.append(style, shell);
 
   function updateButton() {
@@ -185,6 +206,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
 
   function refreshEditing() {
     const ja = shell.lang === 'ja';
+    commands.textContent = translator(locale())('Command palette');
     tools.hidden = readonly;
     add.textContent = selectedEdge ? (ja ? '接続にノードを挿入' : 'Insert node') : (ja ? 'ノードを追加' : 'Add node');
     remove.textContent = ja ? '削除' : 'Delete';
@@ -205,6 +227,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     add.disabled = !canEdit() || !catalog.some(t => !t.meta.hidden);
     backward.disabled = !canEdit() || !history.canUndo;
     forward.disabled = !canEdit() || !history.canRedo;
+    palette.refresh();
     retry.hidden = !saves.error;
     saveState.textContent = saves.error || (options.ports?.storage
       ? (saves.activePending ? (ja ? '未保存' : 'Unsaved') : (ja ? '保存済み' : 'Saved')) : '');
@@ -303,6 +326,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     previewInputs.clear();
     lastControl = undefined;
     title.textContent = workflow.name;
+    palette.dialog.close();
     groupForm.dialog.close();
     sticky.dialog.close();
     wiring.dialog.close();
@@ -472,6 +496,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
       const nextLocale = settings.locale;
       const localeChanged = nextLocale !== undefined && nextLocale !== shell.lang;
       if (localeChanged || (settings.readonly !== undefined && settings.readonly !== readonly)) {
+        palette.dialog.close();
         details.flush();
         details.close();
         groupForm.dialog.close();
