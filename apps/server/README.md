@@ -27,3 +27,22 @@ Use `receipt` with a run ID, `detail` with workflow and run IDs, and `deactivate
 `pnpm --filter @draflow/server test` exercises real database files and SIGKILL at four boundaries. CI also runs the compiled tests on Node 22.13.0. The browser suite opens recovered completed and interrupted records in P7.
 
 Run `node apps/server/test/latency.mjs` after the build to measure 100 serial events against a fresh local file. With a two-node workflow and one item on the development machine, p95 admission was 1.03 ms, queue wait 1 ms, and engine time 1 ms. Use 5 ms p95 for each stage as the initial local regression budget for this unloaded fixture. Queue and engine timestamps have millisecond resolution. Disk, load and workflow costs affect these values independently.
+
+## HTTP credentials
+
+Publish an HTTP Request node with `typeVersion: 2`, `parameters.authentication: "credential"`, and a reference such as `credentials: { "httpAuth": "orders-read" }`. Place only the reference in the workflow. The browser can edit and export the document and inspect server history. An editor run that requires this credential fails before fetching.
+
+For the CLI, set `DRAFLOW_HTTP_AUTH_FILE` to a server-local JSON file and populate the named secret in the server process environment. This example grants one node access to one API origin:
+
+```json
+{
+  "grants": [
+    { "workflowId": "orders", "nodeId": "api", "origin": "https://api.example.com", "id": "orders-read", "kind": "apiKey", "header": "X-API-Key" }
+  ],
+  "environment": { "orders-read": "ORDERS_READ_KEY" }
+}
+```
+
+Use `"kind": "bearer"` for an Authorization bearer token. Embedded hosts can pass `httpAuth: { grants, resolve(id) }` to NodeHost. The transport checks the workflow, node, slot and exact origin before calling the provider. Authenticated requests use HTTPS (loopback HTTP is supported for local services), reject conflicting credential headers and disable redirects.
+
+The server limits each standard HTTP response to 1 MiB by default. Configure `maxHttpResponseBytes` or `DRAFLOW_HTTP_MAX_RESPONSE_BYTES` to override it. Both v1 and v2 count streamed body bytes and cancel oversized responses, including error bodies. A successful response supplies its ordinary business data to subsequent nodes and the existing execution-history policy. A response reflecting the credential value in text or a decoded JSON key/value fails before reaching workflow output. Server-side failures retain the HTTP status or a diagnostic category; upstream error bodies, status text, response headers, transport exceptions and provider exceptions are excluded from history.

@@ -1,6 +1,6 @@
 import type { NodeType } from '@draflow/core';
 import { filterNode } from './filter.js';
-import { httpRequestNode } from './http.js';
+import { httpRequestNode, httpRequestNodeV2 } from './http.js';
 import { ifNode } from './if.js';
 import { manualTriggerNode } from './manual.js';
 import { mergeNode } from './merge.js';
@@ -8,7 +8,7 @@ import { noOpNode } from './noop.js';
 import { setNode } from './set.js';
 
 export { filterNode } from './filter.js';
-export { httpRequestNode } from './http.js';
+export { httpRequestNode, httpRequestNodeV2 } from './http.js';
 export { ifNode } from './if.js';
 export { manualTriggerNode } from './manual.js';
 export { mergeNode } from './merge.js';
@@ -24,4 +24,5 @@ export const standardNodes: NodeType[] = [
   filterNode,
   mergeNode,
   httpRequestNode,
+  httpRequestNodeV2,
 ];

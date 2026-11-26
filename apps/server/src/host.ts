@@ -2,9 +2,12 @@ import { setImmediate as yieldToHost } from 'node:timers/promises';
 import { isPlainObject, type ExecutionEngineOptions, type Workflow } from '@draflow/core';
 import { MemoryRuntime, type TriggerEvent } from '@draflow/runtime';
 import type { ExecutionSummary } from '@draflow/storage';
+import { serverHttp, type HttpAuth } from './http-auth.js';
 import { SqliteLedger } from './sqlite.js';
 
-interface HostOptions extends ExecutionEngineOptions {
+interface HostOptions extends Omit<ExecutionEngineOptions, 'credentialFetch'> {
+  httpAuth?: HttpAuth;
+  maxHttpResponseBytes?: number;
   capacity?: number;
   dedupMs?: number;
   maxDetailBytes?: number;
@@ -13,6 +16,7 @@ interface HostOptions extends ExecutionEngineOptions {
 
 export class NodeHost {
   readonly #ledger: SqliteLedger;
+  readonly #engine: ExecutionEngineOptions;
   readonly #capacity: number;
   readonly #ttl: number;
   #stopping = false;
@@ -30,11 +34,15 @@ export class NodeHost {
     for (const n of [this.#capacity, this.#ttl, budget]) {
       if (!Number.isSafeInteger(n) || n < 0) throw new RangeError('Invalid host limit');
     }
+    this.#engine = {
+      ...options,
+      credentialFetch: serverHttp(options.fetch ?? fetch, options.maxHttpResponseBytes ?? 1024 * 1024, options.httpAuth),
+    };
     this.#ledger = new SqliteLedger(path, budget);
     try {
       this.#ledger.recover();
       for (const row of this.#ledger.requiredPublications()) {
-        new MemoryRuntime(options).restore(
+        new MemoryRuntime(this.#engine).restore(
           this.#ledger.publication(String(row.workflowId), Number(row.revision)),
         );
       }
@@ -65,14 +73,14 @@ export class NodeHost {
 
   publish(workflow: Workflow): number {
     this.#ready();
-    const runtime = new MemoryRuntime(this.options);
+    const runtime = new MemoryRuntime(this.#engine);
     runtime.saveDraft(workflow);
     return this.#ledger.publish(runtime.publish(workflow.id).workflow);
   }
 
   activate(id: string, revision: number) {
     this.#ready();
-    new MemoryRuntime(this.options).restore(this.#ledger.publication(id, revision));
+    new MemoryRuntime(this.#engine).restore(this.#ledger.publication(id, revision));
     this.#ledger.activate(id, revision);
   }
 
@@ -129,7 +137,7 @@ export class NodeHost {
       const { receipt: r, items } = job;
       const publication = this.#ledger.publication(r.workflowId, r.revision);
       // Run the accepted revision even after a replacement or deactivation.
-      const runtime = new MemoryRuntime(this.options);
+      const runtime = new MemoryRuntime(this.#engine);
       runtime.restore(publication);
       await runtime.activate(r.workflowId, r.revision);
       const { result } = await runtime.fire(r.workflowId, r.triggerNodeId, {
