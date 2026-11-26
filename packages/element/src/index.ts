@@ -1,3 +1,5 @@
+import { executionHistory } from './execution-history.js';
+import { recordExecution } from './record-execution.js';
 import { commandPalette } from './command-palette.js';
 import { groupDialog } from './group-dialog.js';
 import { noteDialog } from './sticky.js';
@@ -16,7 +18,7 @@ import { tidyPositions } from './canvas/tidy.js';
 import { createCanvas } from './canvas/view.js';
 import { Autosave } from './store/autosave.js';
 import { History, applyEdit, type Edit } from './store/edit.js';
-import type { WorkflowStore } from '@draflow/storage';
+import type { ExecutionStore, WorkflowStore } from '@draflow/storage';
 import { styles } from './styles.js';
 
 export interface EditorOptions {
@@ -25,7 +27,7 @@ export interface EditorOptions {
   theme?: 'auto' | 'light' | 'dark';
   locale?: 'en' | 'ja';
   readonly?: boolean;
-  ports?: Pick<ExecutionEngineOptions, 'clock' | 'fetch'> & { storage?: WorkflowStore };
+  ports?: Pick<ExecutionEngineOptions, 'clock' | 'fetch'> & { storage?: WorkflowStore; executions?: ExecutionStore };
   onChange?: (workflow: Workflow, meta: ChangeMeta) => void;
   onRun?: (event: EditorRunEvent) => void;
 }
@@ -195,6 +197,13 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     palette.open();
   }, { capture: true });
   shell.append(palette.dialog, header, tools, canvas.panel, outputTitle, status, output, log.panel, groupForm.dialog, sticky.dialog, wiring.dialog, creator.dialog, details.dialog);
+  const executions = options.ports?.executions;
+  const archive = executions && executionHistory(executions, () => workflow, () => !readonly, translator(locale()));
+  if (archive) {
+    header.append(archive.button);
+    header.after(archive.warning);
+    shell.append(archive.dialog);
+  }
   root.append(style, shell);
 
   function updateButton() {
@@ -318,6 +327,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
   }
 
   function resetView() {
+    archive?.reset();
     details.close();
     log.reset();
     cached = undefined;
@@ -412,6 +422,12 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
       refresh();
       throw error;
     }
+    if (executions && archive && snapshot.settings.saveExecutionData !== 'none') {
+      const visible = () => !disposed && snapshot.id === workflow.id;
+      recordExecution(executions, handle, snapshot, runOptions,
+        () => { if (visible()) void archive.refresh(); },
+        error => { if (visible()) archive.failed(error); });
+    }
     log.start(handle.id, snapshot.name);
     groupForm.dialog.close();
     sticky.dialog.close();
@@ -496,6 +512,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
       const nextLocale = settings.locale;
       const localeChanged = nextLocale !== undefined && nextLocale !== shell.lang;
       if (localeChanged || (settings.readonly !== undefined && settings.readonly !== readonly)) {
+        archive?.reset();
         palette.dialog.close();
         details.flush();
         details.close();
@@ -513,6 +530,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
         details = makeDetails();
         oldDialog.replaceWith(details.dialog);
         log.setLocale(translator(nextLocale));
+        archive?.setLocale(translator(nextLocale));
       }
       if (settings.readonly !== undefined && settings.readonly !== readonly) {
         readonly = settings.readonly;
@@ -537,6 +555,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
       details.flush();
       details.close();
       disposed = true;
+      archive?.reset();
       lifetime.abort();
       saves.flush();
       abandon();

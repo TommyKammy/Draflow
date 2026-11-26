@@ -77,6 +77,9 @@ export const styles = `
   .expression-suggestions {max-height:10rem;overflow:auto;background:Canvas;color:CanvasText;border:1px solid GrayText}
   .expression-suggestions [role=option] {padding:.35rem .6rem;cursor:pointer;overflow-wrap:anywhere}
   .expression-suggestions [aria-selected=true] {background:Highlight;color:HighlightText}
+  .execution-history {box-sizing:border-box;width:min(42rem,94vw);max-height:90dvh;overflow:auto;background:Canvas;color:CanvasText;border:1px solid GrayText;border-radius:8px}
+  .execution-history li {margin-block:.5rem;overflow-wrap:anywhere}
+  header+p:empty {display:none}
   .command-palette {box-sizing:border-box;width:min(26rem,94vw);max-height:90dvh;overflow:auto;background:Canvas;color:CanvasText;border:1px solid GrayText;border-radius:8px}
   .command-palette input {box-sizing:border-box;width:100%;font:inherit;padding:.45rem}
   .command-palette [role=listbox] {margin:.5rem 0;max-height:50dvh;overflow:auto}

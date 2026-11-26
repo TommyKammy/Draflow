@@ -107,6 +107,32 @@ const editor = createWorkflowEditor(host, {
 const unmount = () => { editor.destroy(); host.remove(); };
 ```
 
+## 実行履歴を有効にする
+
+ホストが `ports.executions` にストアを渡すと「実行履歴」が表示される。デモはページ内だけで共有するメモリストアを使用する。ワークフローの自動保存とは個別に設定できる。
+
+```ts
+import { MemoryExecutionStore } from '@draflow/storage';
+
+const executions = new MemoryExecutionStore({ maxRecords: 20, maxDetailBytes: 4 * 1024 * 1024 });
+editor.ports = { ...editor.ports, executions }; // Web Component の初期設定時に渡す
+```
+
+文書の設定 `settings.saveExecutionData` が `none` の場合は記録を停止し、`error` の場合はエラーで終わった実行だけを保存する。省略時または `all` ではすべて記録する。
+
+一覧は現在の文書の実行を開始時刻の新しい順に表示する。部分実行は開始・終了の指定と終点を含むかを表示し、今回開始したタスクと再利用したタスクの件数を分ける。「実行結果をクリア」後も履歴は残る。履歴の「削除」はその1件だけを消す。閲覧専用でも一覧と状態フィルターを使える。
+
+永続化するホストは `@draflow/storage` の `ExecutionStore` を実装し、ストアの保持期間・容量を決める。
+
+| メソッド | 契約 |
+| --- | --- |
+| `append(summary, detail)` | 完了または停止した実行を保存する。同じ文書 ID・実行 ID は1件にまとめる。詳細には実行開始時の文書と、その実行が実際に訪れたタスクを順に格納する。 |
+| `list(workflowId, status?)` | 新しい順のサマリーと `hasDetail` を返す。一覧取得にタスクの入出力は不要。 |
+| `get(workflowId, id)` | 対象の詳細を取得する。存在しない場合や容量超過で省略した場合は `null` を返す。 |
+| `delete(workflowId, id)` | 指定した文書の実行を削除する。すでに削除済みでも呼び出せる。 |
+
+同梱ストアの既定値は全ワークフロー合計20件、詳細合計4 MiB。詳細を JSON にしたときの UTF-8 バイト数で計算し、件数・容量が超過すると開始時刻が古い記録から削除する。単独で容量を超える詳細は省略して、サマリーを残す。ページの再読み込みでメモリ履歴は消える。ストアへの書き込みは非同期で、実行結果の表示は保存完了を待たない。
+
 ## 再検証
 
 ```sh

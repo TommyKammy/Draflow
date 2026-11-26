@@ -40,7 +40,7 @@ test('commits one snapped drag, restores deleted connections, saves and reloads'
   await page.reload();
   await expect(card).toBeVisible();
   expect(await documentState(page)).toEqual(moved);
-  await page.getByRole('button', { name: '実行' }).click();
+  await page.getByRole('button', { name: '実行', exact: true }).click();
   await expect(page.getByRole('status')).toHaveText('Set · 1件');
 });
 
