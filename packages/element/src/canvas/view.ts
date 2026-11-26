@@ -318,7 +318,7 @@ export function createCanvas(host: HTMLElement, registry: NodeRegistry, actions:
   const observer = new ResizeObserver(() => { if (fitting) fitView(); });
   observer.observe(surface);
   return {
-    panel, scene, fitView,
+    panel, scene, fitView, fitButton,
     refreshGroups, focusGroup: groups.focus,
     resetGroupView() {
       if (overrides.size) { overrides.clear(); updateScene(actions.document()); select(new Set([...selected].filter(id => !scene.cards.get(id)?.element.hidden))); }
