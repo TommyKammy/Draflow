@@ -73,7 +73,11 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
   header.append(title, button, stopButton);
   const log = executionLog(clearExecution, translator(options.locale ?? 'en'));
   let history = new History();
-  const saves = new Autosave(options.ports?.storage, () => { if (!disposed) refreshEditing(); });
+  const saves = new Autosave(options.ports?.storage, () => { if (!disposed) refreshEditing(); }, (workflowId, message) => {
+    if (!disposed) host.dispatchEvent(new CustomEvent('draflow-toast', {
+      detail: { workflowId, message }, bubbles: true, composed: true,
+    }));
+  });
   saves.open(workflow);
   const canEdit = () => !disposed && !readonly && !active;
   const catalog = registry.types().map(id => registry.require(id));

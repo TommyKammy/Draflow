@@ -9,12 +9,13 @@
   },
   "scripts": {
     "build": "tsc -b tsconfig.json && pnpm --filter @draflow/demo build",
-    "typecheck": "tsc -b tsconfig.json && tsc -p tsconfig.test.json && tsc -p apps/demo/tsconfig.json",
+    "typecheck": "tsc -b tsconfig.json && tsc -p tsconfig.test.json && tsc -p apps/demo/tsconfig.json && tsc -p apps/demo/consumer/tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "size": "node scripts/size-report.mjs",
     "dev": "tsc -b tsconfig.json && pnpm --filter @draflow/demo dev",
     "test:browser": "playwright test",
+    "bench:expression": "node apps/demo/bench/expression.mjs",
     "bench:canvas": "playwright test -c playwright.bench.config.ts"
   },
   "devDependencies": {

@@ -1,5 +1,5 @@
-import type { NodeType, RunOptions, Workflow } from '@draflow/core';
-import { createWorkflowEditor, type EditorOptions, type WorkflowEditor } from './index.js';
+import type { EngineEvents, NodeType, RunOptions, Workflow } from '@draflow/core';
+import { createWorkflowEditor, type ChangeMeta, type EditorOptions, type WorkflowEditor } from './index.js';
 
 export interface DraflowEditorElement extends HTMLElement {
   workflow: Workflow | undefined;
@@ -18,6 +18,16 @@ export interface DraflowEditorElement extends HTMLElement {
 }
 
 declare global {
+  interface HTMLElementEventMap {
+    'draflow-ready': CustomEvent<null>;
+    'draflow-change': CustomEvent<ChangeMeta & { workflow: Workflow }>;
+    'draflow-selection': CustomEvent<{ nodeIds: string[] }>;
+    'draflow-toast': CustomEvent<{ workflowId: string; message: string }>;
+    'draflow-run-start': CustomEvent<EngineEvents['run:start']>;
+    'draflow-node-start': CustomEvent<EngineEvents['node:start']>;
+    'draflow-node-finish': CustomEvent<EngineEvents['node:finish']>;
+    'draflow-run-finish': CustomEvent<EngineEvents['run:finish']>;
+  }
   interface HTMLElementTagNameMap {
     'draflow-editor': DraflowEditorElement;
   }

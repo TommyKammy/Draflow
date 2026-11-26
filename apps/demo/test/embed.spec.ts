@@ -68,3 +68,16 @@ test('changing presentation retains the output and applies readonly', async ({ p
   await expect(page.getByRole('button', { name: 'Run workflow' })).toBeDisabled();
   await expect(page.locator('draflow-editor pre')).toContainText('Hello Draflow');
 });
+
+test('runs the HTTP example using the host mock', async ({ page }) => {
+  const outbound: string[] = [];
+  page.on('request', request => {
+    if (new URL(request.url()).hostname === 'example.test') outbound.push(request.url());
+  });
+  await page.goto('/?example=mock-http');
+  await expect(page.getByRole('heading', { name: 'Manual → HTTP' })).toBeVisible();
+  await page.getByRole('button', { name: '実行', exact: true }).click();
+  await expect(page.getByRole('status')).toHaveText('HTTP · 1件');
+  expect(JSON.parse(await page.locator('draflow-editor pre').innerText())).toEqual([{ amount: 42 }]);
+  expect(outbound).toEqual([]);
+});

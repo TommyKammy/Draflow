@@ -10,8 +10,10 @@ The goal is not to reimplement n8n's 1,000 integrations. The goal is to port the
 **core loop** — run, inspect, wire, re-run — in a package small enough to embed in
 any web app.
 
-> The embedded editor can run a Manual → Set workflow and display its output.
-> See the [Phase 2 plan](docs/phase2-plan.md) for the editing milestones.
+The browser demo includes a persistent blank canvas, a Manual → Set example,
+and an HTTP example with a host-supplied mock. Follow the
+[embedding guide](docs/embedding.md) to build Manual → Set → If and embed
+the editor using either the custom element or the vanilla API.
 
 ## Quick start
 

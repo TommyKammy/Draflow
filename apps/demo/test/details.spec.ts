@@ -3,20 +3,30 @@ import { expect, test } from '@playwright/test';
 import type {} from '@draflow/element/define';
 
 test('authors Set and If, reloads, then executes the edited branch and its undo', async ({ page }) => {
-  await openEnglishDemo(page);
-  await expect(page.getByRole('heading', { name: 'Manual → Set' })).toBeVisible();
-  await page.evaluate(() => {
-    const editor = document.querySelector('draflow-editor')!;
-    editor.workflow = { ...editor.workflow!, nodes: [], connections: [] };
-  });
+  await page.goto('/');
+  await page.getByLabel('ワークフローを選択').selectOption('workspace');
+  await page.getByRole('button', { name: '開く', exact: true }).click();
+  await expect(page.getByRole('heading', { name: '作業用キャンバス' })).toBeVisible();
+  await setEnglish(page);
+  const documentState = () => page.evaluate(() => document.querySelector('draflow-editor')!.workflow!);
+  expect((await documentState()).nodes).toEqual([]);
   const dialog = page.getByRole('dialog');
-  const selected = page.locator('.node-card[aria-pressed=true]');
-  await page.getByRole('button', { name: 'Add node' }).click();
-  await dialog.getByRole('button', { name: 'Manual Trigger' }).click();
-  await selected.locator('.output').click();
-  await dialog.getByRole('button', { name: 'Edit Fields (Set)' }).click();
-  const set = page.locator('.node-card').filter({ hasText: 'Edit Fields (Set)' });
-  const branch = page.locator('.node-card').filter({ hasText: 'If' });
+  const canvas = page.getByRole('group', { name: 'Workflow canvas' });
+  async function addNode(name: string) {
+    await page.getByRole('button', { name: 'Add node' }).click();
+    await dialog.getByRole('button', { name, exact: true }).click();
+  }
+  async function connect(from: string, to: string) {
+    await page.getByRole('button', { name: 'Connect nodes' }).click();
+    await dialog.getByLabel('Output port').selectOption({ label: from + ' · main[0]' });
+    await dialog.getByLabel('Input port').selectOption({ label: to + ' · main[0]' });
+    await dialog.getByRole('button', { name: 'Connect', exact: true }).click();
+  }
+  await addNode('Manual Trigger');
+  await addNode('Edit Fields (Set)');
+  await connect('Manual Trigger', 'Edit Fields (Set)');
+  const set = canvas.getByRole('button', { name: /^Edit Fields/ });
+  const branch = canvas.getByRole('button', { name: /^If / });
   const close = dialog.getByRole('button', { name: 'Close' });
   const step = dialog.getByRole('button', { name: 'Execute step' });
   await set.dblclick();
@@ -24,15 +34,31 @@ test('authors Set and If, reloads, then executes the edited branch and its undo'
   await dialog.getByLabel('Name', { exact: true }).fill('color');
   await dialog.getByLabel('Value', { exact: true }).fill('green');
   await close.click();
-  await set.locator('.output').click();
-  await dialog.getByRole('button', { name: 'If', exact: true }).click();
+  await addNode('If');
+  await connect('Edit Fields (Set)', 'If');
   await branch.dblclick();
   await dialog.getByRole('button', { name: 'Add row' }).click();
   await dialog.getByLabel('Left', { exact: true }).fill('={{ $json.color }}');
   await dialog.getByLabel('Right', { exact: true }).fill('green');
   await close.click();
+  async function runFull() {
+    const result = await page.evaluate(async () => {
+      const editor = document.querySelector('draflow-editor')!;
+      const result = await editor.run().done;
+      const id = editor.workflow!.nodes.find(n => n.type === 'draflow.if')!.id;
+      return { status: result.status, branches: result.runData[id]?.[0]?.output?.main?.map(items => items?.map(item => item.json)) };
+    });
+    expect(result).toEqual({ status: 'success', branches: [[{ color: 'green' }], []] });
+  }
+  const authored = await documentState();
+  expect(authored.nodes.map(n => n.type)).toEqual(['draflow.manualTrigger', 'draflow.set', 'draflow.if']);
+  expect(authored.connections).toHaveLength(2);
+  await runFull();
   await expect(page.getByText('Saved', { exact: true })).toBeVisible();
   await page.reload();
+  await expect(page.getByRole('heading', { name: '作業用キャンバス' })).toBeVisible();
+  expect(await documentState()).toEqual(authored);
+  await runFull();
   await setEnglish(page);
   await branch.dblclick();
   const output = dialog.locator('section').filter({ has: page.getByRole('heading', { name: 'Output', exact: true }) });

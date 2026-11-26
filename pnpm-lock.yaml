@@ -23,6 +23,9 @@ importers:
 
   apps/demo:
     dependencies:
+      '@draflow/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@draflow/element':
         specifier: workspace:*
         version: link:../../packages/element

@@ -81,6 +81,8 @@ test('serializes delayed saves, isolates documents and retries a failed write', 
     const log: string[] = [];
     let release!: () => void;
     let fail = true;
+    const notices: string[] = [];
+    editor.addEventListener('draflow-toast', e => notices.push(e.detail.workflowId + '/' + e.detail.message));
     editor.ports = { storage: {
       async load() { return null; },
       async save(w) {
@@ -89,7 +91,7 @@ test('serializes delayed saves, isolates documents and retries a failed write', 
         if (w.id === 'B' && fail) { fail = false; throw Error('quota'); }
       },
     } };
-    return { log, release: () => release() };
+    return { log, notices, release: () => release() };
   });
   async function nudge() {
     await page.locator('[data-node-id="manual"]').click();
@@ -105,6 +107,7 @@ test('serializes delayed saves, isolates documents and retries a failed write', 
   });
   await nudge();
   await expect(page.getByText(/Second · Error: quota/)).toBeVisible();
+  expect(await writes.evaluate(w => w.notices)).toEqual(['B/Second · Error: quota']);
   await writes.evaluate(w => w.release());
   await expect.poll(() => writes.evaluate(w => w.log)).toEqual(['manual-set/16', 'B/48', 'manual-set/32']);
   await expect(page.getByRole('button', { name: '保存を再試行' })).toBeVisible();

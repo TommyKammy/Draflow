@@ -34,7 +34,9 @@ test('canvas baseline on the production embed', async ({ page, browser }, info) 
         editor.workflow = workflow;
         await frame();
         await frame();
-        if (i) samples.push(performance.now() - start);
+        const elapsed = performance.now() - start;
+        if (i) samples.push(elapsed);
+        else if (size === 50) times.firstRender50 = [elapsed];
       }
       times['render' + size] = samples;
     }
@@ -125,4 +127,10 @@ test('canvas baseline on the production embed', async ({ page, browser }, info) 
   const report = { chromium: browser.version(), viewport: page.viewportSize(), dpr: 1, measurements };
   console.log(JSON.stringify(report, null, 2));
   await info.attach('canvas-baseline.json', { body: JSON.stringify(report), contentType: 'application/json' });
+  expect(measurements.firstRender50!.medianMs).toBeLessThan(100);
+  expect(measurements.render50!.p95Ms).toBeLessThan(100);
+  for (const name of ['pan', 'zoom', 'move']) {
+    expect(measurements[name]!.medianMs).toBeLessThan(18);
+    expect(measurements[name]!.p95Ms).toBeLessThan(34);
+  }
 });
