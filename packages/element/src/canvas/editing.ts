@@ -137,7 +137,7 @@ export function bindEditing(surface: HTMLElement, scene: CanvasScene, actions: E
     actions.commit({ type: 'delete', nodes: selection(), ...(id ? { edge: id } : {}) });
   }
   surface.addEventListener('keydown', event => {
-    if (event.isComposing || !actions.enabled()) return;
+    if (event.isComposing || event.keyCode === 229 || !actions.enabled()) return;
     const key = event.key.toLowerCase();
     if (event.metaKey || event.ctrlKey) {
       if (key === 'z') event.shiftKey ? actions.redo() : actions.undo();

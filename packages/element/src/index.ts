@@ -3,6 +3,8 @@ import {
   type EngineEvents, type ExecutionEngineOptions, type NodeType,
   type RunData, type TaskData, type RunHandle, type RunOptions, type RunResult, type Workflow,
 } from '@draflow/core';
+import { translator } from './locale.js';
+import { connectionDialog } from './connect.js';
 import { executionLog } from './execution-log.js';
 import { nodeDetails } from './details/view.js';
 import { fragment } from './store/edit.js';
@@ -69,7 +71,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
   const output = document.createElement('pre');
   const stopButton = tool(stop);
   header.append(title, button, stopButton);
-  const log = executionLog(clearExecution);
+  const log = executionLog(clearExecution, translator(options.locale ?? 'en'));
   let history = new History();
   const saves = new Autosave(options.ports?.storage, () => { if (!disposed) refreshEditing(); });
   saves.open(workflow);
@@ -91,7 +93,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
   const dirty = new Set<string>();
   const displayed = new Map<string, TaskData>();
   const previewInputs = new Map<string, TaskData[]>();
-  const details = nodeDetails({ registry, engine, canEdit,
+  const makeDetails = () => nodeDetails({ registry, engine, canEdit,
     get: id => workflow.nodes.find(n => n.id === id),
     tasks: id => previewInputs.get(id) ?? [],
     hasOutput: id => displayed.has(id),
@@ -111,7 +113,8 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     },
     execute: runNode, previous: runPreviousNodes, stop, running: () => !!active, failure: () => failure,
     duplicate: id => commit({ type: 'paste', fragment: fragment(workflow, new Set([id])) }),
-  });
+  }, translator(locale()));
+  let details = makeDetails();
   const canvas = createCanvas(host, registry, { enabled: canEdit, document: () => workflow, commit, undo, redo,
     openDetails: id => details.open(id),
     createFrom: from => { if (canEdit()) creator.open(locale(), { from }); },
@@ -129,13 +132,15 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     const edge = workflow.connections.find(e => e.id === selectedEdge);
     creator.open(locale(), edge ? { from: edge.from, edge } : undefined);
   });
+  const wiring = connectionDialog(canvas.scene, (from, to) => commit({ type: 'connect', from, to }));
+  const connect = tool(() => wiring.open(translator(locale())));
   const remove = tool(canvas.remove);
   const backward = tool(undo), forward = tool(redo);
   const saveState = document.createElement('span');
   saveState.setAttribute('aria-live', 'polite');
   const retry = tool(() => saves.flush());
-  tools.append(add, remove, backward, forward, saveState, retry);
-  shell.append(header, tools, canvas.panel, outputTitle, status, output, log.panel, creator.dialog, details.dialog);
+  tools.append(add, connect, remove, backward, forward, saveState, retry);
+  shell.append(header, tools, canvas.panel, outputTitle, status, output, log.panel, wiring.dialog, creator.dialog, details.dialog);
   root.append(style, shell);
 
   function updateButton() {
@@ -153,6 +158,8 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     backward.textContent = ja ? '元に戻す' : 'Undo';
     forward.textContent = ja ? 'やり直す' : 'Redo';
     retry.textContent = ja ? '保存を再試行' : 'Retry save';
+    connect.textContent = translator(locale())('Connect nodes');
+    connect.disabled = !canEdit() || !workflow.nodes.length;
     remove.disabled = !canEdit();
     add.disabled = !canEdit() || !catalog.some(t => !t.meta.hidden);
     backward.disabled = !canEdit() || !history.canUndo;
@@ -165,6 +172,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     if (next === workflow) return;
     if (source !== 'configure') lastControl = undefined;
     const previous = workflow;
+    wiring.dialog.close();
     creator.dialog.close();
     workflow = next;
     const added = ['add', 'paste'].includes(source)
@@ -252,6 +260,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     previewInputs.clear();
     lastControl = undefined;
     title.textContent = workflow.name;
+    wiring.dialog.close();
     creator.dialog.close();
     canvas.setWorkflow(workflow);
     canvas.scene.resetRun();
@@ -334,6 +343,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
       throw error;
     }
     log.start(handle.id, snapshot.name);
+    wiring.dialog.close();
     creator.dialog.close();
     canvas.cancelEdit();
     active = handle;
@@ -411,14 +421,23 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     focusNode: canvas.focusNode,
     run, runNode, runPreviousNodes, clearExecution, stop,
     setPresentation(settings: Pick<EditorOptions, 'locale' | 'theme' | 'readonly'>) {
-      details.flush();
-      details.close();
-      creator.dialog.close();
+      const nextLocale = settings.locale;
+      const localeChanged = nextLocale !== undefined && nextLocale !== shell.lang;
+      if (localeChanged || (settings.readonly !== undefined && settings.readonly !== readonly)) {
+        details.flush();
+        details.close();
+        wiring.dialog.close();
+        creator.dialog.close();
+      }
       if (settings.theme !== undefined) shell.dataset.theme = settings.theme;
-      if (settings.locale !== undefined) {
-        labels = messages[settings.locale];
-        shell.lang = settings.locale;
-        canvas.setLocale(settings.locale);
+      if (localeChanged) {
+        labels = messages[nextLocale];
+        shell.lang = nextLocale;
+        canvas.setLocale(nextLocale);
+        const oldDialog = details.dialog;
+        details = makeDetails();
+        oldDialog.replaceWith(details.dialog);
+        log.setLocale(translator(nextLocale));
       }
       if (settings.readonly !== undefined) {
         readonly = settings.readonly;

@@ -1,3 +1,4 @@
+import type { Translate } from '../locale.js';
 import { insertMapping, type Mapping } from './mapping.js';
 import { isPlainObject, isParameterVisible, type ExpressionEngine, type JsonObject, type JsonValue,
   type NodeType, type ParamSchema, type ParamValue, type WorkflowNode } from '@draflow/core';
@@ -18,6 +19,7 @@ export function group(title: string) {
 }
 type Values = Record<string, ParamValue>;
 interface Context {
+  t: Translate;
   expression: ExpressionEngine;
   previews: (() => void)[];
   preview(value: string): { text: string; type?: string };
@@ -60,7 +62,7 @@ export function renderFields(parent: HTMLElement, schemas: ParamSchema[], values
         { name: 'operator', label: 'Operator', type: 'select', options: options(operators), default: 'equals' },
         { name: 'right', label: 'Right', type: 'string' },
       ];
-      const box = group(field.label);
+      const box = group(ctx.t(field.label));
       const data = structuredClone(isPlainObject(value) ? value : { combinator: combinators[0] ?? 'and', conditions: [] });
       renderFields(box, [
         { name: 'combinator', label: 'Combine', type: 'select', options: options(combinators), default: combinators[0] ?? 'and' },
@@ -71,7 +73,7 @@ export function renderFields(parent: HTMLElement, schemas: ParamSchema[], values
       continue;
     }
     if ((field.type === 'collection' || field.type === 'fixedCollection') && !expressionValue) {
-      const box = group(field.label);
+      const box = group(ctx.t(field.label));
       parent.append(box);
       if (field.type === 'collection' || !field.multiple) {
         const data = structuredClone(isPlainObject(value) ? value : {});
@@ -85,7 +87,7 @@ export function renderFields(parent: HTMLElement, schemas: ParamSchema[], values
       rows.forEach((row, i) => {
         const item = group(String(i + 1));
         if (isPlainObject(row)) renderFields(item, field.fields, row, { ...ctx, changed: update }, [...key, i]);
-        const remove = button('Remove', () => {
+        const remove = button(ctx.t('Remove'), () => {
           if (!ctx.canRedraw(item)) return;
           rows.splice(i, 1);
           ctx.modes.clear();
@@ -95,7 +97,7 @@ export function renderFields(parent: HTMLElement, schemas: ParamSchema[], values
         item.append(remove);
         box.append(item);
       });
-      const add = button('Add row', () => {
+      const add = button(ctx.t('Add row'), () => {
         if (!ctx.canRedraw()) return;
         const row: JsonObject = {};
         for (const f of field.fields) if (f.default !== undefined) row[f.name] = structuredClone(f.default);
@@ -108,11 +110,11 @@ export function renderFields(parent: HTMLElement, schemas: ParamSchema[], values
     }
 
     const label = document.createElement('label');
-    label.append(field.label);
+    label.append(ctx.t(field.label));
     parent.append(label);
     const constrained = ['select', 'multiSelect', 'number', 'boolean'].includes(field.type);
     if (constrained && !field.noExpression) {
-      const toggle = button(expressionValue ? 'Fixed' : 'Expression', () => {
+      const toggle = button(ctx.t(expressionValue ? 'Fixed' : 'Expression'), () => {
         if (!ctx.canRedraw()) return;
         const id = JSON.stringify(key);
         const saved = ctx.modes.get(id) ?? { fixed: field.default, expression: undefined };
@@ -122,7 +124,7 @@ export function renderFields(parent: HTMLElement, schemas: ParamSchema[], values
         ctx.modes.set(id, saved);
         write(expressionValue ? saved.fixed : saved.expression ?? '={{ ' + JSON.stringify(current ?? '') + ' }}', true);
       });
-      toggle.setAttribute('aria-label', field.label + ' · ' + toggle.textContent);
+      toggle.setAttribute('aria-label', ctx.t(field.label) + ' · ' + toggle.textContent);
       parent.append(toggle);
     }
     function bindMapping(control: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement) {
@@ -141,7 +143,7 @@ export function renderFields(parent: HTMLElement, schemas: ParamSchema[], values
         }
         const next = insertMapping(source, text, range, dataPath);
         if (!dataPath && ctx.expression.validate(next).length) {
-          control.setCustomValidity('Choose an insertion point outside the expression.');
+          control.setCustomValidity(ctx.t('Choose an insertion point outside the expression.'));
           control.reportValidity(); control.setCustomValidity('');
           return;
         }
@@ -150,9 +152,9 @@ export function renderFields(parent: HTMLElement, schemas: ParamSchema[], values
         }
         write(next, true);
       }
-      const apply = button('Insert', insert);
+      const apply = button(ctx.t('Insert'), insert);
       apply.className = 'insert-mapping';
-      apply.setAttribute('aria-label', 'Insert into ' + field.label);
+      apply.setAttribute('aria-label', ctx.t('Insert into') + ' ' + ctx.t(field.label));
       parent.append(apply);
       control.ondragover = e => { if (ctx.dragging?.()) e.preventDefault(); };
       control.ondrop = e => {
@@ -162,11 +164,11 @@ export function renderFields(parent: HTMLElement, schemas: ParamSchema[], values
     if (!expressionValue && (field.type === 'select' || field.type === 'multiSelect') && Array.isArray(field.options)) {
       const select = document.createElement('select');
       select.name = field.name;
-      select.setAttribute('aria-label', field.label);
+      select.setAttribute('aria-label', ctx.t(field.label));
       select.multiple = field.type === 'multiSelect';
       if (!select.multiple && value === undefined) select.add(new Option('—', ''));
       for (const choice of field.options) {
-        const option = new Option(choice.label, choice.value);
+        const option = new Option(ctx.t(choice.label), choice.value);
         option.disabled = choice.disabled ?? false;
         option.selected = Array.isArray(value) ? value.includes(choice.value) : choice.value === value;
         select.add(option);

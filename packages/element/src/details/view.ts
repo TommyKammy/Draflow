@@ -1,3 +1,4 @@
+import type { Translate } from '../locale.js';
 import { getVisibleParameters, isParameterVisible, resolveNodeSettings, type ExecutionEngine, type NodeRegistry, type NodeSettings,
   type ParamSchema, type ParamValue, type Item, type TaskData, type WorkflowNode } from '@draflow/core';
 import { choice, dataPanel, entries } from './data.js';
@@ -37,7 +38,7 @@ const settings: ParamSchema[] = [
   { name: 'notesInFlow', label: 'Show notes on canvas', type: 'boolean' },
 ];
 
-export function nodeDetails(actions: Actions) {
+export function nodeDetails(actions: Actions, t: Translate) {
   const dialog = document.createElement('dialog');
   dialog.className = 'node-details';
   dialog.setAttribute('aria-labelledby', 'details-title');
@@ -45,31 +46,33 @@ export function nodeDetails(actions: Actions) {
   title.id = 'details-title';
   const version = document.createElement('small');
   const header = document.createElement('header');
-  const step = button('Execute step', () => {
+  const step = button(t('Execute step'), () => {
     if (!draft || !flush(true)) return;
     try { actions.execute(draft.id); } catch (e) { feedback.textContent = String(e); }
   });
-  const previous = button('Execute previous nodes', () => {
+  const previous = button(t('Execute previous nodes'), () => {
     if (!draft || !flush(true)) return;
     try { actions.previous(draft.id); } catch (e) { feedback.textContent = String(e); }
   });
-  const stop = button('Stop', actions.stop);
-  const duplicate = button('Duplicate', () => {
+  const stop = button(t('Stop'), actions.stop);
+  const duplicate = button(t('Duplicate'), () => {
     if (!draft || !flush(true)) return;
     const id = draft.id;
     close();
     actions.duplicate(id);
   });
-  const discard = button('Discard invalid input', close);
+  const discard = button(t('Discard invalid input'), close);
   discard.hidden = true;
-  header.append(title, version, previous, step, stop, duplicate, button('Close', () => { if (flush(true)) close(); }), discard);
+  const dismiss = button(t('Close'), () => { if (flush(true)) close(); });
+  dismiss.autofocus = true;
+  header.append(title, version, previous, step, stop, duplicate, dismiss, discard);
   const panes = document.createElement('div');
   panes.className = 'details-panes';
   const tabs = document.createElement('nav');
   tabs.className = 'details-tabs';
   const sections = ['Input', 'Node', 'Output'].map((name, index) => {
     const section = document.createElement('section');
-    const tab = button(name, () => showPane(index));
+    const tab = button(t(name), () => showPane(index));
     tabs.append(tab);
     panes.append(section);
     return section;
@@ -87,7 +90,7 @@ export function nodeDetails(actions: Actions) {
   const feedback = document.createElement('p');
   feedback.setAttribute('aria-live', 'polite');
   let settingsMode = false;
-  for (const name of ['Parameters', 'Settings']) mode.append(button(name, () => {
+  for (const name of ['Parameters', 'Settings']) mode.append(button(t(name), () => {
     if (!flush(true)) return;
     settingsMode = name === 'Settings';
     renderForm();
@@ -104,13 +107,13 @@ export function nodeDetails(actions: Actions) {
   let mappingTask: TaskData | undefined;
   const mappingControls = document.createElement('div');
   const pinControls = document.createElement('div');
-  const inputPanel = dataPanel('Input', () => {
+  const inputPanel = dataPanel('Input', t, () => {
     clearMapping();
     renderMapping();
     // Refresh previews without replacing controls containing uncommitted text.
     for (const update of previews) update();
   });
-  const outputPanel = dataPanel('Output', () => {});
+  const outputPanel = dataPanel('Output', t, () => {});
   sections[0]!.append(inputPanel.root, mappingControls);
   sections[2]!.append(outputPanel.root, pinControls);
   function task() { return draft && actions.tasks(draft.id)[runIndex]; }
@@ -122,17 +125,17 @@ export function nodeDetails(actions: Actions) {
   function renderMapping() {
     mappingControls.replaceChildren();
     const selected = inputPanel.selection();
-    const t = task();
-    if (!draft || !t || !selected.item || !actions.canEdit()) { clearMapping(); return; }
+    const currentTask = task();
+    if (!draft || !currentTask || !selected.item || !actions.canEdit()) { clearMapping(); return; }
     const names = actions.ancestors(draft.id);
-    const source = choice('Map from', [['', 'Current input'], ...names.map(n => [n, n] as [string, string])], ancestor, v => {
+    const source = choice(t('Map from'), [['', t('Current input')], ...names.map(n => [n, n] as [string, string])], ancestor, v => {
       ancestor = v; clearMapping(); renderMapping();
     });
-    const position = choice('Mapping insertion', [['replace', 'Replace value'], ['cursor', 'Insert at cursor']],
+    const position = choice(t('Mapping insertion'), [['replace', t('Replace value')], ['cursor', t('Insert at cursor')]],
       append ? 'cursor' : 'replace', v => { append = v === 'cursor'; });
     mappingControls.append(source, position);
-    const item = ancestor ? actions.engine.previewAncestor(t, ancestor, selected.index, selected.port, selected.slot) : selected.item;
-    if (!item) { mappingControls.append('No linked item'); clearMapping(); return; }
+    const item = ancestor ? actions.engine.previewAncestor(currentTask, ancestor, selected.index, selected.port, selected.slot) : selected.item;
+    if (!item) { mappingControls.append(t('No linked item')); clearMapping(); return; }
     const fields = document.createElement('div');
     fields.className = 'mapping-fields';
     for (const { path, value } of entries(item.json)) {
@@ -233,12 +236,12 @@ export function nodeDetails(actions: Actions) {
     switches[0]!.setAttribute('aria-pressed', String(!settingsMode));
     switches[1]!.setAttribute('aria-pressed', String(settingsMode));
     if (!type) { fields.textContent = node.type; return; }
-    const context = { modes, canRedraw, previews, expression: actions.engine.expression, type, node, changed,
+    const context = { t, modes, canRedraw, previews, expression: actions.engine.expression, type, node, changed,
       preview(value: string) {
-        const t = task(), selected = inputPanel.selection();
-        if (!t || !selected.item) return { text: 'No preview input' };
+        const currentTask = task(), selected = inputPanel.selection();
+        if (!currentTask || !selected.item) return { text: t('No preview input') };
         try {
-          const result = actions.engine.preview(t, value, selected.index, node.parameters, selected.port, selected.slot);
+          const result = actions.engine.preview(currentTask, value, selected.index, node.parameters, selected.port, selected.slot);
           return { text: JSON.stringify(result) ?? 'undefined', type: result === null ? 'null' : Array.isArray(result) ? 'array' : typeof result };
         } catch (e) { return { text: String(e) }; }
       },
@@ -274,18 +277,18 @@ export function nodeDetails(actions: Actions) {
     const tasks = actions.tasks(id).filter(Boolean);
     if (!tasks.some(t => t.runIndex === runIndex)) runIndex = tasks.at(-1)?.runIndex ?? -1;
     runChoice.replaceChildren();
-    if (tasks.length) runChoice.append(choice('Run index', tasks.map(t => [String(t.runIndex), 'Run ' + t.runIndex]),
+    if (tasks.length) runChoice.append(choice(t('Run index'), tasks.map(task => [String(task.runIndex), t('Run') + ' ' + task.runIndex]),
       String(runIndex), v => {
         runIndex = Number(v); inputPanel.reset(); outputPanel.reset(); clearMapping();
         refreshData();
       }));
-    const t = task();
-    inputPanel.set(t?.input);
-    const output = actions.hasOutput(id) ? t?.output : undefined;
+    const currentTask = task();
+    inputPanel.set(currentTask?.input);
+    const output = actions.hasOutput(id) ? currentTask?.output : undefined;
     const pinned = actions.pinned(id);
     outputPanel.set(output ?? (pinned !== undefined ? { main: [pinned] } : undefined));
-    if (mappingTask !== t || !actions.canEdit()) {
-      mappingTask = t;
+    if (mappingTask !== currentTask || !actions.canEdit()) {
+      mappingTask = currentTask;
       renderMapping();
     }
     pinControls.replaceChildren();
@@ -294,14 +297,14 @@ export function nodeDetails(actions: Actions) {
     const pinnable = ports.length === 1 && ports[0]?.type === 'main' && draft.settings?.onError !== 'errorOutput' &&
       (!output || (Object.keys(output).every(k => k === 'main') && (output.main?.length ?? 0) <= 1));
     const items = output?.main?.[0];
-    const pin = button(pinned !== undefined ? 'Unpin' : 'Pin output', () => {
+    const pin = button(t(pinned !== undefined ? 'Unpin' : 'Pin output'), () => {
       if (flush(true)) actions.pin(id, pinned !== undefined ? undefined : items ?? undefined);
     });
-    pin.disabled = !actions.canEdit() || (pinned === undefined && (!pinnable || !items || t?.status !== 'success'));
+    pin.disabled = !actions.canEdit() || (pinned === undefined && (!pinnable || !items || currentTask?.status !== 'success'));
     pinControls.append(pin);
-    if (!pinnable) pinControls.append(' Pinning requires a single main[0] output.');
+    if (!pinnable) pinControls.append(' ' + t('Pinning requires a single main[0] output.'));
     for (const update of previews) update();
-    feedback.textContent = t?.error?.message ?? actions.failure() ?? '';
+    feedback.textContent = currentTask?.error?.message ?? actions.failure() ?? '';
   }
   function refresh() { refreshData(); renderForm(); }
   return { dialog, close, refresh, refreshData, flush,

@@ -1,8 +1,9 @@
+import { openEnglishDemo, setEnglish } from './locale.js';
 import { expect, test } from '@playwright/test';
 import type {} from '@draflow/element/define';
 
 test('authors Set and If, reloads, then executes the edited branch and its undo', async ({ page }) => {
-  await page.goto('/');
+  await openEnglishDemo(page);
   await expect(page.getByRole('heading', { name: 'Manual → Set' })).toBeVisible();
   await page.evaluate(() => {
     const editor = document.querySelector('draflow-editor')!;
@@ -10,7 +11,7 @@ test('authors Set and If, reloads, then executes the edited branch and its undo'
   });
   const dialog = page.getByRole('dialog');
   const selected = page.locator('.node-card[aria-pressed=true]');
-  await page.getByRole('button', { name: 'ノードを追加' }).click();
+  await page.getByRole('button', { name: 'Add node' }).click();
   await dialog.getByRole('button', { name: 'Manual Trigger' }).click();
   await selected.locator('.output').click();
   await dialog.getByRole('button', { name: 'Edit Fields (Set)' }).click();
@@ -30,8 +31,9 @@ test('authors Set and If, reloads, then executes the edited branch and its undo'
   await dialog.getByLabel('Left', { exact: true }).fill('={{ $json.color }}');
   await dialog.getByLabel('Right', { exact: true }).fill('green');
   await close.click();
-  await expect(page.getByText('保存済み', { exact: true })).toBeVisible();
+  await expect(page.getByText('Saved', { exact: true })).toBeVisible();
   await page.reload();
+  await setEnglish(page);
   await branch.dblclick();
   const output = dialog.locator('section').filter({ has: page.getByRole('heading', { name: 'Output', exact: true }) });
   await step.click();
@@ -47,7 +49,7 @@ test('authors Set and If, reloads, then executes the edited branch and its undo'
   await expect(output).toContainText('main[1] · 1');
   await expect(output).toContainText('"blue"');
   await close.click();
-  await page.getByRole('button', { name: '元に戻す' }).click();
+  await page.getByRole('button', { name: 'Undo' }).click();
   await branch.dblclick();
   await step.click();
   await expect(output).toContainText('main[0] · 1');
@@ -55,7 +57,7 @@ test('authors Set and If, reloads, then executes the edited branch and its undo'
 });
 
 test('validates JSON and settings, preserves hidden values and supports readonly inspection', async ({ page }) => {
-  await page.goto('/');
+  await openEnglishDemo(page);
   const set = page.locator('[data-node-id="set"]');
   await set.focus();
   await page.keyboard.press('Enter');
@@ -86,7 +88,7 @@ test('validates JSON and settings, preserves hidden values and supports readonly
 });
 
 test('runNode reuses clean upstream tasks, including after a move and its undo', async ({ page }) => {
-  await page.goto('/');
+  await openEnglishDemo(page);
   await expect(page.locator('[data-node-id="set"]')).toBeVisible();
   const counts = await page.evaluate(async () => {
     const el = document.querySelector('draflow-editor')!;
@@ -100,7 +102,7 @@ test('runNode reuses clean upstream tasks, including after a move and its undo',
   expect(counts).toBe(1);
   await page.locator('[data-node-id="manual"]').click();
   await page.keyboard.press('ArrowRight');
-  await page.getByRole('button', { name: '元に戻す' }).click();
+  await page.getByRole('button', { name: 'Undo' }).click();
   const output = await page.evaluate(async () => {
     const el = document.querySelector('draflow-editor')!;
     return (await el.runNode('set').done).runData.manual?.[0]?.output?.main?.[0]?.[0]?.json;
@@ -109,11 +111,11 @@ test('runNode reuses clean upstream tasks, including after a move and its undo',
 });
 
 test('changes Merge mode without losing a hidden key and validates HTTP parameters', async ({ page }) => {
-  await page.goto('/');
+  await openEnglishDemo(page);
   await expect(page.locator('[data-node-id="set"]')).toBeVisible();
   const dialog = page.getByRole('dialog');
   for (const name of ['Merge', 'HTTP Request']) {
-    await page.getByRole('button', { name: 'ノードを追加' }).click();
+    await page.getByRole('button', { name: 'Add node' }).click();
     await dialog.getByRole('button', { name, exact: true }).click();
     await page.locator('.node-card[aria-pressed=true]').dblclick();
     if (name === 'Merge') {
@@ -140,7 +142,7 @@ test('changes Merge mode without losing a hidden key and validates HTTP paramete
 
 test('inspects a step on a narrow screen and groups typing into one undo', async ({ page }) => {
   await page.setViewportSize({ width: 420, height: 750 });
-  await page.goto('/');
+  await openEnglishDemo(page);
   const card = page.locator('[data-node-id="set"]');
   await card.dblclick();
   const dialog = page.getByRole('dialog');
@@ -152,17 +154,17 @@ test('inspects a step on a narrow screen and groups typing into one undo', async
   await expect(dialog.getByRole('heading', { name: 'Output', exact: true })).toBeVisible();
   await expect(dialog.locator('pre:visible')).toContainText('updated');
   await dialog.getByRole('button', { name: 'Close' }).click();
-  await page.getByRole('button', { name: '元に戻す' }).click();
+  await page.getByRole('button', { name: 'Undo' }).click();
   await card.dblclick();
   await expect(value).toHaveValue('Hello Draflow');
   await dialog.getByRole('button', { name: 'Duplicate' }).click();
   await expect(page.locator('.node-card')).toHaveCount(3);
-  await page.getByRole('button', { name: '元に戻す' }).click();
+  await page.getByRole('button', { name: 'Undo' }).click();
   await expect(page.locator('.node-card')).toHaveCount(2);
 });
 
 test('keeps unaffected preview inputs across edits and invalidates downstream inputs', async ({ page }) => {
-  await page.goto('/');
+  await openEnglishDemo(page);
   await expect(page.locator('[data-node-id="set"]')).toBeVisible();
   await page.evaluate(async () => {
     const editor = document.querySelector('draflow-editor')!;
@@ -193,7 +195,7 @@ test('keeps unaffected preview inputs across edits and invalidates downstream in
 });
 
 test('preserves the latest fixed value and expression across mode switches', async ({ page }) => {
-  await page.goto('/');
+  await openEnglishDemo(page);
   await page.locator('[data-node-id="set"]').dblclick();
   const dialog = page.getByRole('dialog');
   const name = 'Include Other Input Fields';
@@ -216,10 +218,10 @@ test('preserves the latest fixed value and expression across mode switches', asy
 });
 
 test('keeps invalid HTTP headers when another field requests a redraw', async ({ page }) => {
-  await page.goto('/');
+  await openEnglishDemo(page);
   await expect(page.locator('[data-node-id="set"]')).toBeVisible();
   const dialog = page.getByRole('dialog');
-  await page.getByRole('button', { name: 'ノードを追加' }).click();
+  await page.getByRole('button', { name: 'Add node' }).click();
   await dialog.getByRole('button', { name: 'HTTP Request', exact: true }).click();
   await page.locator('.node-card[aria-pressed=true]').dblclick();
   await dialog.getByLabel('URL', { exact: true }).fill('https://example.invalid/items');
@@ -242,7 +244,7 @@ test('keeps invalid HTTP headers when another field requests a redraw', async ({
 });
 
 test('updates conditional fields inside collections without reopening the dialog', async ({ page }) => {
-  await page.goto('/');
+  await openEnglishDemo(page);
   const card = page.locator('[data-node-id="set"]');
   await expect(card).toBeVisible();
   await page.evaluate(() => {

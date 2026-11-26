@@ -1,8 +1,9 @@
+import { openEnglishDemo } from './locale.js';
 import { expect, test, type Page } from '@playwright/test';
 import type {} from '@draflow/element/define';
 
 async function mockHttp(page: Page, mode: 'success' | 'slow' | 'error') {
-  await page.goto('/');
+  await openEnglishDemo(page);
   await expect(page.getByRole('heading', { name: 'Manual → Set' })).toBeVisible();
   return page.evaluateHandle(mode => {
     const editor = document.querySelector('draflow-editor')!;
@@ -33,7 +34,7 @@ test('previous nodes exclude the target and subsequent steps reuse HTTP until cl
   const dialog = page.getByRole('dialog');
   await dialog.getByRole('button', { name: 'Execute previous nodes' }).click();
   await dialog.getByRole('button', { name: 'Close' }).click();
-  await expect(page.getByRole('status')).toHaveText('Fetch · 1件');
+  await expect(page.getByRole('status')).toHaveText('Fetch · 1 item');
   await expect(log.locator('summary')).toHaveCount(2);
   const fetch = log.locator('details').filter({ hasText: 'Fetch · Run 0' });
   await fetch.locator('summary').click();
@@ -43,16 +44,16 @@ test('previous nodes exclude the target and subsequent steps reuse HTTP until cl
     await dialog.getByRole('button', { name: 'Execute step' }).click();
     await dialog.getByRole('button', { name: 'Close' }).click();
     await expect(fetch.locator('summary')).toContainText('reused');
-    await expect(page.getByRole('status')).toHaveText('Set · 1件');
+    await expect(page.getByRole('status')).toHaveText('Set · 1 item');
   }
   expect(await state.evaluate(s => s.calls)).toBe(1);
-  await page.getByRole('button', { name: '実行', exact: true }).click();
+  await page.getByRole('button', { name: 'Run workflow', exact: true }).click();
   await expect(fetch.locator('summary')).not.toContainText('reused');
   expect(await state.evaluate(s => s.calls)).toBe(2);
   const before = await page.evaluate(() => document.querySelector('draflow-editor')!.workflow);
   await log.getByRole('button', { name: 'Clear execution' }).click();
   await expect(log).toBeHidden();
-  await expect(page.getByRole('status')).toHaveText('実行すると結果が表示されます。');
+  await expect(page.getByRole('status')).toHaveText('Run the workflow to see its output.');
   expect(await page.evaluate(() => document.querySelector('draflow-editor')!.workflow)).toEqual(before);
   await page.evaluate(() => document.querySelector('draflow-editor')!.runNode('set').done);
   expect(await state.evaluate(s => s.calls)).toBe(3);
@@ -69,7 +70,7 @@ for (const action of ['stop', 'switch'] as const) {
     await expect(fetch.locator('code')).toContainText('"input"');
     await expect.poll(() => state.evaluate(s => s.calls)).toBe(1);
     if (action === 'stop') {
-      await page.getByRole('button', { name: '停止', exact: true }).click();
+      await page.getByRole('button', { name: 'Stop', exact: true }).click();
       await expect(log).toContainText('canceled');
     } else {
       await state.evaluate(s => s.switchDocument());
@@ -77,14 +78,14 @@ for (const action of ['stop', 'switch'] as const) {
     }
     expect(await oldRun.evaluate(h => h.done.then(r => r.status))).toBe('canceled');
     expect(await state.evaluate(s => s.aborted)).toBe(true);
-    await page.getByRole('button', { name: '実行', exact: true }).click();
-    await expect(page.getByRole('status')).toHaveText('Set · 1件');
+    await page.getByRole('button', { name: 'Run workflow', exact: true }).click();
+    await expect(page.getByRole('status')).toHaveText('Set · 1 item');
     const current = await log.innerText();
     const output = await page.locator('draflow-editor pre').innerText();
     await state.evaluate(async s => { s.release(); await new Promise(resolve => setTimeout(resolve, 0)); });
     expect(await log.innerText()).toBe(current);
     expect(await page.locator('draflow-editor pre').innerText()).toBe(output);
-    await expect(page.getByRole('status')).toHaveText('Set · 1件');
+    await expect(page.getByRole('status')).toHaveText('Set · 1 item');
     expect(await state.evaluate(s => s.calls)).toBe(action === 'stop' ? 2 : 1);
   });
 }
@@ -111,6 +112,6 @@ test('a rejected run shows a clearable error and releases the editor for another
   const log = page.getByRole('region', { name: 'Execution log' });
   await expect(log).toContainText('error');
   await log.getByRole('button', { name: 'Clear execution' }).click();
-  await page.getByRole('button', { name: '実行', exact: true }).click();
-  await expect(page.getByRole('status')).toHaveText('Set · 1件');
+  await page.getByRole('button', { name: 'Run workflow', exact: true }).click();
+  await expect(page.getByRole('status')).toHaveText('Set · 1 item');
 });

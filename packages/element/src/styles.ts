@@ -18,8 +18,8 @@ export const styles = `
   button { font:inherit; padding:.45rem 1rem; background:#24563f; color:white; border:0; border-radius:6px; cursor:pointer }
   button:disabled { opacity:.6; cursor:default }
   pre { overflow:auto; padding:1rem; margin:0; background:color-mix(in srgb, CanvasText 6%, Canvas); border-radius:6px }
-  section[aria-label="Execution log"] summary { cursor:pointer; overflow-wrap:anywhere }
-  section[aria-label="Execution log"] code { display:block; white-space:pre-wrap; overflow-wrap:anywhere; max-height:18rem; overflow:auto }
+  .execution-log summary { cursor:pointer; overflow-wrap:anywhere }
+  .execution-log code { display:block; white-space:pre-wrap; overflow-wrap:anywhere; max-height:18rem; overflow:auto }
   pre:empty { display:none }
   .canvas-panel { margin-top:1.25rem; position:relative; border:1px solid color-mix(in srgb, CanvasText 16%, Canvas); border-radius:8px; overflow:clip }
   .canvas { height:clamp(260px,38vh,460px); position:relative; overflow:clip; isolation:isolate;
@@ -50,6 +50,8 @@ export const styles = `
   .view-controls button { background:transparent; color:CanvasText; font-size:13px; padding:5px 9px; min-width:30px }
   .view-controls button:hover { background:color-mix(in srgb, CanvasText 8%, Canvas) }
   .view-controls span { font:12px/1.5 ui-monospace,monospace; min-width:4ch; text-align:center }
+  dialog { color-scheme:inherit }
+  :where(button,select,input,textarea,summary):focus-visible { outline:2px solid Highlight; outline-offset:2px }
   .node-details { box-sizing:border-box; width:min(74rem,96vw); max-height:90vh; overflow:auto; color:CanvasText; background:Canvas;
     border:1px solid GrayText; border-radius:10px; padding:1rem; overscroll-behavior:contain }
   .node-details::backdrop { background:#0006 }
@@ -78,6 +80,9 @@ export const styles = `
   .node-details input[type=checkbox] { justify-self:start }
   .node-details .details-tabs { display:none }
   @media(max-width:760px) {
+    .node-details { max-height:92dvh; padding:.75rem }
+    .node-details header {justify-content:flex-start; gap:.4rem}
+    .node-details button,.node-creator button {min-height:40px}
     .details-panes { display:block }
     .details-panes>section:not(.current) { display:none }
     .node-details .details-tabs { display:flex; margin-top:.5rem }
