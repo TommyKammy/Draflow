@@ -1,0 +1,14 @@
+{
+  "schema": "draflow/v1",
+  "id": "manual-set",
+  "name": "Manual → Set",
+  "settings": {},
+  "nodes": [
+    { "id": "manual", "name": "Manual", "type": "draflow.manualTrigger", "typeVersion": 1, "position": { "x": 0, "y": 0 }, "parameters": {} },
+    { "id": "set", "name": "Set", "type": "draflow.set", "typeVersion": 1, "position": { "x": 220, "y": 0 },
+      "parameters": { "assignments": [{ "name": "message", "value": "Hello Draflow" }] } }
+  ],
+  "connections": [
+    { "id": "manual-to-set", "from": { "node": "manual", "port": "main", "index": 0 }, "to": { "node": "set", "port": "main", "index": 0 } }
+  ]
+}

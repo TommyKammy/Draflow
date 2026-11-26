@@ -1,8 +1,10 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { build } from 'esbuild';
 import { gzipSync } from 'node:zlib';
 
-const root = new URL('..', import.meta.url).pathname;
+const root = fileURLToPath(new URL('..', import.meta.url));
 const packages = ['core', 'nodes'];
 
 function walk(directory) {
@@ -45,6 +47,26 @@ console.log(
 );
 console.log('');
 console.log('gzip is the sum of per-file gzip streams (a conservative estimate).');
+
+const elementBundle = await build({
+  entryPoints: [join(root, 'packages/element/dist/define.js')],
+  bundle: true,
+  write: false,
+  minify: true,
+  format: 'esm',
+  target: 'es2022',
+  external: ['@draflow/core'],
+});
+const demoFiles = walk(join(root, 'apps/demo/dist/assets'));
+if (demoFiles.length === 0) throw new Error('Build the demo before measuring its bundle');
+const demoGzip = demoFiles.reduce((sum, path) => sum + gzipSync(readFileSync(path)).length, 0);
+for (const [name, bytes, budget] of [
+  ['element (external core)', gzipSync(elementBundle.outputFiles[0].contents).length, 120],
+  ['demo (shipped JS)', demoGzip, 250],
+]) {
+  console.log(`${name}: ${format(bytes)} gzip (budget ${budget} KB)`);
+  if (bytes > budget * 1024) process.exitCode = 1;
+}
 
 function format(bytes) {
   if (bytes < 1024) return `${bytes} B`;

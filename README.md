@@ -10,8 +10,8 @@ The goal is not to reimplement n8n's 1,000 integrations. The goal is to port the
 **core loop** — run, inspect, wire, re-run — in a package small enough to embed in
 any web app.
 
-> Status: **core engine implemented; editor UI next.**
-> 92 tests passing. Core + standard nodes: **45.8 KB gzip**.
+> The embedded editor can run a Manual → Set workflow and display its output.
+> See the [Phase 2 plan](docs/phase2-plan.md) for the editing milestones.
 
 ## Quick start
 
@@ -24,6 +24,11 @@ pnpm build
 node examples/run-workflow.mjs
 pnpm size
 ```
+
+Run `pnpm dev` to open the demo at the URL printed by Vite. Select **実行** in the
+Manual → Set example to display one item containing `{"message":"Hello Draflow"}`.
+To test the production embed in Chromium, run `pnpm build`,
+`pnpm exec playwright install chromium`, then `pnpm test:browser`.
 
 ## Documents
 

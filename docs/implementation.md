@@ -1,8 +1,8 @@
 # 実装状況 — コアエンジン
 
 - 更新日: 2026-11-26
-- 状態: **Phase 0（足場）+ Phase 1（コア）完了**
-- 次の milestone: エディタ UI（キャンバス / Node Creator / NDV / Logs）
+- 状態: **Phase 1（コア）完了、Phase 2 M0（埋め込み実行）実装**
+- 次の milestone: [M1 キャンバス表示](phase2-plan.md)
 
 ---
 
@@ -16,8 +16,8 @@
 | 実行 | スタック、waiting（複数入力）、runIndex、リトライ、エラー 3 モード、ピン、無効化、executeOnce、部分実行、実行制限 |
 | ノード | Manual / NoOp / Set / If / Filter / Merge / HTTP Request |
 | 永続化 | JSON の読み書き、検証、デフォルト適用 |
-| テスト | 92 tests（core 69 / nodes 23） |
-| サイズ | core 37.8 KB gzip + nodes 8.0 KB gzip = **45.8 KB gzip** |
+| テスト | 140 tests（Phase 1 完了時点、core 112 / nodes 28） |
+| サイズ | core 38.5 KB gzip + nodes 8.1 KB gzip = **46.6 KB gzip** |
 
 ---
 
@@ -256,11 +256,11 @@ pnpm test
 ✓ packages/core/test/graph.test.ts         (4)
 ✓ packages/core/test/parameters.test.ts    (6)
 ✓ packages/core/test/serialize.test.ts     (8)
-✓ packages/core/test/expression.test.ts   (22)
-✓ packages/core/test/engine.test.ts       (27)
-✓ packages/nodes/test/nodes.test.ts       (23)
+✓ packages/core/test/expression.test.ts   (58)
+✓ packages/core/test/engine.test.ts       (34)
+✓ packages/nodes/test/nodes.test.ts       (28)
 ──────────────────────────────────────────────
-92 tests passed
+140 tests passed (Phase 1)
 ```
 
 型チェック:
@@ -283,14 +283,14 @@ pnpm size
 ```
 package        files      raw       gzip
 ------------------------------------------
-core              21  179.1 KB   37.8 KB
-nodes              9   27.5 KB    8.0 KB
+core              21  181.1 KB   38.5 KB
+nodes              9   27.6 KB    8.1 KB
 ------------------------------------------
-total                 206.5 KB   45.8 KB
+total                 208.7 KB   46.6 KB
 ```
 
 gzip はファイルごとの gzip の合計（保守的な見積もり）。
-設計目標の 250 KB に対して、コアは **45.8 KB**。
+設計目標の 250 KB に対して、コアは **46.6 KB**。
 
 ---
 
@@ -425,7 +425,7 @@ output: [
 
 | 領域 | 状態 |
 | --- | --- |
-| エディタ UI | 未着手（Phase 2） |
+| エディタ UI | M0 で Manual → Set の埋め込み実行を追加。キャンバスは M1 |
 | キャンバス / Node Creator / NDV / Logs | 未着手 |
 | トリガー実行（cron / webhook / poll） | 未着手（Phase 3） |
 | 認証情報ストア | インターフェースのみ |
