@@ -1,0 +1,36 @@
+export type Locale = 'en' | 'ja';
+const japanese: Record<string, string> = {
+  'Connect nodes': 'ノードを接続', 'Output port': '出力ポート', 'Input port': '入力ポート',
+  Connect: '接続', Cancel: 'キャンセル', 'No compatible input': '接続可能な入力がありません',
+  'Execute previous nodes': '上流ノードを実行', 'Execute step': 'このノードを実行', Stop: '停止',
+  Duplicate: '複製', Close: '閉じる', 'Discard invalid input': '無効な入力を破棄',
+  Input: '入力', Node: 'ノード', Output: '出力', Parameters: 'パラメーター', Settings: '設定',
+  'Map from': 'マッピング元', 'Current input': '現在の入力', 'Mapping insertion': '挿入方法',
+  'Replace value': '値を置換', 'Insert at cursor': 'カーソル位置に挿入', 'No linked item': '対応するアイテムがありません',
+  'No preview input': 'プレビュー用入力なし', 'Run index': '実行インデックス', Run: '実行',
+  'Pin output': '出力をピン留め', Unpin: 'ピン留めを解除',
+  'Pinning requires a single main[0] output.': 'ピン留めには単一の main[0] 出力が必要です。',
+  'Add row': '行を追加', Remove: '行を削除', Fixed: '固定値', Expression: '式', Insert: '挿入',
+  'Insert into': '挿入先', 'Execution log': '実行ログ', 'Clear execution': '実行結果をクリア',
+  In: '入力', Out: '出力', reused: '再利用', success: '成功', error: 'エラー', running: '実行中', waiting: '待機中', canceled: '停止済み',
+  ' item': '件', ' items': '件', Item: 'アイテム', Search: '検索', Table: '表', Schema: 'スキーマ', Previous: '前へ', Next: '次へ',
+  'Search Input': '入力を検索', 'Search Output': '出力を検索', 'Input item': '入力アイテム', 'Output item': '出力アイテム',
+  'Input view': '入力の表示形式', 'Output view': '出力の表示形式', 'Input table': '入力の表', 'Output table': '出力の表',
+  'Execute Once': '一度だけ実行', Disabled: '無効', 'Always Output Data': '常にデータを出力',
+  'Retry on Fail': '失敗時に再試行', 'Max Tries': '最大試行回数', 'Wait Between Tries (ms)': '再試行までの待機時間 (ms)',
+  'On Error': 'エラー時の動作', Continue: '続行', 'Error Output': 'エラー出力', Notes: 'メモ', 'Show notes on canvas': 'キャンバスにメモを表示',
+  Mode: 'モード', 'Manual Mapping': '手動マッピング', 'Fields to Set': '設定するフィールド', Name: '名前', Value: '値', Type: '型',
+  'Include Other Input Fields': '他の入力フィールドを含める', Left: '左辺', Right: '右辺', Operator: '演算子', Combine: '結合条件',
+  Conditions: '条件', 'Loose Type Validation': '型の検証を緩和', Method: 'メソッド', Headers: 'ヘッダー', Body: '本文',
+  'Response Format': '応答形式', 'Timeout (ms)': 'タイムアウト (ms)', Number: '数値', String: '文字列', Boolean: '真偽値',
+  equals: '等しい', notEquals: '等しくない', contains: '含む', notContains: '含まない', startsWith: 'で始まる', endsWith: 'で終わる',
+  gt: 'より大きい', gte: '以上', lt: 'より小さい', lte: '以下', regex: '正規表現', isEmpty: '空', isNotEmpty: '空ではない',
+  isTrue: '真', isFalse: '偽', exists: '存在する', notExists: '存在しない', and: 'すべて', or: 'いずれか',
+  'Choose an insertion point outside the expression.': '式の外に挿入位置を指定してください。',
+  'Join Mode': '結合モード', 'Key Field': 'キーフィールド', Branch: '分岐', 'Choose Branch': '分岐を選択', Append: '追加',
+  'Merge By Key': 'キーで結合', 'Input 1': '入力 1', 'Input 2': '入力 2', Inner: '内部結合', Outer: '外部結合', Auto: '自動', Text: 'テキスト',
+};
+export function translator(locale: Locale) {
+  return (label: string) => locale === 'ja' && Object.hasOwn(japanese, label) ? japanese[label]! : label;
+}
+export type Translate = ReturnType<typeof translator>;

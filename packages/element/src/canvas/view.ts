@@ -218,11 +218,12 @@ export function createCanvas(host: HTMLElement, registry: NodeRegistry, actions:
     schedule();
   }
   surface.addEventListener('keydown', event => {
-    if (event.isComposing || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.isComposing || event.keyCode === 229 || event.ctrlKey || event.metaKey || event.altKey) return;
     switch (event.key) {
       case 'Enter': {
         const id = cardAt(event)?.dataset.nodeId ?? (selected.size === 1 ? [...selected][0] : undefined);
         if (!id) return;
+        scene.cards.get(id)?.element.focus({ preventScroll: true });
         actions.openDetails(id);
         break;
       }

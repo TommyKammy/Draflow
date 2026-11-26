@@ -1,8 +1,9 @@
+import { openEnglishDemo } from './locale.js';
 import { test, expect, type Page } from '@playwright/test';
 import type {} from '@draflow/element/define';
 
 async function openFiltered(page: Page) {
-  await page.goto('/');
+  await openEnglishDemo(page);
   await expect(page.locator('[data-node-id="set"]')).toBeVisible();
   await page.evaluate(async () => {
     const el = document.querySelector('draflow-editor')!;
@@ -72,7 +73,7 @@ test.describe('touch mapping', () => {
 });
 
 test('pins an empty output, unpins, and undoes before executing the step again', async ({ page }) => {
-  await page.goto('/');
+  await openEnglishDemo(page);
   const card = page.locator('[data-node-id="set"]');
   await expect(card).toBeVisible();
   await page.evaluate(async () => {
@@ -96,12 +97,12 @@ test('pins an empty output, unpins, and undoes before executing the step again',
   await dialog.getByRole('button', { name: 'Unpin' }).click();
   expect(await run()).toBe(1);
   await dialog.getByRole('button', { name: 'Close' }).click();
-  await page.getByRole('button', { name: '元に戻す' }).click();
+  await page.getByRole('button', { name: 'Undo' }).click();
   expect(await run()).toBe(0);
 });
 
 test('pages a union of table columns, searches JSON and reports schema types', async ({ page }) => {
-  await page.goto('/');
+  await openEnglishDemo(page);
   await expect(page.locator('[data-node-id="set"]')).toBeVisible();
   await page.evaluate(async () => {
     await document.querySelector('draflow-editor')!.run({ triggerData: { main: [Array.from({ length: 101 }, (_, i) =>
@@ -124,7 +125,7 @@ test('pages a union of table columns, searches JSON and reports schema types', a
 });
 
 test('inspects distinct input and output snapshots for repeated node runs', async ({ page }) => {
-  await page.goto('/');
+  await openEnglishDemo(page);
   const card = page.locator('[data-node-id="set"]');
   await expect(card).toBeVisible();
   await page.evaluate(async () => {
@@ -151,7 +152,7 @@ test('inspects distinct input and output snapshots for repeated node runs', asyn
 });
 
 test('disallows pins on If and on a node with an error output', async ({ page }) => {
-  await page.goto('/');
+  await openEnglishDemo(page);
   const card = page.locator('[data-node-id="set"]');
   await expect(card).toBeVisible();
   for (const type of ['draflow.if', 'draflow.set']) {
@@ -172,7 +173,7 @@ test('disallows pins on If and on a node with an error output', async ({ page })
 });
 
 test('maps a selected secondary input port into an executable parameter', async ({ page }) => {
-  await page.goto('/');
+  await openEnglishDemo(page);
   await expect(page.locator('[data-node-id="set"]')).toBeVisible();
   await page.evaluate(async () => {
     const el = document.querySelector('draflow-editor')!;

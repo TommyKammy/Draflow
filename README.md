@@ -52,6 +52,12 @@ fresh. Open a row in **Execution log** to inspect its input and output by node
 and run index. **Stop** cancels the active run. **Clear execution** removes
 displayed results and the partial execution cache while preserving edits and pins.
 
+For keyboard editing, Tab to **Add node** or **Connect nodes**. The connection
+dialog lists output and input ports with their slot indices. Press Enter on a
+node card to edit it, select an input field and use **Insert** to map it, then
+choose **Execute step**. Closing the details dialog returns focus to the card.
+On narrow screens, use the Input, Node and Output buttons to switch panes.
+
 In **Map from**, choose the current input or an upstream node. Select a field,
 then use **Insert** at the destination parameter, or drag the field onto it.
 **Insert at cursor** embeds a value in text. **Replace value** preserves the
