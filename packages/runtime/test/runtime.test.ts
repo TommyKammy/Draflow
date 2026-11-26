@@ -54,6 +54,39 @@ describe('published executions', () => {
     expect(next.revision).toBe(2);
   });
 
+  it('captures nested input at fire time when a producer immediately reuses its buffer', async () => {
+    const runtime = new MemoryRuntime({ registry: new NodeRegistry().registerAll([source, stamp]) });
+    runtime.saveDraft(draft());
+    runtime.publish('flow');
+    await runtime.activate('flow', 1);
+    const payload = { sequence: 1 };
+    const accepted = runtime.fire('flow', 'left', { items: [{ json: { payload } }] });
+    payload.sequence = 2;
+    const run = await accepted;
+    expect(run.result.runData.a?.[0]?.output?.main?.[0]?.[0]?.json.payload).toEqual({ sequence: 1 });
+  });
+
+  it('keeps object-valued expression results from altering the publication across runs', async () => {
+    const increment: NodeType = {
+      ...stamp,
+      execute(ctx) {
+        const counter = ctx.param<{ value: number }>('counter');
+        counter.value += 1;
+        return [{ json: { count: counter.value } }];
+      },
+    };
+    const runtime = new MemoryRuntime({ registry: new NodeRegistry().registerAll([source, increment]) });
+    const workflow = draft();
+    workflow.nodes[2]!.parameters = { initial: { value: 0 }, counter: '={{ $parameter.initial }}' };
+    runtime.saveDraft(workflow);
+    runtime.publish('flow');
+    await runtime.activate('flow', 1);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const run = await runtime.fire('flow', 'left', { items: event.items });
+      expect(run.result.runData.a?.[0]?.output?.main?.[0]?.[0]?.json.count).toBe(1);
+    }
+  });
+
   it.each([['left', 'a'], ['right', 'b']])('executes only the branch registered for %s', async (id, output) => {
     const registrations = new Map<string, TriggerRegistration>();
     const runtime = new MemoryRuntime({

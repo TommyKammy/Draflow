@@ -147,8 +147,13 @@ export class MemoryRuntime {
     if (this.#active.get(workflow.id) !== active) throw new Error('Inactive trigger registration');
     if (!active.triggers.has(triggerNodeId)) throw new Error(`Unknown active trigger: ${triggerNodeId}`);
     const { key, mode = 'trigger', runId } = event;
-    const run = this.#engine.run(workflow, {
-      ...(runId !== undefined && { runId }), mode, startNodeId: triggerNodeId, triggerData: { main: [event.items] }, pinData: {},
+    // Expressions can expose parameter objects to nodes, and the engine starts asynchronously.
+    const run = this.#engine.run(structuredClone(workflow), {
+      ...(runId !== undefined && { runId }),
+      mode,
+      startNodeId: triggerNodeId,
+      triggerData: { main: [structuredClone(event.items)] },
+      pinData: {},
     });
     return {
       workflowId: workflow.id, revision, triggerNodeId,
