@@ -8,6 +8,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@draflow/core": "workspace:*",
     "@draflow/element": "workspace:*",
     "@draflow/nodes": "workspace:*",
     "@draflow/storage": "workspace:*"

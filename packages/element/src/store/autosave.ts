@@ -31,7 +31,8 @@ function writeSnapshot(store: WorkflowStore, workflow: Workflow): Promise<void> 
 export class Autosave {
   #docs = new Map<string, DocumentSave>();
   #active: DocumentSave | undefined;
-  constructor(private store: WorkflowStore | undefined, private notify: () => void) {}
+  constructor(private store: WorkflowStore | undefined, private notify: () => void,
+    private onError?: (workflowId: string, message: string) => void) {}
 
   open(w: Workflow) {
     const old = this.#active;
@@ -86,6 +87,7 @@ export class Autosave {
     } catch (error) {
       if (d.revision === revision && d.content !== d.saved) {
         d.error = d.current.name + ' · ' + String(error);
+        this.onError?.(d.current.id, d.error);
       }
     } finally {
       if (d.revision === revision) {
