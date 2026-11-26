@@ -658,14 +658,24 @@ const DATE_METHODS = new Set([
   'isEmpty',
 ]);
 
+const NO_METHODS = new Set<string>();
+
+function methodsFor(receiver: unknown): ReadonlySet<string> {
+  if (typeof receiver === 'string') return STRING_METHODS;
+  if (typeof receiver === 'number') return NUMBER_METHODS;
+  if (typeof receiver === 'boolean') return BOOLEAN_METHODS;
+  if (Array.isArray(receiver)) return ARRAY_METHODS;
+  if (receiver instanceof DraflowDateTime) return DATE_METHODS;
+  if (isPlainObject(receiver)) return OBJECT_METHODS;
+  return NO_METHODS;
+}
+
+export function extensionMethodNames(receiver: unknown): IterableIterator<string> {
+  return methodsFor(receiver).values();
+}
+
 export function hasExtensionMethod(receiver: unknown, name: string): boolean {
-  if (typeof receiver === 'string') return STRING_METHODS.has(name);
-  if (typeof receiver === 'number') return NUMBER_METHODS.has(name);
-  if (typeof receiver === 'boolean') return BOOLEAN_METHODS.has(name);
-  if (Array.isArray(receiver)) return ARRAY_METHODS.has(name);
-  if (receiver instanceof DraflowDateTime) return DATE_METHODS.has(name);
-  if (isPlainObject(receiver)) return OBJECT_METHODS.has(name);
-  return false;
+  return methodsFor(receiver).has(name);
 }
 
 function unknownMethod(name: string, type: string, ctx: ExtensionContext): ExpressionError {

@@ -236,7 +236,26 @@ export function nodeDetails(actions: Actions, t: Translate) {
     switches[0]!.setAttribute('aria-pressed', String(!settingsMode));
     switches[1]!.setAttribute('aria-pressed', String(settingsMode));
     if (!type) { fields.textContent = node.type; return; }
+    let names: string[] | undefined;
+    let linkedTask: TaskData | undefined, linkedKey = '', linked: Item | undefined;
     const context = { t, modes, canRedraw, previews, expression: actions.engine.expression, type, node, changed,
+      completion() {
+        const selected = inputPanel.selection(), current = task();
+        return {
+          input: selected.port === 'main' && selected.slot === 0 ? undefined : { port: selected.port, slot: selected.slot },
+          names: () => names ??= actions.ancestors(node.id),
+          json(name?: string) {
+            if (name === undefined) return selected.item?.json;
+            if (!current || !selected.item) return;
+            const key = JSON.stringify([name, selected.port, selected.slot, selected.index]);
+            if (current !== linkedTask || key !== linkedKey) {
+              linked = actions.engine.previewAncestor(current, name, selected.index, selected.port, selected.slot);
+              linkedTask = current; linkedKey = key;
+            }
+            return linked?.json;
+          },
+        };
+      },
       preview(value: string) {
         const currentTask = task(), selected = inputPanel.selection();
         if (!currentTask || !selected.item) return { text: t('No preview input') };

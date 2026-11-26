@@ -1,4 +1,5 @@
 // Standalone consumer of built declaration files, without source aliases.
+import { extensionMethodNames } from '@draflow/core';
 import type { RunHandle, RunResult, Workflow } from '@draflow/core';
 import { createWorkflowEditor, type EditorOptions } from '@draflow/element';
 import '@draflow/element/define';
@@ -23,4 +24,8 @@ export function component(workflow: Workflow, finish: (result: RunResult) => voi
   editor.workflow = workflow;
   editor.addEventListener('draflow-run-finish', e => finish(e.detail.result));
   return editor;
+}
+
+export function supportedMethods(value: unknown): string[] {
+  return [...extensionMethodNames(value)];
 }

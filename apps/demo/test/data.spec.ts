@@ -2,14 +2,14 @@ import { openEnglishDemo } from './locale.js';
 import { test, expect, type Page } from '@playwright/test';
 import type {} from '@draflow/element/define';
 
-async function openFiltered(page: Page) {
+async function openFiltered(page: Page, sourceName = 'Source') {
   await openEnglishDemo(page);
   await expect(page.locator('[data-node-id="set"]')).toBeVisible();
-  await page.evaluate(async () => {
+  await page.evaluate(async name => {
     const el = document.querySelector('draflow-editor')!;
     const w = el.workflow!;
     const [source, set] = w.nodes;
-    source!.name = 'Source';
+    source!.name = name;
     const filter = { ...set!, id: 'filter', type: 'draflow.filter', name: 'Filter',
       parameters: { conditions: { combinator: 'and', conditions: [{ left: '={{ $json.keep }}', operator: 'isTrue' }] } } };
     const mask = { ...set!, id: 'mask', name: 'Mask', parameters: {
@@ -23,16 +23,16 @@ async function openFiltered(page: Page) {
     el.workflow = w;
     const result = await el.run({ triggerData: { main: [[
       { json: { label: 'discarded', amount: 900, keep: false } },
-      { json: { label: 'first', amount: 17, keep: true } },
-      { json: { label: 'second', amount: 42, keep: true } },
+      { json: { label: 'first', amount: 17, "unit price": 17.4, keep: true } },
+      { json: { label: 'second', amount: 42, "unit price": 42.3, keep: true } },
     ]] } }).done;
     if (result.status !== 'success') throw Error(result.error?.message);
-  });
+  }, sourceName);
   await page.locator('[data-node-id="set"]').dblclick();
   const dialog = page.getByRole('dialog');
   await dialog.getByRole('spinbutton', { name: 'Input item' }).fill('2');
   await dialog.getByRole('spinbutton', { name: 'Input item' }).press('Enter');
-  await dialog.getByRole('combobox', { name: 'Map from' }).selectOption('Source');
+  await dialog.getByRole('combobox', { name: 'Map from' }).selectOption(sourceName);
   return dialog;
 }
 
@@ -146,6 +146,16 @@ test('inspects distinct input and output snapshots for repeated node runs', asyn
   await expect(input.locator('pre')).toContainText('"generation": 2');
   await runs.selectOption('1');
   await expect(input.locator('pre')).toContainText('"generation": 1');
+  const value = dialog.getByRole('textbox', { name: 'Value', exact: true }).first();
+  await value.fill('={{ $json.gen');
+  await expect(dialog.getByRole('listbox').getByRole('option', { name: 'generation' })).toBeVisible();
+  await runs.selectOption('0');
+  await value.focus();
+  await value.press('Control+Space');
+  await expect(dialog.getByRole('listbox')).toBeHidden();
+  await value.press('Escape');
+  await card.dblclick();
+  await runs.selectOption('1');
   await dialog.getByRole('button', { name: 'Pin output' }).click();
   expect(await page.evaluate(() => document.querySelector('draflow-editor')!.workflow!.pinData!.set![0]!.json))
     .toEqual({ generation: 2 });
@@ -203,8 +213,96 @@ test('maps a selected secondary input port into an executable parameter', async 
   await dialog.getByRole('button', { name: 'amount', exact: true }).click();
   await dialog.getByRole('button', { name: 'Insert into Value', exact: true }).click();
   await expect(dialog.locator('small[data-type=number]')).toHaveText('42');
+  const value = dialog.getByRole('textbox', { name: 'Value', exact: true });
+  await value.fill('={{ $json.am');
+  await value.press('Enter');
+  await value.pressSequentially(' }}');
+  await expect(value).toHaveValue("={{ $input.itemFrom('main', 1, $itemIndex).json.amount }}");
+  await expect(dialog.locator('small[data-type=number]')).toHaveText('42');
   await dialog.getByRole('button', { name: 'Execute step' }).click();
   const output = dialog.locator('section').filter({ has: page.getByRole('heading', { name: 'Output', exact: true }) });
   await expect(output.locator('pre')).toContainText('"mapped": 42');
   expect(JSON.parse(await output.locator('pre').innerText())).toEqual([{ amount: 17, mapped: 42 }]);
+});
+
+test('completes a linked ancestor, spaced key and numeric method on the second filtered item', async ({ page }) => {
+  const name = "Source's data";
+  const dialog = await openFiltered(page, name);
+  const value = dialog.getByRole('textbox', { name: 'Value', exact: true });
+  async function suggest(prefix: string, suffix: string) {
+    await value.fill(prefix + suffix);
+    await value.evaluate((el, pos) => (el as HTMLInputElement).setSelectionRange(pos, pos), prefix.length);
+    await value.press('Control+Space');
+  }
+  await suggest("=Before {{ $('Sou", ' }} after');
+  const option = dialog.getByRole('listbox').getByRole('option', { name, exact: true });
+  await expect(option).toBeVisible();
+  await value.press('Escape');
+  await expect(value).toHaveValue("=Before {{ $('Sou }} after");
+  await value.press('Control+Space');
+  await value.press('Enter');
+  const root = "$('Source\\'s data').item.json";
+  await expect(value).toHaveValue('=Before {{ ' + root + ' }} after');
+  await suggest('={{ ' + root + '.unit', ' }}');
+  await value.press('Enter');
+  await expect(value).toHaveValue('={{ ' + root + "['unit price'] }}");
+  await expect(dialog.locator('small[data-type=number]')).toHaveText('42.3');
+  await suggest('={{ ' + root + "['unit price'].rou", ' }}');
+  await expect(dialog.getByRole('option', { name: 'round()' })).toBeVisible();
+  await value.dispatchEvent('keydown', { key: 'Enter', isComposing: true });
+  await expect(value).toHaveValue('={{ ' + root + "['unit price'].rou }}");
+  await value.press('Enter');
+  await expect(dialog.locator('small[data-type=number]')).toHaveText('42');
+  await dialog.getByRole('button', { name: 'Execute step' }).click();
+  const output = dialog.locator('section').filter({ has: page.getByRole('heading', { name: 'Output', exact: true }) });
+  expect(JSON.parse(await output.locator('pre').innerText()).map((v: { mapped: number }) => v.mapped)).toEqual([17, 42]);
+});
+
+test.describe('touch completion', () => {
+  test.use({ hasTouch: true, viewport: { width: 360, height: 800 } });
+  test('inserts an input key by touch in Japanese', async ({ page }) => {
+    await page.setViewportSize({ width: 1000, height: 800 });
+    await openFiltered(page);
+    await page.locator('draflow-editor').evaluate(el => el.setAttribute('locale', 'ja'));
+    await page.locator('[data-node-id=set]').dblclick();
+    await page.setViewportSize({ width: 360, height: 800 });
+    const dialog = page.getByRole('dialog');
+    const value = dialog.getByRole('textbox', { name: '値', exact: true });
+    await value.fill('={{ $json. }}');
+    await value.evaluate(el => (el as HTMLInputElement).setSelectionRange(10, 10));
+    await dialog.getByRole('button', { name: '式の補完候補' }).tap();
+    await dialog.getByRole('option', { name: 'label', exact: true }).tap();
+    await expect(value).toHaveValue('={{ $json.label }}');
+    await expect(value).toBeFocused();
+  });
+});
+
+test('caps a thousand input keys at twenty options and allows typing an unknown path', async ({ page }) => {
+  await openEnglishDemo(page);
+  await expect(page.locator('[data-node-id=set]')).toBeVisible();
+  await page.evaluate(async () => {
+    const editor = document.querySelector('draflow-editor')!;
+    const json = Object.fromEntries(Array.from({ length: 1000 }, (_, i) => ['field' + i, i]));
+    await editor.run({ triggerData: { main: [[{ json }]] } }).done;
+  });
+  await page.locator('[data-node-id=set]').dblclick();
+  const dialog = page.getByRole('dialog');
+  const value = dialog.getByRole('textbox', { name: 'Value', exact: true }).first();
+  await value.fill('={{ $json.');
+  const list = dialog.getByRole('listbox', { name: 'Expression suggestions' });
+  await expect(list.getByRole('option')).toHaveCount(20);
+  await value.pressSequentially('field999');
+  await expect(list.getByRole('option')).toHaveCount(1);
+  await value.press('Enter');
+  await value.pressSequentially(' }}');
+  await expect(dialog.locator('small[data-type=number]')).toContainText('999');
+  await value.fill('={{ $json.missing.');
+  await expect(list).toBeHidden();
+  await expect(value).toBeFocused();
+  await value.pressSequentially('child');
+  await expect(value).toHaveValue('={{ $json.missing.child');
+  await page.keyboard.press('Escape');
+  await page.locator('draflow-editor').evaluate(el => el.setAttribute('readonly', ''));
+  await page.locator('[data-node-id=set]').dblclick();
+  await expect(dialog.getByRole('button', { name: 'Expression suggestions' }).first()).toBeDisabled();
 });
