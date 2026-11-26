@@ -27,6 +27,7 @@
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@draflow/core": "workspace:*"
+    "@draflow/core": "workspace:*",
+    "@draflow/storage": "workspace:*"
   }
 }

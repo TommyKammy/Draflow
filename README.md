@@ -35,7 +35,14 @@ to zoom around the pointer, or use the zoom and fit buttons. Click a node to
 select it, Shift-click to toggle another, or drag the background to select a region.
 With the canvas focused, `+` / `-` zoom, `0` restores 100%, and `1` fits the graph.
 
-After building, run `pnpm bench:canvas` to measure rendering, panning and zooming
+Use the node type menu and **追加** to add a node. Drag cards to move them on a
+16-unit grid, or drag an output dot onto an input dot to connect nodes. Select a
+card or an edge and press Delete to remove it. The toolbar supports Undo and Redo;
+Ctrl/Cmd+D duplicates a selection and Ctrl/Cmd+C/V copies and pastes a subgraph.
+The demo saves edits in localStorage after 500 ms and restores them on reload.
+Embedded hosts can supply their own `ports.storage` or listen for `draflow-change`.
+
+After building, run `pnpm bench:canvas` to measure rendering, panning, zooming and node dragging
 in the production embed. [M1 baseline and measurement conditions](docs/implementation.md#m1-canvas-baseline).
 
 ## Documents

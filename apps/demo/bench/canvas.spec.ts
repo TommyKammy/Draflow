@@ -79,6 +79,44 @@ test('canvas baseline on the production embed', async ({ page, browser }, info) 
     }, { mode, cx, cy, pointerId: await pointer });
     if (mode === 'pan') await page.mouse.up({ button: 'middle' });
   }
+  // Center an interior node. Measure the actual drag preview, including its incident edges.
+  await surface.focus();
+  await page.keyboard.press('0');
+  const editor = page.locator('draflow-editor');
+  await editor.evaluate(el => (el as HTMLElementTagNameMap['draflow-editor']).focusNode('55'));
+  const card = surface.locator('[data-node-id="55"]');
+  const originalX = await card.evaluate(el => (el as HTMLElement).offsetLeft);
+  await card.hover();
+  const cardBox = (await card.boundingBox())!;
+  const start = { x: cardBox.x + cardBox.width / 2, y: cardBox.y + cardBox.height / 2 };
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  motion.move = await surface.evaluate(async (surface, args) => {
+    const card = surface.querySelector<HTMLElement>('[data-node-id="55"]')!;
+    const path = surface.querySelector('[data-edge-id="54-1"]')!;
+    const frame = () => new Promise<number>(resolve => requestAnimationFrame(resolve));
+    let previous = await frame(), changes = 0;
+    let transform = card.style.transform, route = path.getAttribute('d');
+    const samples: number[] = [];
+    for (let i = 0; i < 120; i++) {
+      const step = i % 20 < 10 ? i % 10 : 10 - i % 10;
+      surface.dispatchEvent(new PointerEvent('pointermove', {
+        pointerId: args.pointerId, buttons: 1,
+        clientX: args.start.x + step * 16, clientY: args.start.y + step * 16,
+      }));
+      const now = await frame();
+      if (i >= 20) samples.push(now - previous);
+      if (transform !== card.style.transform && route !== path.getAttribute('d')) changes++;
+      transform = card.style.transform;
+      route = path.getAttribute('d');
+      previous = now;
+    }
+    if (changes < 110) throw new Error('Card and incident edge did not move together');
+    return samples;
+  }, { start, pointerId: await pointer });
+  await page.mouse.move(start.x + 32, start.y + 16);
+  await page.mouse.up();
+  expect(await card.evaluate(el => (el as HTMLElement).offsetLeft)).toBe(originalX + 32);
   const measurements = Object.fromEntries(Object.entries({ ...rendering.times, ...motion }).map(([name, samples]) => {
     const sorted = [...samples].sort((a, b) => a - b);
     const percentile = (p: number) => +sorted[Math.ceil(p * sorted.length) - 1]!.toFixed(2);

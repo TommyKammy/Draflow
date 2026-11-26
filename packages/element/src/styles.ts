@@ -48,4 +48,14 @@ export const styles = `
   .view-controls button { background:transparent; color:CanvasText; font-size:13px; padding:5px 9px; min-width:30px }
   .view-controls button:hover { background:color-mix(in srgb, CanvasText 8%, Canvas) }
   .view-controls span { font:12px/1.5 ui-monospace,monospace; min-width:4ch; text-align:center }
+  .edit-tools { display:flex; flex-wrap:wrap; align-items:center; gap:.4rem; margin-top:1rem }
+  .edit-tools[hidden] { display:none }
+  .edit-tools button,.edit-tools select { color:CanvasText; background:Canvas; font:inherit; font-size:.85rem;
+    border:1px solid color-mix(in srgb,CanvasText 25%,Canvas); border-radius:5px; padding:.3rem .55rem }
+  .edit-tools span { margin-inline-start:auto; font-size:.8rem }
+  .node-card {cursor:grab; -webkit-user-select:none}
+  .port {width:10px;height:10px;cursor:crosshair}
+  .world path[data-edge-id] {pointer-events:stroke;cursor:pointer;stroke-width:3}
+  .world path.selected-edge,.world path.wire-preview {stroke:#518fe4;stroke-width:4}
+  .world path.wire-preview {pointer-events:none;stroke-dasharray:6 3}
 `;
