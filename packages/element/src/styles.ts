@@ -48,6 +48,24 @@ export const styles = `
   .view-controls button { background:transparent; color:CanvasText; font-size:13px; padding:5px 9px; min-width:30px }
   .view-controls button:hover { background:color-mix(in srgb, CanvasText 8%, Canvas) }
   .view-controls span { font:12px/1.5 ui-monospace,monospace; min-width:4ch; text-align:center }
+  .node-details { box-sizing:border-box; width:min(74rem,96vw); max-height:90vh; overflow:auto; color:CanvasText; background:Canvas;
+    border:1px solid GrayText; border-radius:10px; padding:1rem; overscroll-behavior:contain }
+  .node-details::backdrop { background:#0006 }
+  .details-panes { display:grid; grid-template-columns:minmax(0,1fr) minmax(16rem,1.4fr) minmax(0,1fr); gap:1rem; margin-top:1rem }
+  .node-details nav { display:flex; gap:.35rem }
+  .node-details nav button:not([aria-pressed=true]) { color:CanvasText; background:Canvas; border:1px solid GrayText }
+  .node-details h3,.node-details h4 { margin:.5rem 0 }
+  .node-details fieldset { min-width:0; margin:.5rem 0; border:1px solid color-mix(in srgb,CanvasText 20%,Canvas); border-radius:5px }
+  .node-details form>fieldset { padding:0; border:0 }
+  .node-details label { display:grid; margin:.55rem 0; gap:.2rem; font-size:.9rem }
+  .node-details :is(input,select,textarea) { box-sizing:border-box; font:inherit; max-width:100%; padding:.3rem }
+  .node-details input[type=checkbox] { justify-self:start }
+  .node-details .details-tabs { display:none }
+  @media(max-width:760px) {
+    .details-panes { display:block }
+    .details-panes>section:not(.current) { display:none }
+    .node-details .details-tabs { display:flex; margin-top:.5rem }
+  }
   .node-creator { box-sizing:border-box; width:min(26rem,92vw); max-height:80vh; overflow:auto; overscroll-behavior:contain;
     padding:1.25rem; background:Canvas; color:CanvasText; border:1px solid GrayText; border-radius:10px }
   .node-creator::backdrop { background:#0006 }

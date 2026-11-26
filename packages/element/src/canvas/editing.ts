@@ -3,6 +3,7 @@ import { compatible, fragment, type Edit } from '../store/edit.js';
 import type { CanvasScene, Point } from './scene.js';
 
 export interface EditActions {
+  openDetails(id: string): void;
   enabled(): boolean;
   document(): Workflow;
   commit(edit: Edit): void;

@@ -1,8 +1,10 @@
 import {
-  ExecutionEngine, NodeRegistry, createWorkflow,
+  ExecutionEngine, NodeRegistry, buildGraph, createWorkflow, downstreamOf,
   type EngineEvents, type ExecutionEngineOptions, type NodeType,
-  type RunHandle, type RunOptions, type RunResult, type Workflow,
+  type RunData, type TaskData, type RunHandle, type RunOptions, type RunResult, type Workflow,
 } from '@draflow/core';
+import { nodeDetails } from './details/view.js';
+import { fragment } from './store/edit.js';
 import { createNodeCreator } from './creator.js';
 import { createCanvas } from './canvas/view.js';
 import { Autosave } from './store/autosave.js';
@@ -40,7 +42,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
   if (root.childNodes.length) throw new Error('Editor host is already in use');
   let workflow = structuredClone(options.workflow ?? createWorkflow());
   const registry = new NodeRegistry().registerAll([...(options.nodeTypes ?? [])]);
-  const engine = new ExecutionEngine({ ...options.ports, registry });
+  const engine = new ExecutionEngine({ ...options.ports, registry, preview: true });
   let active: RunHandle | undefined;
   let disposed = false;
   let subscriptions: (() => void)[] = [];
@@ -82,7 +84,26 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
   });
   let selectedEdge: string | undefined;
   const locale = () => shell.lang === 'ja' ? 'ja' : 'en';
+  let cached: RunData | undefined;
+  const dirty = new Set<string>();
+  const displayed = new Map<string, TaskData>();
+  const previewInputs = new Map<string, TaskData>();
+  const details = nodeDetails({ registry, engine, canEdit,
+    get: id => workflow.nodes.find(n => n.id === id),
+    task: id => previewInputs.get(id),
+    output: id => displayed.get(id)?.output,
+    commit: (node, control) => {
+      const before = workflow.nodes.find(n => n.id === node.id);
+      const declared = registry.get(node.type, node.typeVersion)?.ports.outputs;
+      const removeErrorOutput = before?.settings?.onError === 'errorOutput' && node.settings?.onError !== 'errorOutput' &&
+        !!declared && !declared.some(p => p.type === 'error');
+      commit({ type: 'configure', node, removeErrorOutput }, control);
+    },
+    execute: runNode,
+    duplicate: id => commit({ type: 'paste', fragment: fragment(workflow, new Set([id])) }),
+  });
   const canvas = createCanvas(host, registry, { enabled: canEdit, document: () => workflow, commit, undo, redo,
+    openDetails: id => details.open(id),
     createFrom: from => { if (canEdit()) creator.open(locale(), { from }); },
     selectEdge: id => { selectedEdge = id; refreshEditing(); },
   });
@@ -104,7 +125,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
   saveState.setAttribute('aria-live', 'polite');
   const retry = tool(() => saves.flush());
   tools.append(add, remove, backward, forward, saveState, retry);
-  shell.append(header, tools, canvas.panel, outputTitle, status, output, creator.dialog);
+  shell.append(header, tools, canvas.panel, outputTitle, status, output, creator.dialog, details.dialog);
   root.append(style, shell);
 
   function updateButton() {
@@ -130,6 +151,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
   }
   function change(next: Workflow, source: ChangeMeta['source']) {
     if (next === workflow) return;
+    if (source !== 'configure') lastControl = undefined;
     const previous = workflow;
     creator.dialog.close();
     workflow = next;
@@ -137,12 +159,40 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
       ? new Set(next.nodes.slice(previous.nodes.length).map(n => n.id)) : undefined;
     canvas.applyWorkflow(next, added);
     if (source === 'add') canvas.focusNode(next.nodes[next.nodes.length - 1]!.id);
-    if (source !== 'move') {
+    // Undo of a move shares all computation-relevant fields with the previous revision.
+    let structural = previous.connections !== next.connections || previous.pinData !== next.pinData ||
+      previous.nodes.length !== next.nodes.length;
+    const changed = new Set<string>();
+    previous.nodes.forEach((before, i) => {
+      const after = next.nodes[i];
+      if (!after || before.id !== after.id || before.name !== after.name) structural = true;
+      else if (before.parameters !== after.parameters || before.settings !== after.settings ||
+        before.disabled !== after.disabled) changed.add(after.id);
+    });
+    if (structural || changed.size) {
+      if (structural) {
+        cached = undefined;
+        dirty.clear();
+        previewInputs.clear();
+      } else {
+        // A configuration edit changes this node's output, but not its incoming items.
+        const newlyDirty = [...changed].filter(id => !dirty.has(id));
+        if (newlyDirty.length && previewInputs.size) {
+          const graph = buildGraph(next);
+          for (const id of newlyDirty) {
+            for (const downstream of downstreamOf(graph, id)) previewInputs.delete(downstream);
+          }
+        }
+        for (const id of newlyDirty) dirty.add(id);
+      }
+      displayed.clear();
+      details.refreshData();
       canvas.scene.resetRun();
       output.textContent = '';
       summary = undefined;
       failure = undefined;
     }
+    if (source === 'undo' || source === 'redo') details.close();
     saves.changed(next);
     refresh();
     const meta = { source, dirty: saves.dirty };
@@ -150,11 +200,16 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     host.dispatchEvent(new CustomEvent('draflow-change', { detail: { workflow: snapshot, ...meta }, bubbles: true, composed: true }));
     options.onChange?.(snapshot, meta);
   }
-  function commit(edit: Edit) {
+  let lastControl: HTMLElement | undefined;
+  let lastEditAt = 0;
+  function commit(edit: Edit, control?: HTMLElement) {
     if (!canEdit()) return;
     const next = applyEdit(workflow, edit);
     if (next === workflow) return;
-    history.record(workflow);
+    const now = performance.now();
+    if (!control || control !== lastControl || now - lastEditAt > 300) history.record(workflow);
+    lastControl = control;
+    lastEditAt = now;
     change(next, edit.type);
   }
   function undo() { if (canEdit()) change(history.undo(workflow), 'undo'); }
@@ -176,6 +231,12 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
   }
 
   function resetView() {
+    details.close();
+    cached = undefined;
+    dirty.clear();
+    displayed.clear();
+    previewInputs.clear();
+    lastControl = undefined;
     title.textContent = workflow.name;
     creator.dialog.close();
     canvas.setWorkflow(workflow);
@@ -209,7 +270,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
       failure = result.error?.message ?? result.status;
       return;
     }
-    const tasks = Object.values(result.runData).flat();
+    const tasks = [...displayed.values()];
     const last = tasks.reduce<typeof tasks[number] | undefined>(
       (latest, task) => !latest || task.executionIndex > latest.executionIndex ? task : latest, undefined,
     );
@@ -219,12 +280,21 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     output.textContent = JSON.stringify(items.map(item => item.json), null, 2);
   }
 
+  function runNode(id: string): RunHandle {
+    if (!details.flush(true)) throw new Error('Invalid node parameters');
+    return run({ destinationNodeId: id, ...(cached && { runData: cached }), dirtyNodeIds: [...dirty, id] });
+  }
+
   function run(runOptions: RunOptions = {}): RunHandle {
     if (disposed || readonly || active) throw new Error('Editor cannot start a run');
+    if (!details.flush(true)) throw new Error('Invalid node parameters');
     const handle = engine.run(workflow, runOptions);
     creator.dialog.close();
     canvas.cancelEdit();
     active = handle;
+    displayed.clear();
+    previewInputs.clear();
+    details.refresh();
     canvas.scene.resetRun();
     output.textContent = '';
     failure = undefined;
@@ -237,6 +307,8 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
         publish({ type: 'node:start', detail });
       }),
       handle.on('node:finish', detail => {
+        displayed.set(detail.nodeId, detail.task);
+        previewInputs.set(detail.nodeId, detail.task);
         const count = Object.values(detail.task.output ?? {}).reduce(
           (total, ports) => total + ports.reduce((sum, items) => sum + (items?.length ?? 0), 0), 0,
         );
@@ -251,7 +323,11 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
           }
         }
         detach();
-        showResult(detail.result);
+        const result = detail.result;
+        cached = result.status === 'success' ? Object.fromEntries([...displayed.keys()].map(id => [id, result.runData[id]!])) : undefined;
+        dirty.clear();
+        showResult(result);
+        details.refresh();
         refresh();
         publish({ type: 'run:finish', detail });
       }),
@@ -260,6 +336,8 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
       if (active !== handle) return;
       detach();
       failure = String(error);
+      cached = undefined;
+      details.refresh();
       refresh();
     });
     return handle;
@@ -278,8 +356,10 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     undo, redo,
     fitView: canvas.fitView,
     focusNode: canvas.focusNode,
-    run,
+    run, runNode,
     setPresentation(settings: Pick<EditorOptions, 'locale' | 'theme' | 'readonly'>) {
+      details.flush();
+      details.close();
       creator.dialog.close();
       if (settings.theme !== undefined) shell.dataset.theme = settings.theme;
       if (settings.locale !== undefined) {
@@ -298,6 +378,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     setWorkflow(next: Workflow) {
       if (disposed) throw new Error('Editor has been destroyed');
       const snapshot = structuredClone(next);
+      details.flush();
       abandon();
       workflow = snapshot;
       history = new History();
@@ -306,6 +387,8 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     },
     destroy() {
       if (disposed) return;
+      details.flush();
+      details.close();
       disposed = true;
       lifetime.abort();
       saves.flush();

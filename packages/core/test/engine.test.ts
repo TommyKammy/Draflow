@@ -468,6 +468,26 @@ describe('ExecutionEngine', () => {
     expect(Object.keys(second.runData)).toEqual(['t', 'a', 'b']);
   });
 
+  it('previews a reused trigger task with its retained input after a partial run', async () => {
+    let triggerCalls = 0;
+    const trigger: NodeType = {
+      ...triggerType,
+      execute(ctx) { triggerCalls++; return [...ctx.items]; },
+    };
+    const engine = new ExecutionEngine({ registry: new NodeRegistry().registerAll([trigger, echoType]), preview: true });
+    const wf = workflow([node('t', trigger.type, 'Trigger', 0), node('a', echoType.type, 'Echo', 200)], [connect('t', 'a')]);
+    const triggerData = { main: [[{ json: { amount: 42 } }, { json: { amount: 73 } }]] };
+    const first = await engine.run(wf, { triggerData }).done;
+    const second = await engine.run(wf, { destinationNodeId: 'a', dirtyNodeIds: ['a'], runData: first.runData }).done;
+    expect(second.status).toBe('success');
+    expect(triggerCalls).toBe(1);
+    const cachedTask = second.runData.t![0]!;
+    expect(cachedTask.input).toEqual(triggerData);
+    expect(engine.preview(cachedTask, '={{ $json.amount }}')).toBe(42);
+    expect(engine.preview(cachedTask, '={{ $json.amount }}', 1)).toBe(73);
+    expect(engine.preview(cachedTask, '={{ $input.all().length }}')).toBe(2);
+  });
+
   it('emits node:start for each actual execution', async () => {
     const wf = workflow(
       [

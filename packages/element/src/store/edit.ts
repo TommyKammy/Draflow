@@ -1,4 +1,4 @@
-import { createConnection, createId, createNode, type Connection, type NodePortRef, type NodeType, type Workflow } from '@draflow/core';
+import { createConnection, createId, createNode, type Connection, type NodePortRef, type NodeType, type WorkflowNode, type Workflow } from '@draflow/core';
 import type { Point } from '../canvas/scene.js';
 
 export type Placement = { from: NodePortRef; edge?: Connection };
@@ -20,6 +20,7 @@ export function creatorPorts(type: NodeType, placement: Placement) {
 }
 
 export type Edit =
+  | { type: 'configure'; node: WorkflowNode; removeErrorOutput?: boolean }
   | { type: 'move'; positions: Map<string, Point> }
   | { type: 'connect'; from: NodePortRef; to: NodePortRef }
   | { type: 'delete'; nodes: Set<string>; edge?: string }
@@ -42,6 +43,12 @@ export function fragment(workflow: Workflow, ids: Set<string>): Workflow {
 
 export function applyEdit(w: Workflow, edit: Edit): Workflow {
   switch (edit.type) {
+    case 'configure': {
+      const nodes = w.nodes.map(n => n.id === edit.node.id ? edit.node : n);
+      const connections = edit.removeErrorOutput
+        ? w.connections.filter(c => c.from.node !== edit.node.id || c.from.port !== 'error') : w.connections;
+      return { ...w, nodes, connections };
+    }
     case 'move':
       return { ...w, nodes: w.nodes.map(n => {
         const position = edit.positions.get(n.id);
