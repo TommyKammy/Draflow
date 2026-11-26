@@ -69,6 +69,7 @@ for (const action of ['stop', 'switch'] as const) {
     await fetch.locator('summary').click();
     await expect(fetch.locator('code')).toContainText('"input"');
     await expect.poll(() => state.evaluate(s => s.calls)).toBe(1);
+    await expect(page.getByRole('button', { name: 'Tidy Up' })).toBeDisabled();
     if (action === 'stop') {
       await page.getByRole('button', { name: 'Stop', exact: true }).click();
       await expect(log).toContainText('canceled');
@@ -114,4 +115,25 @@ test('a rejected run shows a clearable error and releases the editor for another
   await log.getByRole('button', { name: 'Clear execution' }).click();
   await page.getByRole('button', { name: 'Run workflow', exact: true }).click();
   await expect(page.getByRole('status')).toHaveText('Set · 1 item');
+});
+
+test('tidying and undoing a layout keep the clean upstream HTTP result', async ({ page }) => {
+  const state = await mockHttp(page, 'success');
+  const read = () => page.evaluate(() => document.querySelector('draflow-editor')!.workflow!.nodes.map(n => n.position));
+  const before = await read();
+  await page.getByRole('button', { name: 'Run workflow', exact: true }).click();
+  const status = page.getByRole('status');
+  await expect(status).toHaveText('Set · 1 item');
+  await page.getByRole('button', { name: 'Tidy Up' }).click();
+  expect(await read()).not.toEqual(before);
+  await expect(status).toHaveText('Set · 1 item');
+  for (const undo of [false, true]) {
+    if (undo) await page.getByRole('button', { name: 'Undo', exact: true }).click();
+    await page.locator('[data-node-id=set]').dblclick();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByRole('button', { name: 'Execute step' }).click();
+    await dialog.getByRole('button', { name: 'Close' }).click();
+    await expect(status).toHaveText('Set · 1 item');
+    expect(await state.evaluate(s => s.calls)).toBe(1);
+  }
 });
