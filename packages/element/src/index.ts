@@ -1,5 +1,6 @@
+import { noteDialog } from './sticky.js';
 import {
-  ExecutionEngine, NodeRegistry, buildGraph, createWorkflow, downstreamOf, upstreamOf,
+  createId, ExecutionEngine, NodeRegistry, buildGraph, createWorkflow, downstreamOf, upstreamOf,
   type EngineEvents, type ExecutionEngineOptions, type NodeType,
   type RunData, type TaskData, type RunHandle, type RunOptions, type RunResult, type Workflow,
 } from '@draflow/core';
@@ -120,7 +121,13 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     duplicate: id => commit({ type: 'paste', fragment: fragment(workflow, new Set([id])) }),
   }, translator(locale()));
   let details = makeDetails();
+  const sticky = noteDialog((id, value) => {
+    commit({ type: 'note', id, ...(value && { value }) });
+    if (value) canvas.focusNote(id);
+    else addNote.focus();
+  });
   const canvas = createCanvas(host, registry, { enabled: canEdit, document: () => workflow, commit, undo, redo,
+    openNote: note => sticky.open(note, true, canEdit(), translator(locale())),
     openDetails: id => details.open(id),
     createFrom: from => { if (canEdit()) creator.open(locale(), { from }); },
     selectEdge: id => { selectedEdge = id; refreshEditing(); },
@@ -139,6 +146,11 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
   });
   const wiring = connectionDialog(canvas.scene, (from, to) => commit({ type: 'connect', from, to }));
   const connect = tool(() => wiring.open(translator(locale())));
+  const addNote = tool(() => {
+    if (!canEdit() || !canvas.notesEditable()) return;
+    sticky.open({ id: createId('note'), text: '', color: 'yellow', ...canvas.centerPoint(undefined, 208, 128), width: 208, height: 128 },
+      false, true, translator(locale()));
+  });
   const tidy = tool(() => {
     if (!canEdit()) return;
     const positions = tidyPositions(workflow, canvas.selection());
@@ -149,8 +161,8 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
   const saveState = document.createElement('span');
   saveState.setAttribute('aria-live', 'polite');
   const retry = tool(() => saves.flush());
-  tools.append(add, connect, tidy, remove, backward, forward, saveState, retry);
-  shell.append(header, tools, canvas.panel, outputTitle, status, output, log.panel, wiring.dialog, creator.dialog, details.dialog);
+  tools.append(add, connect, addNote, tidy, remove, backward, forward, saveState, retry);
+  shell.append(header, tools, canvas.panel, outputTitle, status, output, log.panel, sticky.dialog, wiring.dialog, creator.dialog, details.dialog);
   root.append(style, shell);
 
   function updateButton() {
@@ -170,6 +182,8 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     retry.textContent = ja ? '保存を再試行' : 'Retry save';
     connect.textContent = translator(locale())('Connect nodes');
     connect.disabled = !canEdit() || !workflow.nodes.length;
+    addNote.textContent = translator(locale())('Add sticky note');
+    addNote.disabled = !canEdit() || !canvas.notesEditable();
     tidy.textContent = ja ? '自動整列' : 'Tidy Up';
     tidy.disabled = !canEdit() || !workflow.nodes.length;
     remove.disabled = !canEdit();
@@ -184,6 +198,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     if (next === workflow) return;
     if (source !== 'configure') lastControl = undefined;
     const previous = workflow;
+    sticky.dialog.close();
     wiring.dialog.close();
     creator.dialog.close();
     workflow = next;
@@ -272,6 +287,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     previewInputs.clear();
     lastControl = undefined;
     title.textContent = workflow.name;
+    sticky.dialog.close();
     wiring.dialog.close();
     creator.dialog.close();
     canvas.setWorkflow(workflow);
@@ -355,6 +371,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
       throw error;
     }
     log.start(handle.id, snapshot.name);
+    sticky.dialog.close();
     wiring.dialog.close();
     creator.dialog.close();
     canvas.cancelEdit();
@@ -438,6 +455,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
       if (localeChanged || (settings.readonly !== undefined && settings.readonly !== readonly)) {
         details.flush();
         details.close();
+        sticky.dialog.close();
         wiring.dialog.close();
         creator.dialog.close();
       }

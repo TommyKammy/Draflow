@@ -1,3 +1,6 @@
+import { translator } from '../locale.js';
+import { notesOf } from '../store/notes.js';
+import { noteLayer } from './notes.js';
 import type { NodeRegistry, Workflow } from '@draflow/core';
 import { bindEditing, type EditActions } from './editing.js';
 import { CanvasScene, cardHeight, cardWidth, type Point } from './scene.js';
@@ -37,6 +40,24 @@ export function createCanvas(host: HTMLElement, registry: NodeRegistry, actions:
   panel.append(surface, controls);
 
   let scale = 1, x = 0, y = 0;
+  const sticky = noteLayer(actions.enabled, () => scale, actions.openNote, value => actions.commit({ type: 'note', id: value.id, value }));
+  scene.world.prepend(sticky.layer);
+  let language: keyof typeof labels = 'en';
+  let lastMeta: Workflow['meta'];
+  let lastNotes: ReturnType<typeof notesOf> = [];
+  function updateScene(workflow: Workflow) {
+    scene.setWorkflow(workflow, registry);
+    if (workflow.meta !== lastMeta) {
+      lastMeta = workflow.meta;
+      lastNotes = notesOf(workflow);
+      sticky.render(lastNotes ?? [], translator(language));
+    }
+    for (const n of lastNotes ?? []) {
+      scene.include(n.x, n.y);
+      scene.include(n.x + n.width, n.y + n.height);
+    }
+  }
+  function cancelEdit() { editing.cancel(); sticky.cancel(); }
   let minScale = 0.1;
   let fitting = true;
   let frame = 0;
@@ -54,7 +75,7 @@ export function createCanvas(host: HTMLElement, registry: NodeRegistry, actions:
   function schedule() { if (!frame) frame = requestAnimationFrame(paint); }
 
   function fitView() {
-    editing.cancel();
+    cancelEdit();
     fitting = true;
     const { clientWidth: w, clientHeight: h } = surface;
     const b = scene.bounds;
@@ -74,7 +95,7 @@ export function createCanvas(host: HTMLElement, registry: NodeRegistry, actions:
   }
 
   function zoomAt(factor: number, point = { x: surface.clientWidth / 2, y: surface.clientHeight / 2 }) {
-    editing.cancel();
+    cancelEdit();
     const next = Math.min(3, Math.max(minScale, scale * factor));
     x = point.x - (point.x - x) * next / scale;
     y = point.y - (point.y - y) * next / scale;
@@ -201,16 +222,24 @@ export function createCanvas(host: HTMLElement, registry: NodeRegistry, actions:
   win.addEventListener('blur', () => { space = false; endGesture(); }, opts);
 
   surface.addEventListener('focusin', event => {
+    const cardElement = event.target instanceof Element && event.target.closest<HTMLElement>('.sticky-card');
+    if (cardElement) {
+      editing.clearEdge();
+      select(new Set());
+      reveal(cardElement.offsetLeft, cardElement.offsetTop, cardElement.offsetWidth, cardElement.offsetHeight);
+      return;
+    }
     const id = cardAt(event)?.dataset.nodeId;
     const card = id === undefined ? undefined : scene.cards.get(id);
     if (!card) return;
-    const left = x + scale * card.node.position.x;
-    const top = y + scale * card.node.position.y;
-    if (left < 0 || top < 0 || left + scale * cardWidth > surface.clientWidth ||
-        top + scale * cardHeight > surface.clientHeight) {
-      center(card.node.position);
-    }
+    reveal(card.node.position.x, card.node.position.y, cardWidth, cardHeight);
   }, opts);
+  function reveal(left: number, top: number, width: number, height: number) {
+    if (x + left * scale < 0 || y + top * scale < 0 ||
+        x + (left + width) * scale > surface.clientWidth || y + (top + height) * scale > surface.clientHeight) {
+      center({ x: left + (width - cardWidth) / 2, y: top + (height - cardHeight) / 2 });
+    }
+  }
   function center(position: Point) {
     fitting = false;
     x = surface.clientWidth / 2 - (position.x + cardWidth / 2) * scale;
@@ -246,35 +275,51 @@ export function createCanvas(host: HTMLElement, registry: NodeRegistry, actions:
     panel, scene, fitView,
     selection: (): ReadonlySet<string> => selected,
     remove: editing.remove,
-    cancelEdit: editing.cancel,
-    centerPoint(preferred?: Point) {
+    cancelEdit,
+    focusNote(id: string) {
+      const note = lastNotes?.find(n => n.id === id);
+      if (note) {
+        sticky.focus(id);
+        reveal(note.x, note.y, note.width, note.height);
+      }
+    },
+    notesEditable: () => lastNotes !== undefined,
+    centerPoint(preferred?: Point, width = cardWidth, height = cardHeight) {
       const p = preferred ? { ...preferred } : {
-        x: Math.round(((surface.clientWidth / 2 - x) / scale - cardWidth / 2) / 16) * 16,
-        y: Math.round(((surface.clientHeight / 2 - y) / scale - cardHeight / 2) / 16) * 16,
+        x: Math.round(((surface.clientWidth / 2 - x) / scale - width / 2) / 16) * 16,
+        y: Math.round(((surface.clientHeight / 2 - y) / scale - height / 2) / 16) * 16,
       };
-      while ([...scene.cards.values()].some(({ node }) =>
-        Math.abs(node.position.x - p.x) < cardWidth + 16 && Math.abs(node.position.y - p.y) < cardHeight + 16)) {
-        p.y += 96;
+      const boxes = [...scene.cards.values()].map(({ node }) => ({ ...node.position, width: cardWidth, height: cardHeight }));
+      for (const note of lastNotes ?? []) boxes.push(note);
+      // Jump past overlapping boxes in y order, including tall notes.
+      boxes.sort((a, b) => a.y - b.y);
+      for (const box of boxes) {
+        if (box.x < p.x + width + 16 && p.x < box.x + box.width + 16 &&
+            box.y < p.y + height + 16 && p.y < box.y + box.height + 16) {
+          p.y = Math.ceil((box.y + box.height + 16) / 16) * 16;
+        }
       }
       return p;
     },
     applyWorkflow(workflow: Workflow, newIds?: Set<string>) {
-      editing.cancel();
+      cancelEdit();
       editing.clearEdge();
-      scene.setWorkflow(workflow, registry);
+      updateScene(workflow);
       const ids = newIds ?? new Set([...selected].filter(id => scene.cards.has(id)));
       select(ids);
       for (const id of ids) scene.cards.get(id)?.element.setAttribute('aria-pressed', 'true');
     },
     setWorkflow(workflow: Workflow) {
-      editing.cancel();
+      cancelEdit();
       editing.clearEdge();
       endGesture();
       select(new Set());
-      scene.setWorkflow(workflow, registry);
+      updateScene(workflow);
       fitView();
     },
     setLocale(locale: keyof typeof labels) {
+      language = locale;
+      if (lastNotes?.length) sticky.render(lastNotes, translator(locale));
       const [name, out, into, fit] = labels[locale];
       surface.setAttribute('aria-label', name);
       minus.setAttribute('aria-label', out);
@@ -290,7 +335,7 @@ export function createCanvas(host: HTMLElement, registry: NodeRegistry, actions:
       card.element.focus({ preventScroll: true });
     },
     destroy() {
-      editing.cancel();
+      cancelEdit();
       listeners.abort();
       observer.disconnect();
       endGesture();

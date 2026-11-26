@@ -31,6 +31,25 @@ export const styles = `
   .world { position:absolute; top:0; left:0; transform-origin:0 0; will-change:transform }
   .world svg { position:absolute; top:0; left:0; overflow:visible; pointer-events:none }
   .world path { fill:none; stroke:color-mix(in srgb, CanvasText 49%, Canvas); stroke-width:2 }
+  .sticky-card { position:absolute; display:flex; flex-direction:column; box-sizing:border-box; overflow:hidden;
+    color:#27231a; background:#f9e8a4; border:1px solid #70664b; border-radius:5px }
+  .sticky-card[data-color=blue] {background:#c6dff1}
+  .sticky-card[data-color=green] {background:#cce4c4}
+  .sticky-card[data-color=pink] {background:#f4cdd7}
+  .sticky-grip {height:20px;flex:none;cursor:move;background:#0001;touch-action:none}
+  .sticky-grip::after {content:"";display:block;width:2rem;margin:8px auto;border-top:3px double currentColor;opacity:.55}
+  .editor:has(.edit-tools[hidden]) .sticky-grip {cursor:default}
+  .editor:has(.edit-tools[hidden]) .sticky-grip::after {display:none}
+  .sticky-card button {min-height:0;flex:1;padding:.4rem .6rem;border:0;border-radius:0;background:transparent;
+    color:inherit;white-space:pre-wrap;overflow:hidden;overflow-wrap:anywhere;text-align:start;align-content:start}
+  .sticky-card button:focus-visible {outline-offset:-3px}
+  .sticky-dialog {box-sizing:border-box;width:min(24rem,94vw);max-height:90dvh;overflow:auto;background:Canvas;color:CanvasText;border:1px solid GrayText;border-radius:8px}
+  .sticky-dialog form {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.6rem}
+  .sticky-dialog label {display:grid}
+  .sticky-dialog :is(input,textarea,select) {box-sizing:border-box;width:100%;font:inherit}
+  .sticky-dialog textarea {min-height:6rem}
+  .sticky-dialog label:nth-child(-n+2),.sticky-dialog form>div {grid-column:1/-1}
+  .sticky-dialog form>div {display:flex;flex-wrap:wrap;gap:.5rem}
   .node-card { position:absolute; box-sizing:border-box; width:180px; height:72px; display:grid;
     align-content:center; justify-items:start; gap:1px; padding:5px 14px; text-align:start;
     border:1px solid color-mix(in srgb, CanvasText 34%, Canvas); border-radius:9px; background:Canvas;
