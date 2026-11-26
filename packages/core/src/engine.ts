@@ -86,6 +86,9 @@ export interface EngineEvents {
     nodeName: string;
     runIndex: number;
     itemCount: number;
+    readonly input: PortData;
+    totalInputCount: number;
+    reused: boolean;
   };
   'node:finish': {
     runId: string;
@@ -372,20 +375,21 @@ export class ExecutionEngine {
         const settings = resolveNodeSettings(node);
 
         const existing = runData[node.id]?.[entry.runIndex];
-        if (
-          existing !== undefined &&
-          existing.status === 'success' &&
-          options.runData !== undefined &&
-          !dirty.has(node.id)
-        ) {
+        const reused = existing?.status === 'success' && options.runData !== undefined && !dirty.has(node.id);
+        const input = (reused && existing.input) || entry.input;
+        run.bus.emit('node:start', {
+          runId: run.runId,
+          nodeId: node.id,
+          nodeName: node.name,
+          runIndex: entry.runIndex,
+          itemCount: primary.length,
+          totalInputCount: Object.values(input).reduce((sum, slots) =>
+            sum + slots.reduce((total, items) => total + (items?.length ?? 0), 0), 0),
+          get input() { return clonePortData(input); },
+          reused,
+        });
+        if (reused) {
           rememberPreview(existing, node, entry);
-          run.bus.emit('node:start', {
-            runId: run.runId,
-            nodeId: node.id,
-            nodeName: node.name,
-            runIndex: entry.runIndex,
-            itemCount: primary.length,
-          });
           run.bus.emit('node:finish', {
             runId: run.runId,
             nodeId: node.id,
@@ -411,14 +415,6 @@ export class ExecutionEngine {
           );
           continue;
         }
-
-        run.bus.emit('node:start', {
-          runId: run.runId,
-          nodeId: node.id,
-          nodeName: node.name,
-          runIndex: entry.runIndex,
-          itemCount: primary.length,
-        });
 
         if (run.controller.signal.aborted) {
           status = 'canceled';

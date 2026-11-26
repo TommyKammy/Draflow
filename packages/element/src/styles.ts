@@ -18,6 +18,8 @@ export const styles = `
   button { font:inherit; padding:.45rem 1rem; background:#24563f; color:white; border:0; border-radius:6px; cursor:pointer }
   button:disabled { opacity:.6; cursor:default }
   pre { overflow:auto; padding:1rem; margin:0; background:color-mix(in srgb, CanvasText 6%, Canvas); border-radius:6px }
+  section[aria-label="Execution log"] summary { cursor:pointer; overflow-wrap:anywhere }
+  section[aria-label="Execution log"] code { display:block; white-space:pre-wrap; overflow-wrap:anywhere; max-height:18rem; overflow:auto }
   pre:empty { display:none }
   .canvas-panel { margin-top:1.25rem; position:relative; border:1px solid color-mix(in srgb, CanvasText 16%, Canvas); border-radius:8px; overflow:clip }
   .canvas { height:clamp(260px,38vh,460px); position:relative; overflow:clip; isolation:isolate;
