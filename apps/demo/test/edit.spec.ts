@@ -2,6 +2,7 @@ import { expect, test, type Locator, type Page } from '@playwright/test';
 import type {} from '@draflow/element/define';
 
 async function center(el: Locator) {
+  await el.hover({ trial: true }); // Wait for the fitted canvas before reading viewport coordinates.
   const b = await el.boundingBox();
   if (!b) throw new Error('Expected visible control');
   return { x: b.x + b.width / 2, y: b.y + b.height / 2 };

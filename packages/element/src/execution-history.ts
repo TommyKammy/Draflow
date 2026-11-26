@@ -1,8 +1,10 @@
-import type { RunStatus, Workflow } from '@draflow/core';
+import { executionReplay } from './execution-replay.js';
+import type { NodeRegistry, RunStatus, Workflow } from '@draflow/core';
 import type { ExecutionStore } from '@draflow/storage';
 import type { Translate } from './locale.js';
 
-export function executionHistory(store: ExecutionStore, current: () => Workflow, canDelete: () => boolean, t: Translate) {
+export function executionHistory(store: ExecutionStore, current: () => Workflow, canDelete: () => boolean, t: Translate,
+  registry: NodeRegistry, canCopy: () => boolean, copy: (workflow: Workflow) => void) {
   const button = document.createElement('button'), close = document.createElement('button');
   button.type = close.type = 'button';
   const dialog = document.createElement('dialog');
@@ -17,7 +19,13 @@ export function executionHistory(store: ExecutionStore, current: () => Workflow,
   message.setAttribute('aria-live', 'polite');
   const warning = document.createElement('p');
   warning.setAttribute('aria-live', 'polite');
-  let request = 0;
+  let request = 0, selection = 0, inspecting = false;
+  let replay: ReturnType<typeof executionReplay> | undefined;
+  function clearReplay() {
+    selection++; inspecting = false;
+    replay?.destroy();
+    replay = undefined;
+  }
   function setLocale(next: Translate) {
     t = next;
     title.textContent = button.textContent = t('Execution history');
@@ -29,6 +37,7 @@ export function executionHistory(store: ExecutionStore, current: () => Workflow,
   }
   async function refresh() {
     if (!dialog.open) return;
+    clearReplay();
     const generation = ++request, workflowId = current().id;
     const valid = () => dialog.open && generation === request && current().id === workflowId;
     list.replaceChildren();
@@ -44,6 +53,30 @@ export function executionHistory(store: ExecutionStore, current: () => Workflow,
         li.textContent = [new Date(row.startedAt).toLocaleString(dialog.closest('[lang]')?.getAttribute('lang') || undefined), row.id, t(row.status),
           scope || t('Full workflow'), t('Executed tasks') + ' ' + row.executed, t('reused') + ' ' + row.reused,
           !row.hasDetail && t('Detail omitted')].filter(Boolean).join(' · ');
+        if (row.hasDetail) {
+          const open = document.createElement('button');
+          open.type = 'button'; open.textContent = t('Replay');
+          open.onclick = async () => {
+            if (!valid()) return;
+            clearReplay();
+            inspecting = true;
+            const ticket = selection;
+            const selected = () => valid() && ticket === selection;
+            message.textContent = t('Loading history');
+            try {
+              const detail = await store.get(workflowId, row.id);
+              if (!selected()) return;
+              if (!detail) { message.textContent = t('Detail unavailable'); return; }
+              message.textContent = '';
+              replay = executionReplay(detail, row, registry, dialog.closest('[lang]')?.getAttribute('lang') === 'ja' ? 'ja' : 'en', t,
+                canDelete() ? w => { if (selected() && canCopy()) copy(w); } : undefined);
+              dialog.insertBefore(replay.root, close);
+              replay.updateCopy(canCopy());
+              replay.focus();
+            } catch (error) { if (selected()) message.textContent = t('History unavailable') + ' · ' + String(error); }
+          };
+          li.append(' ', open);
+        }
         if (canDelete()) {
           const remove = document.createElement('button');
           remove.type = 'button'; remove.textContent = t('Delete');
@@ -66,11 +99,13 @@ export function executionHistory(store: ExecutionStore, current: () => Workflow,
   filter.onchange = refresh;
   button.onclick = () => { button.focus(); dialog.showModal(); void refresh(); };
   close.onclick = () => dialog.close();
+  dialog.onclose = () => { if (!dialog.open) clearReplay(); };
   function reset() {
-    request++;
+    request++; clearReplay();
     dialog.close(); filter.value = ''; list.replaceChildren(); warning.textContent = '';
   }
-  return { button, dialog, warning, setLocale, refresh, reset,
+  return { button, dialog, warning, setLocale, refresh: () => { if (!inspecting) void refresh(); }, reset,
+    updateCopy: () => replay?.updateCopy(canCopy()),
     failed(error: unknown) { warning.textContent = t('History unavailable') + ' · ' + String(error); },
   };
 }

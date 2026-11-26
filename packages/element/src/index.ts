@@ -33,7 +33,7 @@ export interface EditorOptions {
 }
 
 export interface ChangeMeta {
-  source: Edit['type'] | 'undo' | 'redo';
+  source: Edit['type'] | 'undo' | 'redo' | 'replay-copy';
   dirty: boolean;
 }
 
@@ -198,7 +198,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
   }, { capture: true });
   shell.append(palette.dialog, header, tools, canvas.panel, outputTitle, status, output, log.panel, groupForm.dialog, sticky.dialog, wiring.dialog, creator.dialog, details.dialog);
   const executions = options.ports?.executions;
-  const archive = executions && executionHistory(executions, () => workflow, () => !readonly, translator(locale()));
+  const archive = executions && executionHistory(executions, () => workflow, () => !readonly, translator(locale()), registry, canEdit, copyReplay);
   if (archive) {
     header.append(archive.button);
     header.after(archive.warning);
@@ -291,8 +291,11 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     if (source === 'undo' || source === 'redo') details.close();
     saves.changed(next);
     refresh();
+    notifyChange(source);
+  }
+  function notifyChange(source: ChangeMeta['source']) {
     const meta = { source, dirty: saves.dirty };
-    const snapshot = structuredClone(next);
+    const snapshot = structuredClone(workflow);
     host.dispatchEvent(new CustomEvent('draflow-change', { detail: { workflow: snapshot, ...meta }, bubbles: true, composed: true }));
     options.onChange?.(snapshot, meta);
   }
@@ -323,6 +326,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
       ? [summary.node, labels.count(summary.count)].filter(Boolean).join(' · ')
       : labels.empty);
     updateButton();
+    archive?.updateCopy();
     refreshEditing();
   }
 
@@ -494,6 +498,24 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     return handle;
   }
 
+  function openDocument(next: Workflow, fresh = false) {
+    if (disposed) throw new Error('Editor has been destroyed');
+    const snapshot = structuredClone(next);
+    details.flush();
+    abandon();
+    workflow = snapshot;
+    history = new History();
+    saves.open(snapshot, fresh);
+    resetView();
+  }
+
+  function copyReplay(recorded: Workflow) {
+    if (!canEdit()) return;
+    openDocument({ ...recorded, id: createId('workflow') }, true);
+    archive?.button.focus();
+    notifyChange('replay-copy');
+  }
+
   button.onclick = () => {
     try { run(); } catch (error) {
       output.textContent = '';
@@ -540,16 +562,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
       refresh();
     },
     getWorkflow: () => structuredClone(workflow),
-    setWorkflow(next: Workflow) {
-      if (disposed) throw new Error('Editor has been destroyed');
-      const snapshot = structuredClone(next);
-      details.flush();
-      abandon();
-      workflow = snapshot;
-      history = new History();
-      saves.open(snapshot);
-      resetView();
-    },
+    setWorkflow: (next: Workflow) => openDocument(next),
     destroy() {
       if (disposed) return;
       details.flush();

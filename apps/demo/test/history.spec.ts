@@ -162,6 +162,7 @@ test('summary-only detail, store failure and disabled history leave execution us
   await expect(page.getByRole('status')).toHaveText('Set · 1 item');
   await launcher.click();
   await expect(page.getByRole('listitem')).toContainText('Detail omitted');
+  await expect(page.getByRole('dialog').getByRole('button', { name: 'Replay' })).toHaveCount(0);
   await page.getByRole('dialog').getByRole('button', { name: 'Delete' }).click();
   await expect(page.getByText('No executions')).toBeVisible();
   await page.keyboard.press('Escape');

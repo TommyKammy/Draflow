@@ -4,7 +4,7 @@ import type { WorkflowStore } from '@draflow/storage';
 interface DocumentSave {
   current: Workflow;
   content: string;
-  saved: string;
+  saved: string | null;
   requested: string | null;
   revision: number;
   error: string | null;
@@ -34,7 +34,7 @@ export class Autosave {
   constructor(private store: WorkflowStore | undefined, private notify: () => void,
     private onError?: (workflowId: string, message: string) => void) {}
 
-  open(w: Workflow) {
+  open(w: Workflow, fresh = false) {
     const old = this.#active;
     this.flush();
     if (old && old.requested === null && (!this.store || old.content === old.saved)) this.#docs.delete(old.current.id);
@@ -46,8 +46,9 @@ export class Autosave {
       this.#active = previous;
       this.#schedule(previous);
     } else {
-      this.#active = { current: w, content, saved: content, requested: null, revision: 0, error: null };
+      this.#active = { current: w, content, saved: fresh ? null : content, requested: null, revision: 0, error: null };
       this.#docs.set(w.id, this.#active);
+      if (fresh) void this.#write(this.#active);
     }
   }
   get dirty() { return !!this.#active && this.#active.content !== this.#active.saved; }
