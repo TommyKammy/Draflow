@@ -2,6 +2,8 @@
   "files": [],
   "references": [
     { "path": "packages/core" },
-    { "path": "packages/nodes" }
+    { "path": "packages/nodes" },
+    { "path": "packages/element" },
+    { "path": "packages/storage" }
   ]
 }
