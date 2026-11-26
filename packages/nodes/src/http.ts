@@ -103,8 +103,17 @@ export const httpRequestNode: NodeType = {
         }
       }
 
+      const authentication = itemCtx.param<string>('authentication', 'none');
+      if (authentication !== 'none' && authentication !== 'credential') {
+        throw new Error('Unsupported HTTP authentication mode');
+      }
+      const required = authentication === 'credential';
+      const scopedFetch = ctx.credentials.fetchForSlot?.('httpAuth', required);
+      if (required && !scopedFetch) {
+        throw new Error('HTTP credential unavailable');
+      }
       const json = await withTimeout(
-        ctx.helpers.fetch,
+        scopedFetch ?? ctx.helpers.fetch,
         url,
         init,
         timeout,
@@ -125,6 +134,20 @@ export const httpRequestNode: NodeType = {
 
     return output;
   },
+};
+
+export const httpRequestNodeV2: NodeType = {
+  ...httpRequestNode,
+  version: 2,
+  credentials: [{ name: 'httpAuth', label: 'HTTP authentication' }],
+  parameters: [
+    {
+      name: 'authentication', label: 'Authentication', type: 'select', default: 'none',
+      options: [{ label: 'None', value: 'none' }, { label: 'Server credential', value: 'credential' }],
+      noExpression: true,
+    },
+    ...httpRequestNode.parameters,
+  ],
 };
 
 function normalizeHeaders(value: unknown): Record<string, string> {

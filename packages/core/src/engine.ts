@@ -46,6 +46,17 @@ export interface CredentialProvider {
   get(id: string): Promise<Record<string, string> | null>;
 }
 
+export interface CredentialBinding {
+  workflowId: string;
+  nodeId: string;
+  type: string;
+  typeVersion: number;
+  slot: string;
+  id?: string;
+}
+
+export type CredentialFetch = (binding: CredentialBinding, url: string, init?: RequestInit) => Promise<Response>;
+
 export interface Clock {
   now(): number;
   sleep(ms: number, signal?: AbortSignal): Promise<void>;
@@ -67,6 +78,7 @@ export interface ExecutionEngineOptions {
   random?: () => number;
   uuid?: () => string;
   credentials?: CredentialProvider;
+  credentialFetch?: CredentialFetch;
   logger?: Logger;
   vars?: Record<string, JsonValue>;
   env?: Record<string, string>;
@@ -138,6 +150,7 @@ export class ExecutionEngine {
   readonly #clock: Clock;
   readonly #random: () => number;
   readonly #uuid: () => string;
+  readonly #credentialFetch: CredentialFetch | undefined;
   readonly #credentials: CredentialProvider | undefined;
   readonly #logger: Logger;
   readonly #vars: Record<string, JsonValue>;
@@ -177,6 +190,7 @@ export class ExecutionEngine {
     };
     this.#random = options.random ?? (() => Math.random());
     this.#uuid = options.uuid ?? (() => createId('run'));
+    this.#credentialFetch = options.credentialFetch;
     this.#credentials = options.credentials;
     this.#logger = options.logger ?? noopLogger;
     this.#vars = options.vars ?? {};
@@ -835,7 +849,7 @@ export class ExecutionEngine {
       },
       output: (value) => (Array.isArray(value) ? value : [value]),
       helpers: this.#helpers(input.signal),
-      credentials: this.#credentialsFor(node),
+      credentials: this.#credentialsFor(node, workflow.id, nodeType.version),
       logger: this.#logger,
       signal: input.signal,
       vars: this.#vars,
@@ -879,9 +893,19 @@ export class ExecutionEngine {
     };
   }
 
-  #credentialsFor(node: WorkflowNode): CredentialReader {
+  #credentialsFor(node: WorkflowNode, workflowId: string, typeVersion: number): CredentialReader {
     const provider = this.#credentials;
+    const transport = this.#credentialFetch;
     return {
+      fetchForSlot: (slot, required) => {
+        const bound = node.credentials && Object.hasOwn(node.credentials, slot);
+        const id = bound ? node.credentials?.[slot] : undefined;
+        if (bound && !required) throw new Error('Credential reference conflicts with disabled authentication');
+        if (required && (!id || !transport)) throw new Error('HTTP credential unavailable');
+        if (!transport) return this.#fetch;
+        const binding = { workflowId, nodeId: node.id, type: node.type, typeVersion, slot, ...(id && { id }) };
+        return (url, init) => transport(binding, url, init);
+      },
       get: async (slot) => {
         if (provider === undefined) return null;
         const id = node.credentials?.[slot];

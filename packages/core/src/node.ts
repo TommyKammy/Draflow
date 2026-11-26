@@ -290,6 +290,8 @@ export interface NodeHelpers {
 }
 
 export interface CredentialReader {
+  /** Opaque transport for a configured slot. The node never receives the secret. */
+  fetchForSlot?(slot: string, required: boolean): FetchLike;
   get(slot: string): Promise<Record<string, string> | null>;
 }
 

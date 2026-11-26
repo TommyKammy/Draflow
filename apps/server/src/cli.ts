@@ -2,11 +2,15 @@
 import { createInterface } from 'node:readline';
 import { NodeRegistry } from '@draflow/core';
 import { standardNodes } from '@draflow/nodes';
+import { loadHttpAuth } from './http-config.js';
 import { NodeHost } from './host.js';
 
 const path = process.argv[2];
 if (!path) throw new Error('Usage: node dist/cli.js DATABASE');
 const host = new NodeHost(path, {
+  ...(process.env.DRAFLOW_HTTP_AUTH_FILE && { httpAuth: loadHttpAuth(process.env.DRAFLOW_HTTP_AUTH_FILE) }),
+  ...(process.env.DRAFLOW_HTTP_MAX_RESPONSE_BYTES !== undefined &&
+    { maxHttpResponseBytes: Number(process.env.DRAFLOW_HTTP_MAX_RESPONSE_BYTES) }),
   registry: new NodeRegistry().registerAll(standardNodes),
   onWorkerError(error) {
     console.error(error);
