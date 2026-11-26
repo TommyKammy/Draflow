@@ -1,5 +1,8 @@
 export type Locale = 'en' | 'ja';
 const japanese: Record<string, string> = {
+  'Execution history': '実行履歴', 'Execution status': '実行状態', 'All statuses': 'すべての状態',
+  'Loading history': '履歴を読み込み中', 'No executions': '実行履歴はありません', 'From node': '開始ノード', 'Before node': '直前まで', 'Through node': '対象まで',
+  'Full workflow': '全体実行', 'Executed tasks': '実行タスク', 'Detail omitted': '詳細は容量上限のため省略', 'History unavailable': '実行履歴を利用できません',
   Suggest: '補完', 'Expression suggestions': '式の補完候補',
   'Run workflow': '実行', 'Command palette': 'コマンドパレット', Commands: 'コマンド', 'Search commands': 'コマンドを検索', 'No matching commands': '一致するコマンドがありません',
   'Add node': 'ノードを追加', 'Insert node': '接続にノードを挿入', 'Tidy Up': '自動整列', 'Fit view': '全体表示',

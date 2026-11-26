@@ -1,6 +1,6 @@
 import '@draflow/element/define';
 import { createNode, createConnection, createWorkflow, parseWorkflow } from '@draflow/core';
-import { LocalStorageWorkflowStore } from '@draflow/storage';
+import { MemoryExecutionStore, LocalStorageWorkflowStore } from '@draflow/storage';
 import { standardNodes } from '@draflow/nodes';
 
 const editor = document.querySelector('draflow-editor')!;
@@ -29,7 +29,7 @@ async function initialWorkflow() {
 async function loadExample() {
   const storage = new LocalStorageWorkflowStore('draflow-demo');
   editor.nodeTypes = standardNodes;
-  editor.ports = { storage, ...(id === 'mock-http' && {
+  editor.ports = { storage, executions: new MemoryExecutionStore(), ...(id === 'mock-http' && {
     fetch: async (url: string) => url === mockUrl ? Response.json({ amount: 42 }) : new Response(null, { status: 404 }),
   }) };
   editor.workflow = await storage.load(id) ?? await initialWorkflow();

@@ -72,11 +72,11 @@ test('selects individual nodes, extends selection, and selects a rectangle in re
   await page.keyboard.press('Escape');
   await expect(manual).toHaveAttribute('aria-pressed', 'false');
   expect(await selections.jsonValue()).toEqual([['manual'], ['manual', 'set'], ['manual'], ['manual', 'set'], []]);
-  await expect(page.getByRole('button', { name: '実行' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '実行', exact: true })).toBeDisabled();
 });
 
 test('keeps indexed ports distinct, fits negative coordinates, and shows execution state', async ({ page }) => {
-  await page.getByRole('button', { name: '実行' }).click();
+  await page.getByRole('button', { name: '実行', exact: true }).click();
   const editor = page.locator('draflow-editor');
   await expect(editor.locator('[data-node-id="set"]')).toContainText('成功 · 1件');
   await editor.evaluate(el => {

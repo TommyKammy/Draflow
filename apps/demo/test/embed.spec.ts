@@ -17,7 +17,7 @@ test('runs the embedded Manual → Set example and displays the emitted item', a
     }
     return seen;
   });
-  await editor.getByRole('button', { name: '実行' }).click();
+  await editor.getByRole('button', { name: '実行', exact: true }).click();
   await expect(editor.getByRole('status')).toHaveText('Set · 1件');
   expect(JSON.parse(await editor.locator('pre').innerText())).toEqual([{ message: 'Hello Draflow' }]);
   expect(await events.jsonValue()).toEqual([
@@ -38,7 +38,7 @@ test('detaches a running editor and can reconnect the same instance', async ({ p
   });
   expect(canceled).toBe('canceled');
   await expect(page.getByRole('status')).toHaveText('実行すると結果が表示されます。');
-  await page.getByRole('button', { name: '実行' }).click();
+  await page.getByRole('button', { name: '実行', exact: true }).click();
   await expect(page.getByRole('status')).toHaveText('Set · 1件');
 });
 
@@ -51,13 +51,13 @@ test('loading the embedded bundle again preserves the registered element class',
     await import(module.src + '?second-registration');
     return initial === customElements.get('draflow-editor');
   })).toBe(true);
-  await page.getByRole('button', { name: '実行' }).click();
+  await page.getByRole('button', { name: '実行', exact: true }).click();
   await expect(page.getByRole('status')).toHaveText('Set · 1件');
 });
 
 test('changing presentation retains the output and applies readonly', async ({ page }) => {
   await page.goto('/');
-  await page.getByRole('button', { name: '実行' }).click();
+  await page.getByRole('button', { name: '実行', exact: true }).click();
   await expect(page.getByRole('status')).toHaveText('Set · 1件');
   await page.locator('draflow-editor').evaluate(editor => {
     editor.setAttribute('locale', 'en');

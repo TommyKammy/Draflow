@@ -4,11 +4,12 @@ import type { RunHandle, RunResult, Workflow } from '@draflow/core';
 import { createWorkflowEditor, type EditorOptions } from '@draflow/element';
 import '@draflow/element/define';
 import { standardNodes } from '@draflow/nodes';
-import { MemoryWorkflowStore, type WorkflowStore } from '@draflow/storage';
+import { MemoryExecutionStore, type ExecutionStore, MemoryWorkflowStore, type WorkflowStore } from '@draflow/storage';
 
 export async function embed(host: HTMLElement, workflow: Workflow): Promise<RunResult> {
   const storage: WorkflowStore = new MemoryWorkflowStore();
-  const options: EditorOptions = { nodeTypes: standardNodes, workflow, ports: { storage } };
+  const executions: ExecutionStore = new MemoryExecutionStore();
+  const options: EditorOptions = { nodeTypes: standardNodes, workflow, ports: { storage, executions } };
   const editor = createWorkflowEditor(host, options);
   try {
     const run: RunHandle = editor.run();
