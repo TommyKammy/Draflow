@@ -45,7 +45,7 @@ export function executionReplay(detail: ExecutionDetail, summary: ExecutionSumma
   const visited = new Set(tasks.map(entry => entry.nodeId));
   const skipped = workflow.nodes.filter(node => !visited.has(node.id));
   root.append(title, graph, topology);
-  for (const line of [detail.error?.message, skipped.length && t('Not visited') + ' · ' + skipped.map(n => n.name).join(', ')]) {
+  for (const line of [detail.error?.message, !summary.interrupted && skipped.length && t('Not visited') + ' · ' + skipped.map(n => n.name).join(', ')]) {
     if (line) { const p = document.createElement('p'); p.textContent = line; root.append(p); }
   }
 

@@ -51,7 +51,7 @@ export function executionHistory(store: ExecutionStore, current: () => Workflow,
         const scope = [row.startNodeId && t('From node'), row.startNodeId, row.destinationNodeId && t(row.destinationMode === 'exclusive' ? 'Before node' : 'Through node'),
           row.destinationNodeId].filter(Boolean).join(' ');
         li.textContent = [new Date(row.startedAt).toLocaleString(dialog.closest('[lang]')?.getAttribute('lang') || undefined), row.id, t(row.status),
-          scope || t('Full workflow'), t('Executed tasks') + ' ' + row.executed, t('reused') + ' ' + row.reused,
+          scope || t('Full workflow'), ...(row.interrupted ? [t('Interrupted')] : [t('Executed tasks') + ' ' + row.executed, t('reused') + ' ' + row.reused]),
           !row.hasDetail && t('Detail omitted')].filter(Boolean).join(' · ');
         if (row.hasDetail) {
           const open = document.createElement('button');

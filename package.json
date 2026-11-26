@@ -10,7 +10,7 @@
   "scripts": {
     "build": "tsc -b tsconfig.json && pnpm --filter @draflow/demo build",
     "typecheck": "tsc -b tsconfig.json && tsc -p tsconfig.test.json && tsc -p apps/demo/tsconfig.json && tsc -p apps/demo/consumer/tsconfig.json",
-    "test": "vitest run",
+    "test": "vitest run && pnpm --filter @draflow/server test",
     "test:watch": "vitest",
     "size": "node scripts/size-report.mjs",
     "dev": "tsc -b tsconfig.json && pnpm --filter @draflow/demo dev",

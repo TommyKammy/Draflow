@@ -11,6 +11,8 @@ export interface ExecutionSummary {
   startedAt: number;
   stoppedAt: number;
   status: RunStatus;
+  /** Host stopped before task counts could be recovered. */
+  interrupted?: boolean;
   executed: number;
   reused: number;
 }
