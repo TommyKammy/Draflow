@@ -48,6 +48,13 @@ export const styles = `
   .view-controls button { background:transparent; color:CanvasText; font-size:13px; padding:5px 9px; min-width:30px }
   .view-controls button:hover { background:color-mix(in srgb, CanvasText 8%, Canvas) }
   .view-controls span { font:12px/1.5 ui-monospace,monospace; min-width:4ch; text-align:center }
+  .node-creator { box-sizing:border-box; width:min(26rem,92vw); max-height:80vh; overflow:auto; overscroll-behavior:contain;
+    padding:1.25rem; background:Canvas; color:CanvasText; border:1px solid GrayText; border-radius:10px }
+  .node-creator::backdrop { background:#0006 }
+  .node-creator input,.node-creator select { display:block; box-sizing:border-box; width:100%; padding:.45rem; margin:.65rem 0; font:inherit }
+  .node-creator h3 { margin:1rem 0 .25rem; font-size:.85rem }
+  .node-creator div button { display:block; text-align:start; width:100%; color:CanvasText; background:Canvas }
+  .node-creator div button:hover,.node-creator div button:focus-visible { background:color-mix(in srgb,CanvasText 10%,Canvas) }
   .edit-tools { display:flex; flex-wrap:wrap; align-items:center; gap:.4rem; margin-top:1rem }
   .edit-tools[hidden] { display:none }
   .edit-tools button,.edit-tools select { color:CanvasText; background:Canvas; font:inherit; font-size:.85rem;

@@ -35,7 +35,9 @@ to zoom around the pointer, or use the zoom and fit buttons. Click a node to
 select it, Shift-click to toggle another, or drag the background to select a region.
 With the canvas focused, `+` / `-` zoom, `0` restores 100%, and `1` fits the graph.
 
-Use the node type menu and **追加** to add a node. Drag cards to move them on a
+Choose **ノードを追加** to search the Node Creator by name or browse by category.
+Click an output dot to add a connected node on that branch. To insert a node,
+select an edge, then choose **接続にノードを挿入**. One Undo restores the original edge. Drag cards to move them on a
 16-unit grid, or drag an output dot onto an input dot to connect nodes. Select a
 card or an edge and press Delete to remove it. The toolbar supports Undo and Redo;
 Ctrl/Cmd+D duplicates a selection and Ctrl/Cmd+C/V copies and pastes a subgraph.

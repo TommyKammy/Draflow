@@ -1,11 +1,13 @@
 import { parseWorkflow, type NodePortRef, type Workflow } from '@draflow/core';
-import { fragment, type Edit } from '../store/edit.js';
+import { compatible, fragment, type Edit } from '../store/edit.js';
 import type { CanvasScene, Point } from './scene.js';
 
 export interface EditActions {
   enabled(): boolean;
   document(): Workflow;
   commit(edit: Edit): void;
+  createFrom(from: NodePortRef): void;
+  selectEdge(id?: string): void;
   undo(): void;
   redo(): void;
 }
@@ -24,6 +26,7 @@ export function bindEditing(surface: HTMLElement, scene: CanvasScene, actions: E
   let wire: { pointer: number; from: NodePortRef; start: Point; path: SVGPathElement } | undefined;
   let frame = 0;
   function clearEdge() {
+    if (edge) actions.selectEdge();
     edge?.classList.remove('selected-edge');
     edge = undefined;
   }
@@ -60,6 +63,7 @@ export function bindEditing(surface: HTMLElement, scene: CanvasScene, actions: E
       select(new Set());
       edge = target;
       edge.classList.add('selected-edge');
+      actions.selectEdge(target.dataset.edgeId);
     } else if (id && !event.shiftKey) {
       const ids = selection().has(id) ? new Set(selection()) : new Set([id]);
       const anchor = scene.cards.get(id)!.node.position;
@@ -111,10 +115,14 @@ export function bindEditing(surface: HTMLElement, scene: CanvasScene, actions: E
     } else if (wire?.pointer === event.pointerId) {
       const from = wire.from;
       const root = surface.getRootNode() as ShadowRoot;
-      const to = port(root.elementFromPoint(event.clientX, event.clientY), 'input');
+      const hit = root.elementFromPoint(event.clientX, event.clientY);
+      const to = port(hit, 'input');
+      const clicked = port(hit, 'output');
       cancel();
-      if (to && (from.port === to.port || (from.port === 'error' && to.port === 'main'))) {
+      if (to && compatible(from.port, to.port)) {
         actions.commit({ type: 'connect', from, to });
+      } else if (clicked && clicked.node === from.node && clicked.port === from.port && clicked.index === from.index) {
+        actions.createFrom(from);
       }
     }
   }, { signal });
