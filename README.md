@@ -41,6 +41,11 @@ select an edge, then choose **接続にノードを挿入**. One Undo restores t
 16-unit grid, or drag an output dot onto an input dot to connect nodes. Select a
 card or an edge and press Delete to remove it. The toolbar supports Undo and Redo;
 Ctrl/Cmd+D duplicates a selection and Ctrl/Cmd+C/V copies and pastes a subgraph.
+Double-click a card or focus it and press Enter to open its details. Edit parameters
+or settings, then choose **Execute step** to run through that node. Input and Output
+show each port separately. Use expressions such as `={{ $json.amount }}` to preview
+a value against the first input item from the last execution.
+
 The demo saves edits in localStorage after 500 ms and restores them on reload.
 Embedded hosts can supply their own `ports.storage` or listen for `draflow-change`.
 

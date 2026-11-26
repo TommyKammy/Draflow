@@ -60,6 +60,8 @@ export interface ExecutionLimits {
 export interface ExecutionEngineOptions {
   registry: NodeRegistry;
   expression?: ExpressionEngine;
+  /** Keep expression contexts available while the editor retains a task. */
+  preview?: boolean;
   fetch?: FetchLike;
   clock?: Clock;
   random?: () => number;
@@ -139,7 +141,17 @@ export class ExecutionEngine {
   readonly #env: Record<string, string>;
   readonly #limits: ExecutionLimits;
 
+  readonly #previews?: WeakMap<TaskData, (itemIndex: number) => ExpressionContext>;
+
+  preview(task: TaskData, value: string, itemIndex = 0, params?: WorkflowNode['parameters']): unknown {
+    const context = this.#previews?.get(task)?.(itemIndex);
+    if (!context || !task.input?.main?.[0]?.[itemIndex]) throw new Error('No preview input');
+    if (params) context.params = params;
+    return this.expression.resolveString(value, context);
+  }
+
   constructor(options: ExecutionEngineOptions) {
+    if (options.preview) this.#previews = new WeakMap();
     this.registry = options.registry;
     this.expression = options.expression ?? new ExpressionEngine();
     this.#fetch =
@@ -250,6 +262,12 @@ export class ExecutionEngine {
     const currentRunIndices = new Map<string, number>();
     const runItemSources = new Map<string, ItemSources>();
     for (const entry of stack) nextRunIndices.set(entry.nodeId, 1);
+    const rememberPreview = (task: TaskData, node: WorkflowNode, entry: ExecEntry) => {
+      this.#previews?.set(task, index => this.#expressionContext({
+        node, entry, workflow, graph, runData, currentRunIndices, itemSourcesByRun: runItemSources,
+        runId: run.runId, mode: run.mode, timezone,
+      }, index));
+    };
     let lastKey = '';
     let status: RunStatus = 'success';
     let error: SerializedError | undefined;
@@ -354,6 +372,7 @@ export class ExecutionEngine {
           options.runData !== undefined &&
           !dirty.has(node.id)
         ) {
+          rememberPreview(existing, node, entry);
           run.bus.emit('node:start', {
             runId: run.runId,
             nodeId: node.id,
@@ -436,6 +455,7 @@ export class ExecutionEngine {
           runItemSources.set(`${node.id}:${entry.runIndex}`, entry.itemSources);
         }
 
+        rememberPreview(task, node, entry);
         run.bus.emit('node:finish', {
           runId: run.runId,
           nodeId: node.id,
@@ -710,6 +730,45 @@ export class ExecutionEngine {
     };
   }
 
+  #expressionContext(input: {
+    node: WorkflowNode; entry: ExecEntry; graph: WorkflowGraph; workflow: Workflow; runData: RunData;
+    currentRunIndices: Map<string, number>; itemSourcesByRun: Map<string, ItemSources>;
+    runId: string; mode: ExecutionMode; timezone: string;
+  }, itemIndex: number): ExpressionContext {
+    const { node, entry, graph, workflow, runData } = input;
+    const portData = entry.input;
+    const items = primaryItems(portData);
+    const item = items[itemIndex] ?? items[0] ?? { json: {} };
+    return {
+      item,
+      itemIndex,
+      runIndex: entry.runIndex,
+      input: (port = 'main', index = 0) => portItems(portData, port, index),
+      nodeOutput: (name, outputIndex = 0, runIndex) => {
+        const target = graph.byName.get(name) ?? graph.nodes.get(name);
+        if (target === undefined) throw new NodeNotFoundError(name);
+        const tasks = runData[target.id];
+        if (tasks === undefined) return [];
+        const latestRunIndex = input.currentRunIndices.get(target.id);
+        const task =
+          runIndex === undefined
+            ? tasks[latestRunIndex ?? tasks.length - 1]
+            : tasks[runIndex];
+        return task?.output?.['main']?.[outputIndex] ?? [];
+      },
+      resolveItem: (name) =>
+        resolveItemLineage(name, itemIndex, entry, graph, runData, input.itemSourcesByRun),
+      nodeNames: [...graph.byName.keys()],
+      vars: this.#vars,
+      timezone: input.timezone,
+      execution: { id: input.runId, mode: input.mode },
+      workflow: { id: workflow.id, name: workflow.name },
+      params: node.parameters,
+      env: this.#env,
+      now: new Date(this.#clock.now()),
+    };
+  }
+
   #createContext(input: {
     workflow: Workflow;
     graph: WorkflowGraph;
@@ -727,42 +786,11 @@ export class ExecutionEngine {
     currentRunIndices: Map<string, number>;
     itemSourcesByRun: Map<string, ItemSources>;
   }): NodeContext {
-    const { node, nodeType, entry, input: portData, runData, graph, workflow } = input;
+    const { node, nodeType, entry, input: portData, workflow } = input;
     const items = primaryItems(portData);
     const engine = this;
 
-    const makeExpressionContext = (itemIndex: number): ExpressionContext => {
-      const item = items[itemIndex] ?? items[0] ?? { json: {} };
-      const context: ExpressionContext = {
-        item,
-        itemIndex,
-        runIndex: entry.runIndex,
-        input: (port = 'main', index = 0) => portItems(portData, port, index),
-        nodeOutput: (name, outputIndex = 0, runIndex) => {
-          const target = graph.byName.get(name) ?? graph.nodes.get(name);
-          if (target === undefined) throw new NodeNotFoundError(name);
-          const tasks = runData[target.id];
-          if (tasks === undefined) return [];
-          const latestRunIndex = input.currentRunIndices.get(target.id);
-          const task =
-            runIndex === undefined
-              ? tasks[latestRunIndex ?? tasks.length - 1]
-              : tasks[runIndex];
-          return task?.output?.['main']?.[outputIndex] ?? [];
-        },
-        resolveItem: (name) =>
-          resolveItemLineage(name, itemIndex, entry, graph, runData, input.itemSourcesByRun),
-        nodeNames: [...graph.byName.keys()],
-        vars: engine.#vars,
-        timezone: input.timezone,
-        execution: { id: input.runId, mode: input.mode },
-        workflow: { id: workflow.id, name: workflow.name },
-        params: node.parameters,
-        env: engine.#env,
-        now: new Date(engine.#clock.now()),
-      };
-      return context;
-    };
+    const makeExpressionContext = (index: number) => this.#expressionContext(input, index);
 
     const param = <T = ParamValue>(name: string, itemIndex = 0, fallback?: T): T => {
       const raw = node.parameters[name];

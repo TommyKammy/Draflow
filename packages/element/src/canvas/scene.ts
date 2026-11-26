@@ -196,6 +196,7 @@ export class CanvasScene {
   #label(card: Card) {
     const labels = words[this.#locale];
     const parts = [];
+    if (card.node.notesInFlow && card.node.notes) parts.push(card.node.notes);
     if (card.node.disabled) parts.push(labels.disabled);
     if (this.#pins && Object.hasOwn(this.#pins, card.node.id)) parts.push(labels.pinned);
     if (card.state) parts.push(labels[card.state]);

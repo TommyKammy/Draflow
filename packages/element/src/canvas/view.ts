@@ -113,6 +113,14 @@ export function createCanvas(host: HTMLElement, registry: NodeRegistry, actions:
     return { x: (p.x - x) / scale, y: (p.y - y) / scale };
   }, listeners.signal);
 
+  surface.addEventListener('dblclick', event => {
+    const hit = (surface.getRootNode() as ShadowRoot).elementFromPoint(event.clientX, event.clientY);
+    const card = hit?.closest<HTMLElement>('.node-card');
+    if (card?.dataset.nodeId && !hit?.closest('.port')) {
+      card.focus({ preventScroll: true });
+      actions.openDetails(card.dataset.nodeId);
+    }
+  }, opts);
   surface.addEventListener('click', event => {
     const id = cardAt(event)?.dataset.nodeId;
     if (id === undefined) return;
@@ -212,6 +220,12 @@ export function createCanvas(host: HTMLElement, registry: NodeRegistry, actions:
   surface.addEventListener('keydown', event => {
     if (event.isComposing || event.ctrlKey || event.metaKey || event.altKey) return;
     switch (event.key) {
+      case 'Enter': {
+        const id = cardAt(event)?.dataset.nodeId ?? (selected.size === 1 ? [...selected][0] : undefined);
+        if (!id) return;
+        actions.openDetails(id);
+        break;
+      }
       case ' ': space = true; if (cardAt(event)) return; break;
       case '+': case '=': zoomAt(1.25); break;
       case '-': zoomAt(1 / 1.25); break;
