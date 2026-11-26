@@ -191,3 +191,26 @@ test('keeps unaffected preview inputs across edits and invalidates downstream in
   await branch.dblclick();
   await expect(dialog.getByText('No preview input', { exact: true })).toBeVisible();
 });
+
+test('preserves the latest fixed value and expression across mode switches', async ({ page }) => {
+  await page.goto('/');
+  await page.locator('[data-node-id="set"]').dblclick();
+  const dialog = page.getByRole('dialog');
+  const name = 'Include Other Input Fields';
+  const fixed = dialog.getByRole('checkbox', { name, exact: true });
+  const expression = dialog.getByRole('textbox', { name, exact: true });
+  const toExpression = dialog.getByRole('button', { name: name + ' · Expression' });
+
+  await fixed.uncheck();
+  await toExpression.click();
+  await expect(expression).toHaveValue('={{ false }}');
+  const edited = '={{ $json.keep === true }}';
+  await expression.fill(edited);
+  await dialog.getByRole('button', { name: name + ' · Fixed' }).click();
+  await expect(fixed).not.toBeChecked();
+  await toExpression.click();
+  await expect(expression).toHaveValue(edited);
+  const stored = await page.evaluate(() => document.querySelector('draflow-editor')!
+    .workflow!.nodes.find(n => n.id === 'set')!.parameters.includeOtherFields);
+  expect(stored).toBe(edited);
+});

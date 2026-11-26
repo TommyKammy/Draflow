@@ -33,7 +33,8 @@ export function renderFields(parent: HTMLElement, schemas: ParamSchema[], values
   for (const field of schemas) {
     if (field.type === 'hidden' || !isParameterVisible(field, ctx.node, ctx.type)) continue;
     const key = [...path, field.name];
-    const value = values[field.name] === undefined ? field.default : values[field.name];
+    const currentValue = () => values[field.name] === undefined ? field.default : values[field.name];
+    const value = currentValue();
     const expressionValue = !field.noExpression && typeof value === 'string' && value.startsWith('=');
     function write(next: ParamValue, redraw = false, control?: HTMLElement) {
       if (next === undefined) delete values[field.name];
@@ -102,10 +103,11 @@ export function renderFields(parent: HTMLElement, schemas: ParamSchema[], values
       const toggle = button(expressionValue ? 'Fixed' : 'Expression', () => {
         const id = JSON.stringify(key);
         const saved = ctx.modes.get(id) ?? { fixed: field.default, expression: undefined };
-        if (expressionValue) saved.expression = value;
-        else saved.fixed = value;
+        const current = currentValue();
+        if (expressionValue) saved.expression = current;
+        else saved.fixed = current;
         ctx.modes.set(id, saved);
-        write(expressionValue ? saved.fixed : saved.expression ?? '={{ ' + JSON.stringify(value ?? '') + ' }}', true);
+        write(expressionValue ? saved.fixed : saved.expression ?? '={{ ' + JSON.stringify(current ?? '') + ' }}', true);
       });
       toggle.setAttribute('aria-label', field.label + ' · ' + toggle.textContent);
       parent.append(toggle);
