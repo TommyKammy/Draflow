@@ -419,10 +419,16 @@ export function addDuration(
     base = zonedTimeToUtc(parts, timeZone);
   }
 
+  const weeks = (duration.weeks ?? 0) * direction;
+  const days = (duration.days ?? 0) * direction;
+  if (weeks !== 0 || days !== 0) {
+    const parts = getParts(base, timeZone);
+    parts.day += weeks * 7 + days;
+    base = zonedTimeToUtc(parts, timeZone);
+  }
+
   const delta =
-    ((duration.weeks ?? 0) * 7 * 86_400_000 +
-      (duration.days ?? 0) * 86_400_000 +
-      (duration.hours ?? 0) * 3_600_000 +
+    ((duration.hours ?? 0) * 3_600_000 +
       (duration.minutes ?? 0) * 60_000 +
       (duration.seconds ?? 0) * 1_000 +
       (duration.milliseconds ?? 0)) *

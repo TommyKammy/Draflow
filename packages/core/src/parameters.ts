@@ -94,10 +94,42 @@ function displayValues(key: string, node: WorkflowNode, nodeType: NodeType): unk
   if (key === '@tool') return [false];
   if (key === '@feature') return [];
 
-  const value = key.startsWith('/')
-    ? readPath(node.parameters, key.slice(1))
-    : readPath(node.parameters, key);
+  const value = readPathWithDefaults(
+    node.parameters,
+    key.startsWith('/') ? key.slice(1) : key,
+    nodeType,
+  );
   return toValues(unwrapParameterValue(value as ParamValue));
+}
+
+function readPathWithDefaults(
+  source: Record<string, ParamValue>,
+  path: string,
+  nodeType: NodeType,
+): ParamValue {
+  const parts = path.split('.').filter((part) => part !== '');
+  let current: unknown = source;
+  let fields: ParamSchema[] = nodeType.parameters;
+
+  for (const part of parts) {
+    const schema = fields.find((field) => field.name === part);
+
+    if (isPlainObject(current) && Object.prototype.hasOwnProperty.call(current, part)) {
+      current = current[part];
+    } else if (schema?.default !== undefined) {
+      current = schema.default;
+    } else {
+      return undefined;
+    }
+
+    if (schema?.type === 'collection' || schema?.type === 'fixedCollection') {
+      fields = schema.fields;
+    } else {
+      fields = [];
+    }
+  }
+
+  return current as ParamValue;
 }
 
 function toValues(value: ParamValue): unknown[] {

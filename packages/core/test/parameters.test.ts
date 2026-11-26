@@ -134,6 +134,13 @@ describe('parameters', () => {
     expect(values.options).toEqual({ timeout: 1000, retries: 2 });
   });
 
+  it('uses schema defaults when evaluating display conditions', () => {
+    const node = createNode({ type: nodeType.type, name: 'Node' });
+    const names = getVisibleParameters(nodeType, node).map((parameter) => parameter.name);
+    expect(names).toContain('contactId');
+    expect(names).not.toContain('companyId');
+  });
+
   it('unwraps resource locator values', () => {
     expect(unwrapParameterValue({ __rl: true, mode: 'id', value: 'abc' })).toBe('abc');
     expect(unwrapParameterValue('plain')).toBe('plain');

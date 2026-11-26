@@ -390,6 +390,12 @@ export class ExecutionEngine {
           itemCount: primary.length,
         });
 
+        if (run.controller.signal.aborted) {
+          status = 'canceled';
+          error = serializeError(abortReason(run.controller.signal));
+          break;
+        }
+
         const task = await this.#runNode({
           workflow,
           graph,
@@ -600,7 +606,10 @@ export class ExecutionEngine {
 
       try {
         const result = await raceWithAbort(
-          Promise.resolve().then(() => execute.call(nodeType, context)),
+          Promise.resolve().then(() => {
+            if (input.signal.aborted) throw abortReason(input.signal);
+            return execute.call(nodeType, context);
+          }),
           input.signal,
         );
         output = normalizeOutput(result);
@@ -1000,6 +1009,7 @@ function promoteWaiting(
       continue;
     }
     if (!isReady(node, registry, entry.input)) continue;
+    if (hasPendingProducer(nodeId, graph, waiting, queued, stack)) continue;
     fillOptionalInputs(node, registry, entry.input);
     if (queued.has(entry)) continue;
     queued.add(entry);
@@ -1007,6 +1017,25 @@ function promoteWaiting(
     promoted = true;
   }
   return promoted;
+}
+
+function hasPendingProducer(
+  targetId: string,
+  graph: WorkflowGraph,
+  waiting: Map<string, ExecEntry>,
+  queued: Set<ExecEntry>,
+  stack: ExecEntry[],
+): boolean {
+  for (const edge of graph.incoming.get(targetId) ?? []) {
+    const sourceId = edge.from.node;
+    if (sourceId === targetId) continue;
+    if (waiting.has(sourceId)) return true;
+    if (stack.some((entry) => entry.nodeId === sourceId)) return true;
+    for (const entry of queued) {
+      if (entry.nodeId === sourceId) return true;
+    }
+  }
+  return false;
 }
 
 function isReady(node: WorkflowNode, registry: NodeRegistry, input: PortData): boolean {
@@ -1319,7 +1348,10 @@ function followLineage(
 }
 
 function raceWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(abortReason(signal));
+  if (signal.aborted) {
+    void promise.catch(() => undefined);
+    return Promise.reject(abortReason(signal));
+  }
 
   return new Promise<T>((resolve, reject) => {
     let settled = false;

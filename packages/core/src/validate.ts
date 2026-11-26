@@ -118,11 +118,16 @@ function validateConnection(
     return;
   }
 
-  if (connection.from.index < 0 || connection.to.index < 0) {
+  if (
+    !Number.isInteger(connection.from.index) ||
+    !Number.isInteger(connection.to.index) ||
+    connection.from.index < 0 ||
+    connection.to.index < 0
+  ) {
     issues.push({
       severity: 'error',
       code: 'CONNECTION_INDEX',
-      message: `Connection "${connection.id}" has a negative port index`,
+      message: `Connection "${connection.id}" must use nonnegative integer port indices`,
       connectionId: connection.id,
     });
   }

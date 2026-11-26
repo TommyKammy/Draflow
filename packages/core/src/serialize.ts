@@ -174,10 +174,14 @@ function parseConnection(input: unknown, path: string): Connection {
 
 function parsePortRef(input: unknown, path: string): NodePortRef {
   if (!isPlainObject(input)) throw new WorkflowValidationError(`${path} must be an object`);
+  const index = requireNumber(input.index, `${path}.index`);
+  if (!Number.isInteger(index) || index < 0) {
+    throw new WorkflowValidationError(`${path}.index must be a nonnegative integer`);
+  }
   return {
     node: requireString(input.node, `${path}.node`),
     port: requireString(input.port, `${path}.port`),
-    index: requireNumber(input.index, `${path}.index`),
+    index,
   };
 }
 

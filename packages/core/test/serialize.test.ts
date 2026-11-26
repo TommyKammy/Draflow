@@ -128,6 +128,27 @@ describe('serialize', () => {
     expect(result.issues.some((issue) => issue.code === 'UNSAFE_NODE_ID')).toBe(true);
   });
 
+  it('rejects fractional connection indices', () => {
+    const registry = new NodeRegistry().register(nodeType);
+    const workflow = createWorkflow({
+      nodes: [
+        createNode({ id: 'a', type: 'test.node', name: 'A', parameters: { value: 'a' } }),
+        createNode({ id: 'b', type: 'test.node', name: 'B', parameters: { value: 'b' } }),
+      ],
+      connections: [
+        createConnection(
+          { node: 'a', port: 'main', index: 0.5 },
+          { node: 'b', port: 'main', index: 0 },
+        ),
+      ],
+    });
+
+    const result = validateWorkflow(workflow, registry);
+    expect(result.ok).toBe(false);
+    expect(result.issues.some((issue) => issue.code === 'CONNECTION_INDEX')).toBe(true);
+    expect(() => parseWorkflow(serializeWorkflow(workflow))).toThrow(/nonnegative integer/);
+  });
+
   it('rejects duplicate names and unknown types as errors', () => {
     const registry = new NodeRegistry().register(nodeType);
     const workflow = createWorkflow({

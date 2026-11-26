@@ -164,6 +164,18 @@ describe('ExpressionEngine', () => {
         newYorkContext,
       ),
     ).toBe('2026-10-26');
+    expect(
+      newYork.resolve(
+        '={{ DateTime.fromISO("2026-03-07T12:00:00-05:00").plus({ days: 1 }).toISO() }}',
+        newYorkContext,
+      ),
+    ).toBe('2026-03-08T12:00:00.000-04:00');
+    expect(
+      newYork.resolve(
+        '={{ DateTime.fromISO("2026-03-08T12:00:00-04:00").minus({ days: 1 }).toISO() }}',
+        newYorkContext,
+      ),
+    ).toBe('2026-03-07T12:00:00.000-05:00');
   });
 
   it('uses the injected expression clock for current-date operations', () => {

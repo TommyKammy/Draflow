@@ -774,6 +774,60 @@ describe('ExecutionEngine', () => {
     ]);
   });
 
+  it('defers a fan-in consumer while another producer is pending', async () => {
+    const wf = workflow(
+      [
+        node('t', triggerType.type, 'Trigger', 0),
+        node('a', echoType.type, 'A', 200),
+        node('b', echoType.type, 'B', 200),
+        node('x', echoType.type, 'X', 400),
+        node('j', echoType.type, 'J', 600),
+      ],
+      [
+        connect('t', 'a'),
+        connect('t', 'b'),
+        connect('a', 'x'),
+        connect('b', 'x'),
+        connect('a', 'j'),
+        connect('x', 'j'),
+      ],
+    );
+
+    const result = await execute(wf, {}, new ExecutionEngine({ registry }));
+    expect(result.status).toBe('success');
+    expect(result.runData.j).toHaveLength(1);
+    expect(result.runData.j?.[0]?.output?.main?.[0]).toHaveLength(3);
+  });
+
+  it('does not execute a node canceled from node:start', async () => {
+    let calls = 0;
+    const target: NodeType = {
+      ...echoType,
+      type: 'test.cancelTarget',
+      execute() {
+        calls += 1;
+        throw new Error('should not run');
+      },
+    };
+    const local = new NodeRegistry().registerAll([triggerType, target]);
+    const wf = workflow(
+      [
+        node('t', triggerType.type, 'Trigger', 0),
+        node('target', target.type, 'Target', 200),
+      ],
+      [connect('t', 'target')],
+    );
+
+    const handle = new ExecutionEngine({ registry: local }).run(wf);
+    handle.on('node:start', (event) => {
+      if (event.nodeName === 'Target') handle.cancel();
+    });
+    const result = await handle.done;
+
+    expect(result.status).toBe('canceled');
+    expect(calls).toBe(0);
+  });
+
   it('stops runaway loops at the execution limit', async () => {
     const loopType: NodeType = {
       ...echoType,
