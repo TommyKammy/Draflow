@@ -900,7 +900,8 @@ export class ExecutionEngine {
       fetchForSlot: (slot, required) => {
         const bound = node.credentials && Object.hasOwn(node.credentials, slot);
         const id = bound ? node.credentials?.[slot] : undefined;
-        if ((required || bound) && (!id || !transport)) throw new Error('HTTP credential unavailable');
+        if (bound && !required) throw new Error('Credential reference conflicts with disabled authentication');
+        if (required && (!id || !transport)) throw new Error('HTTP credential unavailable');
         if (!transport) return this.#fetch;
         const binding = { workflowId, nodeId: node.id, type: node.type, typeVersion, slot, ...(id && { id }) };
         return (url, init) => transport(binding, url, init);

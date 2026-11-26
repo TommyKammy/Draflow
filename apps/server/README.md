@@ -30,7 +30,7 @@ Run `node apps/server/test/latency.mjs` after the build to measure 100 serial ev
 
 ## HTTP credentials
 
-Publish an HTTP Request node with `typeVersion: 2`, `parameters.authentication: "credential"`, and a reference such as `credentials: { "httpAuth": "orders-read" }`. Place only the reference in the workflow. The browser can edit and export the document and inspect server history. An editor run that requires this credential fails before fetching.
+Publish an HTTP Request node with `typeVersion: 2`, `parameters.authentication: "credential"`, and a reference such as `credentials: { "httpAuth": "orders-read" }`. Place only the reference in the workflow. To disable authentication, remove the reference and select None. A conflicting reference or unknown mode fails before provider lookup. The browser can edit and export the document and inspect server history. An editor run that requires this credential fails before fetching.
 
 For the CLI, set `DRAFLOW_HTTP_AUTH_FILE` to a server-local JSON file and populate the named secret in the server process environment. This example grants one node access to one API origin:
 

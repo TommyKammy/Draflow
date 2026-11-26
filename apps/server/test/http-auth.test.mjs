@@ -263,3 +263,63 @@ test('local configuration resolves only explicitly mapped environment variables'
     else process.env.DRAFLOW_TEST_R3_KEY = original;
   }
 });
+
+test('inconsistent authentication settings fail before resolving or sending credentials', async (t) => {
+  const { origin, seen } = await mockApi(t);
+  let resolutions = 0;
+  const grant = { id: 'service', workflowId: 'orders', nodeId: 'api', origin, kind: 'bearer' };
+  const run = hostFixture(t, origin, {
+    httpAuth: {
+      grants: [grant],
+      resolve() {
+        resolutions++;
+        return dummy;
+      },
+    },
+  });
+  for (const mode of ['none', 'unsupported']) {
+    const workflow = document(origin);
+    workflow.nodes[1].parameters.authentication = mode;
+    assert.equal((await run(workflow)).summary.status, 'error');
+  }
+  assert.equal(resolutions, 0);
+  assert.equal(seen.length, 0);
+});
+
+test('timing out a response cancels even a host-provided stream without signal handling', async (t) => {
+  const origin = 'https://orders.example.test';
+  let cancelled = false;
+  const run = hostFixture(t, origin, {
+    fetch: async () =>
+      new Response(
+        new ReadableStream({
+          cancel() {
+            cancelled = true;
+          },
+        }),
+      ),
+  });
+  const workflow = document(origin);
+  workflow.nodes[1].parameters.timeout = 20;
+  assert.equal((await run(workflow)).summary.status, 'error');
+  assert.equal(cancelled, true);
+});
+
+test('checks the serialized JSON result for a reflected numeric API key', async (t) => {
+  const origin = 'https://orders.example.test';
+  const grant = {
+    id: 'service',
+    workflowId: 'orders',
+    nodeId: 'api',
+    origin,
+    kind: 'apiKey',
+    header: 'X-Key',
+  };
+  const run = hostFixture(t, origin, {
+    httpAuth: { grants: [grant], resolve: () => '987654321' },
+    fetch: async () => new Response('{"code":9.87654321e8}'),
+  });
+  const { summary, detail } = await run(document(origin));
+  assert.equal(summary.status, 'error');
+  assert.ok(!JSON.stringify(detail).includes('987654321'));
+});

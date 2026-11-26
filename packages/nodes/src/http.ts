@@ -103,7 +103,11 @@ export const httpRequestNode: NodeType = {
         }
       }
 
-      const required = itemCtx.param<string>('authentication', 'none') !== 'none';
+      const authentication = itemCtx.param<string>('authentication', 'none');
+      if (authentication !== 'none' && authentication !== 'credential') {
+        throw new Error('Unsupported HTTP authentication mode');
+      }
+      const required = authentication === 'credential';
       const scopedFetch = ctx.credentials.fetchForSlot?.('httpAuth', required);
       if (required && !scopedFetch) {
         throw new Error('HTTP credential unavailable');

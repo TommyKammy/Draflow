@@ -18,24 +18,35 @@ class ResponseLimit extends Error {
   }
 }
 
-async function readBounded(response: Response, limit: number): Promise<Uint8Array<ArrayBuffer> | null> {
+async function readBounded(
+  response: Response,
+  limit: number,
+  signal?: AbortSignal | null,
+): Promise<Uint8Array<ArrayBuffer> | null> {
   if (!response.body) return null;
   const reader = response.body.getReader();
+  const cancel = () => {
+    void reader.cancel().catch(() => {});
+  };
+  signal?.addEventListener('abort', cancel, { once: true });
   const chunks: Uint8Array[] = [];
   let size = 0;
   try {
+    signal?.throwIfAborted();
     if (Number(response.headers.get('content-length')) > limit) throw new ResponseLimit();
     for (;;) {
       const { done, value } = await reader.read();
+      signal?.throwIfAborted();
       if (done) break;
       size += value.byteLength;
       if (size > limit) throw new ResponseLimit();
       chunks.push(value);
     }
   } catch (error) {
-    void reader.cancel().catch(() => {});
+    cancel();
     throw error;
   } finally {
+    signal?.removeEventListener('abort', cancel);
     reader.releaseLock();
   }
   const bytes = new Uint8Array(size);
@@ -50,18 +61,28 @@ async function readBounded(response: Response, limit: number): Promise<Uint8Arra
 function reflectsSecret(bytes: Uint8Array, secret: string) {
   const text = new TextDecoder().decode(bytes);
   if (text.includes(secret)) return true;
-  // A JSON string or property name can spell the value using Unicode escapes.
-  if (!text.includes('\\')) return false;
-  let found = false;
+  // The HTTP node attempts JSON decoding even when the upstream returns plain text.
+  // Check the values as they would appear in execution output, including normalized numbers.
+  const pending: unknown[] = [];
   try {
-    JSON.parse(text, (key, value: unknown) => {
-      if (key.includes(secret) || (typeof value === 'string' && value.includes(secret))) found = true;
-      return value;
-    });
+    pending.push(JSON.parse(text));
   } catch {
-    /* The HTTP node also supports plain text. */
+    return false;
   }
-  return found;
+  while (pending.length > 0) {
+    const value = pending.pop();
+    if (Array.isArray(value)) {
+      for (const entry of value) pending.push(entry);
+    } else if (value !== null && typeof value === 'object') {
+      for (const [key, entry] of Object.entries(value)) {
+        if (key.includes(secret)) return true;
+        pending.push(entry);
+      }
+    } else if (String(value).includes(secret)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function grantFor(binding: CredentialBinding, url: string, auth?: HttpAuth) {
@@ -115,7 +136,7 @@ export function serverHttp(fetchFn: FetchLike, limit: number, auth?: HttpAuth): 
     try {
       init?.signal?.throwIfAborted();
       response = await fetchFn(url, init);
-      bytes = await readBounded(response, limit);
+      bytes = await readBounded(response, limit, init?.signal);
     } catch (error) {
       if (error instanceof ResponseLimit) throw error;
       // Provider, transport and stream errors can contain request headers.
