@@ -266,7 +266,7 @@ export class ExecutionEngine {
       this.#previews?.set(task, index => this.#expressionContext({
         node, entry, workflow, graph, runData, currentRunIndices, itemSourcesByRun: runItemSources,
         runId: run.runId, mode: run.mode, timezone,
-      }, index));
+      }, index, task.input));
     };
     let lastKey = '';
     let status: RunStatus = 'success';
@@ -734,9 +734,8 @@ export class ExecutionEngine {
     node: WorkflowNode; entry: ExecEntry; graph: WorkflowGraph; workflow: Workflow; runData: RunData;
     currentRunIndices: Map<string, number>; itemSourcesByRun: Map<string, ItemSources>;
     runId: string; mode: ExecutionMode; timezone: string;
-  }, itemIndex: number): ExpressionContext {
+  }, itemIndex: number, portData = input.entry.input): ExpressionContext {
     const { node, entry, graph, workflow, runData } = input;
-    const portData = entry.input;
     const items = primaryItems(portData);
     const item = items[itemIndex] ?? items[0] ?? { json: {} };
     return {
