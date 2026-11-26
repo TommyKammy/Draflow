@@ -223,9 +223,10 @@ function callArray(
     case 'concat':
       return value.concat(...args.map((entry) => (Array.isArray(entry) ? entry : [entry])));
     case 'includes':
-      return value.some((entry) => strictEqual(entry, args[0]));
-    case 'indexOf':
-      return value.findIndex((entry) => strictEqual(entry, args[0]));
+    case 'indexOf': {
+      const fromIndex = args[1] === undefined ? undefined : Number(args[1]);
+      return value[name](args[0], fromIndex);
+    }
     case 'reverse':
       return [...value].reverse();
     case 'map':

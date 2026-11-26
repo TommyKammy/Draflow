@@ -163,6 +163,12 @@ describe('ExpressionEngine', () => {
   });
 
   it.each([
+    ['["a", "b", "a"].indexOf("a", 1)', 2],
+    ['["a", "b"].includes("a", 1)', false],
+    ['["a", "b", "a"].indexOf("a", -1)', 2],
+    ['["a", "b"].includes("a", -1)', false],
+    ['["a"].indexOf("a", 1)', -1],
+    ['["a"].includes("a", -2)', true],
     ['"a,b,a".indexOf("a", 1)', 4],
     ['"ababa".lastIndexOf("a", 1)', 0],
     ['"abc".includes("a", 1)', false],
