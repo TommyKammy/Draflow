@@ -22,6 +22,7 @@ interface Context {
   node: WorkflowNode;
   type: NodeType;
   modes: Map<string, { fixed: ParamValue; expression: ParamValue }>;
+  canRedraw(removing?: HTMLElement): boolean;
   changed(redraw: boolean, control?: HTMLElement): void;
 }
 
@@ -79,12 +80,18 @@ export function renderFields(parent: HTMLElement, schemas: ParamSchema[], values
       rows.forEach((row, i) => {
         const item = group(String(i + 1));
         if (isPlainObject(row)) renderFields(item, field.fields, row, { ...ctx, changed: update }, [...key, i]);
-        const remove = button('Remove', () => { rows.splice(i, 1); ctx.modes.clear(); update(true); });
+        const remove = button('Remove', () => {
+          if (!ctx.canRedraw(item)) return;
+          rows.splice(i, 1);
+          ctx.modes.clear();
+          update(true);
+        });
         remove.disabled = rows.length <= (field.min ?? 0);
         item.append(remove);
         box.append(item);
       });
       const add = button('Add row', () => {
+        if (!ctx.canRedraw()) return;
         const row: JsonObject = {};
         for (const f of field.fields) if (f.default !== undefined) row[f.name] = structuredClone(f.default);
         rows.push(row);
@@ -101,6 +108,7 @@ export function renderFields(parent: HTMLElement, schemas: ParamSchema[], values
     const constrained = ['select', 'multiSelect', 'number', 'boolean'].includes(field.type);
     if (constrained && !field.noExpression) {
       const toggle = button(expressionValue ? 'Fixed' : 'Expression', () => {
+        if (!ctx.canRedraw()) return;
         const id = JSON.stringify(key);
         const saved = ctx.modes.get(id) ?? { fixed: field.default, expression: undefined };
         const current = currentValue();

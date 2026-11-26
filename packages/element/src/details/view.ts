@@ -106,10 +106,19 @@ export function nodeDetails(actions: Actions) {
     }
     return true;
   }
+  // Invalid text exists only in its control until it can be parsed into the draft.
+  function canRedraw(removing?: HTMLElement) {
+    const invalid = [...form.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('[aria-invalid="true"]:invalid')]
+      .find(control => !removing?.contains(control));
+    if (!invalid) return true;
+    discard.hidden = false;
+    invalid.reportValidity();
+    return false;
+  }
   function changed(redraw: boolean, control?: HTMLElement) {
     editingControl = control;
     pending = true;
-    if (redraw || (draft && fieldNames !== signature(draft))) renderForm();
+    if (redraw || (draft && fieldNames !== signature(draft) && canRedraw())) renderForm();
     flush();
   }
   function close() {
@@ -135,7 +144,7 @@ export function nodeDetails(actions: Actions) {
     switches[0]!.setAttribute('aria-pressed', String(!settingsMode));
     switches[1]!.setAttribute('aria-pressed', String(settingsMode));
     if (!type) { fields.textContent = node.type; return; }
-    const context = { modes, expression: actions.engine.expression, type, node, changed,
+    const context = { modes, canRedraw, expression: actions.engine.expression, type, node, changed,
       preview(value: string) {
         const task = actions.task(node.id);
         if (!task?.input?.main?.[0]?.length) return 'No preview input';

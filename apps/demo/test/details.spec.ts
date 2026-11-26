@@ -214,3 +214,29 @@ test('preserves the latest fixed value and expression across mode switches', asy
     .workflow!.nodes.find(n => n.id === 'set')!.parameters.includeOtherFields);
   expect(stored).toBe(edited);
 });
+
+test('keeps invalid HTTP headers when another field requests a redraw', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.locator('[data-node-id="set"]')).toBeVisible();
+  const dialog = page.getByRole('dialog');
+  await page.getByRole('button', { name: 'ノードを追加' }).click();
+  await dialog.getByRole('button', { name: 'HTTP Request', exact: true }).click();
+  await page.locator('.node-card[aria-pressed=true]').dblclick();
+  await dialog.getByLabel('URL', { exact: true }).fill('https://example.invalid/items');
+  const headers = dialog.getByLabel('Headers', { exact: true });
+  const toggle = dialog.getByRole('button', { name: 'Method · Expression' });
+  await headers.fill('{');
+  await toggle.click();
+  await expect(headers).toHaveValue('{');
+  await expect(headers).toHaveAttribute('aria-invalid', 'true');
+  await dialog.getByRole('button', { name: 'Execute step' }).click();
+  await expect(headers).toBeFocused();
+  await expect(dialog.getByRole('button', { name: 'Discard invalid input' })).toBeVisible();
+  await headers.fill('{"Accept":"application/json"}');
+  await toggle.click();
+  await expect(dialog.getByRole('textbox', { name: 'Method', exact: true })).toHaveValue('={{ "GET" }}');
+  await dialog.getByRole('button', { name: 'Close' }).click();
+  const params = await page.evaluate(() => document.querySelector('draflow-editor')!.workflow!
+    .nodes.find(n => n.type === 'draflow.httpRequest')!.parameters);
+  expect(params).toMatchObject({ method: '={{ "GET" }}', headers: { Accept: 'application/json' } });
+});
