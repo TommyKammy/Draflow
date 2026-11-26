@@ -84,6 +84,7 @@ export function createCanvas(host: HTMLElement, registry: NodeRegistry, actions:
   }
 
   function select(ids: Set<string>) {
+    if (ids.size) editing.clearEdge();
     if (ids.size === selected.size && [...ids].every(id => selected.has(id))) return;
     for (const id of selected) if (!ids.has(id)) scene.cards.get(id)?.element.setAttribute('aria-pressed', 'false');
     for (const id of ids) scene.cards.get(id)?.element.setAttribute('aria-pressed', 'true');
@@ -123,7 +124,7 @@ export function createCanvas(host: HTMLElement, registry: NodeRegistry, actions:
 
   surface.addEventListener('pointerdown', event => {
     if (gesture || (event.button !== 0 && event.button !== 1)) return;
-    const pan = event.button === 1 || space || (event.pointerType === 'touch' && !cardAt(event));
+    const pan = event.button === 1 || space || (event.pointerType === 'touch' && !cardAt(event) && !(event.target instanceof SVGPathElement && actions.enabled()));
     if (!pan && editing.pointerdown(event)) return;
     if (!pan && cardAt(event)) return;
     event.preventDefault();
@@ -230,8 +231,8 @@ export function createCanvas(host: HTMLElement, registry: NodeRegistry, actions:
     panel, scene, fitView,
     remove: editing.remove,
     cancelEdit: editing.cancel,
-    centerPoint() {
-      const p = {
+    centerPoint(preferred?: Point) {
+      const p = preferred ? { ...preferred } : {
         x: Math.round(((surface.clientWidth / 2 - x) / scale - cardWidth / 2) / 16) * 16,
         y: Math.round(((surface.clientHeight / 2 - y) / scale - cardHeight / 2) / 16) * 16,
       };

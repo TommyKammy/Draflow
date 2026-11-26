@@ -69,8 +69,8 @@ test('adds a node, wires indexed ports and disconnects a selected edge', async (
   expect((await documentState(page)).connections).toEqual([]);
   await page.keyboard.press('Control+z');
   expect(await documentState(page)).toEqual(wired);
-  await page.getByRole('combobox').selectOption('draflow.noOp');
-  await page.getByRole('button', { name: '追加', exact: true }).click();
+  await page.getByRole('button', { name: 'ノードを追加' }).click();
+  await page.getByRole('button', { name: 'No Operation' }).click();
   expect((await documentState(page)).nodes.at(-1)?.type).toBe('draflow.noOp');
 });
 
@@ -145,4 +145,69 @@ test('copies a selection with its internal wiring and undoes a paste as one edit
   expect(new Set(copy.nodes.map(node => node.name)).size).toBe(4);
   await page.getByRole('button', { name: '元に戻す' }).click();
   expect(await documentState(page)).toEqual(initial);
+});
+
+test('builds Manual → Set → If from an empty canvas using search and output ports', async ({ page }) => {
+  await page.evaluate(() => {
+    const editor = document.querySelector('draflow-editor')!;
+    editor.workflow = { ...editor.workflow!, nodes: [], connections: [] };
+  });
+  const dialog = page.getByRole('dialog');
+  await page.getByRole('button', { name: 'ノードを追加' }).click();
+  const search = dialog.getByRole('searchbox');
+  await expect(search).toBeFocused();
+  await dialog.getByRole('combobox').selectOption('trigger');
+  await search.fill('absent');
+  await expect(dialog.getByText('該当するノードがありません')).toBeVisible();
+  await search.fill('NuAl');
+  await dialog.getByRole('button', { name: 'Manual Trigger' }).click();
+  for (const label of ['Edit Fields (Set)', 'If']) {
+    await page.locator('.node-card[aria-pressed=true] .output').first().click();
+    await expect(dialog.getByRole('button', { name: 'Manual Trigger' })).toHaveCount(0);
+    await search.fill(label);
+    await dialog.getByRole('button', { name: label, exact: true }).click();
+  }
+  const w = await documentState(page);
+  expect(w.nodes.map(n => n.type)).toEqual(['draflow.manualTrigger', 'draflow.set', 'draflow.if']);
+  expect(w.connections.map(c => [c.from.node, c.to.node])).toEqual([
+    [w.nodes[0]!.id, w.nodes[1]!.id], [w.nodes[1]!.id, w.nodes[2]!.id],
+  ]);
+  await page.locator('.node-card[aria-pressed=true] .output[title=False]').click();
+  await expect(dialog.getByRole('heading', { name: '最近使ったノード' })).toBeVisible();
+  await dialog.getByRole('button', { name: 'Edit Fields (Set)', exact: true }).click();
+  expect((await documentState(page)).connections.at(-1)?.from).toEqual({ node: w.nodes[2]!.id, port: 'main', index: 1 });
+  await page.getByRole('button', { name: '元に戻す' }).click();
+  expect(await documentState(page)).toEqual(w);
+});
+
+test('inserts between If False and Merge input 2 and restores the exact edge with one undo', async ({ page }) => {
+  await page.evaluate(() => {
+    const editor = document.querySelector('draflow-editor')!;
+    const w = editor.workflow!;
+    w.nodes[0]!.type = 'draflow.if';
+    w.nodes[1]!.type = 'draflow.merge';
+    w.nodes[1]!.position.x = 520;
+    w.connections[0]!.from.index = w.connections[0]!.to.index = 1;
+    editor.workflow = w;
+  });
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
+  const before = await documentState(page);
+  const a = await center(page.locator('.output[title=False]'));
+  const b = await center(page.locator('.input[title="Input 2"]'));
+  await page.mouse.click((a.x + b.x) / 2, (a.y + b.y) / 2);
+  const insert = page.getByRole('button', { name: '接続にノードを挿入' });
+  await insert.click();
+  await page.keyboard.press('Escape');
+  expect(await documentState(page)).toEqual(before);
+  await insert.click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Edit Fields (Set)', exact: true }).click();
+  const after = await documentState(page);
+  const middle = { node: after.nodes.at(-1)!.id, port: 'main', index: 0 };
+  expect(after.connections.map(c => [c.from, c.to])).toEqual([
+    [before.connections[0]!.from, middle], [middle, before.connections[0]!.to],
+  ]);
+  await page.getByRole('button', { name: '元に戻す' }).click();
+  expect(await documentState(page)).toEqual(before);
+  await page.getByRole('button', { name: 'やり直す' }).click();
+  expect(await documentState(page)).toEqual(after);
 });

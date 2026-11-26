@@ -1,11 +1,29 @@
-import { createConnection, createId, createNode, type NodePortRef, type NodeType, type Workflow } from '@draflow/core';
+import { createConnection, createId, createNode, type Connection, type NodePortRef, type NodeType, type Workflow } from '@draflow/core';
 import type { Point } from '../canvas/scene.js';
+
+export type Placement = { from: NodePortRef; edge?: Connection };
+
+export function compatible(output: string, input: string) {
+  return output === input || (output === 'error' && input === 'main');
+}
+
+// Prefer an exact match before using the error-to-main fallback.
+export function creatorPorts(type: NodeType, placement: Placement) {
+  const from = placement.from.port;
+  const to = placement.edge?.to.port;
+  const input = type.ports.inputs.find(p => p.type === from) ??
+    type.ports.inputs.find(p => compatible(from, p.type));
+  const output = type.ports.outputs.find(p => p.type === to) ??
+    type.ports.outputs.find(p => to !== undefined && compatible(p.type, to));
+  if (!input || (to !== undefined && !output)) return;
+  return { input: input.type, output: output?.type };
+}
 
 export type Edit =
   | { type: 'move'; positions: Map<string, Point> }
   | { type: 'connect'; from: NodePortRef; to: NodePortRef }
   | { type: 'delete'; nodes: Set<string>; edge?: string }
-  | { type: 'add'; nodeType: NodeType; position: Point }
+  | { type: 'add'; nodeType: NodeType; position: Point; placement?: Placement }
   | { type: 'paste'; fragment: Workflow };
 
 function uniqueName(base: string, names: Set<string>) {
@@ -45,7 +63,18 @@ export function applyEdit(w: Workflow, edit: Edit): Workflow {
     case 'add': {
       const type = edit.nodeType;
       const name = uniqueName(type.meta.label, new Set(w.nodes.map(n => n.name)));
-      return { ...w, nodes: [...w.nodes, createNode({ name, type: type.type, typeVersion: type.version, position: edit.position })] };
+      const node = createNode({ name, type: type.type, typeVersion: type.version, position: edit.position });
+      const nodes = [...w.nodes, node];
+      const placement = edit.placement;
+      if (!placement) return { ...w, nodes };
+      const ports = creatorPorts(type, placement);
+      const edge = placement.edge;
+      if (!ports || !w.nodes.some(n => n.id === placement.from.node) || (edge && !w.connections.includes(edge))) return w;
+      const incoming = createConnection(placement.from, { node: node.id, port: ports.input, index: 0 });
+      const connections = edge
+        ? w.connections.flatMap(c => c === edge ? [incoming, createConnection({ node: node.id, port: ports.output!, index: 0 }, edge.to)] : [c])
+        : [...w.connections, incoming];
+      return { ...w, nodes, connections };
     }
     case 'paste': {
       const src = structuredClone(edit.fragment);
