@@ -78,6 +78,12 @@ describe('ExpressionEngine', () => {
     expect(evaluate('={{ $json.items.average() }}')).toBe(2);
   });
 
+  it('treats delimiters inside string literals as data', () => {
+    expect(evaluate('={{ "a)b".split(")") }}')).toEqual(['a', 'b']);
+    expect(evaluate('={{ ["]"] }}')).toEqual([']']);
+    expect(evaluate('={{ ")" + "(" }}')).toBe(')(');
+  });
+
   it('supports nullish, comparisons, and ternary', () => {
     expect(evaluate('={{ $json.missing ?? "fallback" }}')).toBe('fallback');
     expect(evaluate('={{ $json.age > 18 ? "adult" : "minor" }}')).toBe('adult');
@@ -104,6 +110,11 @@ describe('ExpressionEngine', () => {
     expect(evaluate('={{ $now.format("yyyy-MM-dd HH:mm") }}')).toBe('2026-11-26 08:30');
     expect(evaluate('={{ $today.plus({ days: 1 }).format("yyyy-MM-dd") }}')).toBe('2026-11-27');
     expect(evaluate('={{ $now.toISO() }}')).toBe('2026-11-26T08:30:00.000Z');
+    expect(
+      evaluate(
+        '={{ DateTime.fromISO("2026-01-15T00:00:00Z").plus({ months: 1, days: 2, hours: 3 }).toISO() }}',
+      ),
+    ).toBe('2026-02-17T03:00:00.000Z');
   });
 
   it('resolves nested values', () => {

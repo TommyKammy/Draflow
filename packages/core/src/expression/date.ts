@@ -378,6 +378,7 @@ export function addDuration(
 ): number {
   const months = (duration.months ?? 0) * direction;
   const years = (duration.years ?? 0) * direction;
+  let base = millis;
 
   if (months !== 0 || years !== 0) {
     const parts = getParts(millis, timeZone);
@@ -388,7 +389,7 @@ export function addDuration(
     parts.year = year;
     parts.month = month;
     parts.day = Math.min(parts.day, maxDay);
-    return zonedTimeToUtc(parts, timeZone);
+    base = zonedTimeToUtc(parts, timeZone);
   }
 
   const delta =
@@ -400,7 +401,7 @@ export function addDuration(
       (duration.milliseconds ?? 0)) *
     direction;
 
-  return millis + delta;
+  return base + delta;
 }
 
 export function diff(fromMillis: number, toMillis: number, unit: DateUnit): number {

@@ -1,4 +1,5 @@
 import {
+  cloneJson,
   isPlainObject,
   toJsonValue,
   type Item,
@@ -90,7 +91,7 @@ export const setNode: NodeType = {
       }
 
       const includeOtherFields = itemCtx.param<boolean>('includeOtherFields', true);
-      const base: JsonObject = includeOtherFields ? { ...input.json } : {};
+      const base: JsonObject = includeOtherFields ? cloneJson(input.json) : {};
       const assignments = fixedValues(itemCtx.param<unknown>('assignments', []));
 
       for (const assignment of assignments) {

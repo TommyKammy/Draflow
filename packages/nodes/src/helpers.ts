@@ -29,10 +29,13 @@ export function toJson(value: unknown): JsonValue {
   return toJsonValue(value);
 }
 
+const UNSAFE_PATH_SEGMENTS = new Set(['__proto__', 'prototype', 'constructor']);
+
 export function getPath(value: unknown, path: string): unknown {
   const parts = path.split('.').filter((part) => part !== '');
   let current: unknown = value;
   for (const part of parts) {
+    if (UNSAFE_PATH_SEGMENTS.has(part)) return undefined;
     if (Array.isArray(current)) {
       const index = Number(part);
       if (!Number.isInteger(index)) return undefined;
@@ -51,11 +54,19 @@ export function setPath(target: JsonObject, path: string, value: JsonValue): voi
   const parts = path.split('.').filter((part) => part !== '');
   if (parts.length === 0) return;
 
+  for (const part of parts) {
+    if (UNSAFE_PATH_SEGMENTS.has(part)) {
+      throw new Error(`Unsafe field path segment "${part}"`);
+    }
+  }
+
   let current: JsonObject = target;
   for (let index = 0; index < parts.length - 1; index += 1) {
     const part = parts[index];
     if (part === undefined) return;
-    const existing = current[part];
+    const existing = Object.prototype.hasOwnProperty.call(current, part)
+      ? current[part]
+      : undefined;
     if (!isPlainObject(existing)) {
       const next: JsonObject = {};
       current[part] = next;

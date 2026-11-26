@@ -20,15 +20,18 @@ export class NodeProxy {
   readonly name: string;
   readonly #getItems: (name: string, outputIndex?: number, runIndex?: number) => readonly Item[];
   readonly #getCurrentItem: () => Item | undefined;
+  readonly #resolveItem: ((name: string) => Item | undefined) | undefined;
 
   constructor(
     name: string,
     getItems: (name: string, outputIndex?: number, runIndex?: number) => readonly Item[],
     getCurrentItem: () => Item | undefined,
+    resolveItem?: (name: string) => Item | undefined,
   ) {
     this.name = name;
     this.#getItems = getItems;
     this.#getCurrentItem = getCurrentItem;
+    this.#resolveItem = resolveItem;
   }
 
   all(): readonly Item[] {
@@ -50,6 +53,10 @@ export class NodeProxy {
   }
 
   get item(): Item | undefined {
+    if (this.#resolveItem !== undefined) {
+      return this.#resolveItem(this.name) ?? this.first();
+    }
+
     const current = this.#getCurrentItem();
     const paired = current?.pairedItem;
     const reference = Array.isArray(paired) ? paired[0] : paired;
@@ -73,19 +80,22 @@ export class NodeMap {
   readonly #getItems: (name: string, outputIndex?: number, runIndex?: number) => readonly Item[];
   readonly #getCurrentItem: () => Item | undefined;
   readonly #names: () => readonly string[];
+  readonly #resolveItem: ((name: string) => Item | undefined) | undefined;
 
   constructor(
     getItems: (name: string, outputIndex?: number, runIndex?: number) => readonly Item[],
     getCurrentItem: () => Item | undefined,
     names: () => readonly string[],
+    resolveItem?: (name: string) => Item | undefined,
   ) {
     this.#getItems = getItems;
     this.#getCurrentItem = getCurrentItem;
     this.#names = names;
+    this.#resolveItem = resolveItem;
   }
 
   get(name: string): NodeProxy {
-    return new NodeProxy(name, this.#getItems, this.#getCurrentItem);
+    return new NodeProxy(name, this.#getItems, this.#getCurrentItem, this.#resolveItem);
   }
 
   has(name: string): boolean {
@@ -151,10 +161,10 @@ export function createDataProxy(ctx: ExpressionContext): Record<string, unknown>
         typeof runIndex === 'number' ? runIndex : undefined,
       );
     }),
-    $node: new NodeMap(nodeOutput, currentItem, nodeNames),
+    $node: new NodeMap(nodeOutput, currentItem, nodeNames, ctx.resolveItem),
     $: new HostFunction('$', (nodeName) => {
       if (typeof nodeName !== 'string') return undefined;
-      return new NodeProxy(nodeName, nodeOutput, currentItem);
+      return new NodeProxy(nodeName, nodeOutput, currentItem, ctx.resolveItem);
     }),
     $now: now,
     $today: today,

@@ -50,7 +50,7 @@ class Parser {
 
   #match(value: string): boolean {
     const token = this.#peek();
-    if (token.value === value) {
+    if (token.type === 'punct' && token.value === value) {
       this.#next();
       return true;
     }
@@ -59,7 +59,17 @@ class Parser {
 
   #expect(value: string): Token {
     const token = this.#peek();
-    if (token.value !== value) {
+    if (value === 'eof') {
+      if (token.type !== 'eof') {
+        throw new ExpressionSyntaxError(
+          `Expected end of expression but found ${describeToken(token)}`,
+          this.#source,
+          token.start,
+        );
+      }
+      return this.#next();
+    }
+    if (token.type !== 'punct' || token.value !== value) {
       throw new ExpressionSyntaxError(
         `Expected "${value}" but found ${describeToken(token)}`,
         this.#source,
@@ -159,14 +169,15 @@ class Parser {
     let left = this.#parseAdditive();
 
     while (true) {
-      const operator = this.#peek().value;
+      const token = this.#peek();
+      const operator = token.type === 'punct' ? token.value : '';
       if (operator === '<' || operator === '<=' || operator === '>' || operator === '>=') {
         this.#next();
         const right = this.#parseAdditive();
         left = binaryNode(operator, left, right);
         continue;
       }
-      if (this.#peek().type === 'identifier' && this.#peek().value === 'in') {
+      if (token.type === 'identifier' && token.value === 'in') {
         this.#next();
         const right = this.#parseAdditive();
         left = binaryNode('in', left, right);
@@ -200,7 +211,9 @@ class Parser {
     build: (operator: string, left: Expr, right: Expr) => Expr,
   ): Expr {
     let left = parseOperand();
-    while (operators.has(this.#peek().value)) {
+    while (true) {
+      const token = this.#peek();
+      if (token.type !== 'punct' || !operators.has(token.value)) break;
       const operator = this.#next().value;
       const right = parseOperand();
       left = build(operator, left, right);
@@ -210,7 +223,10 @@ class Parser {
 
   #parseUnary(): Expr {
     const token = this.#peek();
-    if (token.value === '!' || token.value === '-' || token.value === '+') {
+    if (
+      token.type === 'punct' &&
+      (token.value === '!' || token.value === '-' || token.value === '+')
+    ) {
       this.#next();
       const argument = this.#parseUnary();
       return {

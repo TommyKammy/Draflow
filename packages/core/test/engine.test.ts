@@ -381,6 +381,146 @@ describe('ExecutionEngine', () => {
     expect(Object.keys(second.runData)).toEqual(['t', 'a', 'b']);
   });
 
+  it('emits node:start for each actual execution', async () => {
+    const wf = workflow(
+      [
+        node('t', triggerType.type, 'Trigger', 0),
+        node('a', echoType.type, 'A', 200),
+        node('b', echoType.type, 'B', 400),
+      ],
+      [connect('t', 'a'), connect('a', 'b')],
+    );
+
+    const handle = new ExecutionEngine({ registry }).run(wf);
+    const starts: string[] = [];
+    handle.on('node:start', (event) => starts.push(event.nodeName));
+    const result = await handle.done;
+
+    expect(result.status).toBe('success');
+    expect(starts).toEqual(['Trigger', 'A', 'B']);
+  });
+
+  it('aborts a never-settling node at the execution deadline', async () => {
+    let aborted = false;
+    const hanging: NodeType = {
+      ...echoType,
+      type: 'test.hanging',
+      execute(ctx) {
+        ctx.signal.addEventListener('abort', () => {
+          aborted = true;
+        }, { once: true });
+        return new Promise<never>(() => {});
+      },
+    };
+    const local = new NodeRegistry().registerAll([triggerType, hanging]);
+    const wf = workflow(
+      [node('t', triggerType.type, 'Trigger', 0), node('h', hanging.type, 'Hang', 200)],
+      [connect('t', 'h')],
+    );
+
+    const started = Date.now();
+    const result = await new ExecutionEngine({
+      registry: local,
+      limits: { executionTimeout: 20 },
+    })
+      .run(wf)
+      .done;
+
+    expect(result.status).toBe('canceled');
+    expect(result.error?.message).toMatch(/timed out/);
+    expect(aborted).toBe(true);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  it('treats only each input definition as required', async () => {
+    const optionalSecond: NodeType = {
+      ...echoType,
+      type: 'test.optionalSecond',
+      ports: {
+        inputs: [
+          { type: 'main', required: true },
+          { type: 'main', required: false },
+        ],
+        outputs: [{ type: 'main' }],
+      },
+      execute(ctx) {
+        return [...ctx.input('main', 0)];
+      },
+    };
+    const local = new NodeRegistry().registerAll([triggerType, optionalSecond]);
+    const wf = workflow(
+      [node('t', triggerType.type, 'Trigger', 0), node('n', optionalSecond.type, 'Optional', 200)],
+      [connect('t', 'n')],
+    );
+
+    const result = await execute(wf, {}, new ExecutionEngine({ registry: local }));
+    expect(result.status).toBe('success');
+    expect(result.runData.n?.[0]).toBeDefined();
+  });
+
+  it('waits for all same-port fan-in branches before executing', async () => {
+    const join: NodeType = {
+      ...echoType,
+      type: 'test.join',
+      ports: {
+        inputs: [{ type: 'main', required: true }],
+        outputs: [{ type: 'main' }],
+      },
+      execute(ctx) {
+        return [...ctx.items];
+      },
+    };
+    const local = new NodeRegistry().registerAll([triggerType, echoType, join]);
+    const wf = workflow(
+      [
+        node('t', triggerType.type, 'Trigger', 0),
+        node('a', echoType.type, 'A', 200),
+        node('b', echoType.type, 'B', 200),
+        node('c', echoType.type, 'C', 400),
+        node('join', join.type, 'Join', 600),
+      ],
+      [
+        connect('t', 'a'),
+        connect('t', 'b'),
+        connect('a', 'join'),
+        connect('b', 'c'),
+        connect('c', 'join'),
+      ],
+    );
+
+    const result = await execute(wf, {}, new ExecutionEngine({ registry: local }));
+    expect(result.status).toBe('success');
+    expect(result.runData.join).toHaveLength(1);
+    expect(result.runData.join?.[0]?.output?.main?.[0]).toHaveLength(2);
+  });
+
+  it('advances run indices when replaying cached data', async () => {
+    const loop: NodeType = {
+      ...echoType,
+      type: 'test.replayLoop',
+      execute(ctx) {
+        return ctx.runIndex >= 2 ? [] : [...ctx.items];
+      },
+    };
+    const local = new NodeRegistry().registerAll([triggerType, loop]);
+    const wf = workflow(
+      [node('t', triggerType.type, 'Trigger', 0), node('loop', loop.type, 'Loop', 200)],
+      [connect('t', 'loop'), connect('loop', 'loop')],
+    );
+
+    const engine = new ExecutionEngine({ registry: local });
+    const first = await engine.run(wf).done;
+    expect(first.status).toBe('success');
+    expect(first.runData.loop).toHaveLength(3);
+
+    const replay = await engine
+      .run(wf, { runData: first.runData, dirtyNodeIds: ['loop'] })
+      .done;
+
+    expect(replay.status).toBe('success');
+    expect(replay.runData.loop).toHaveLength(3);
+  });
+
   it('stops runaway loops at the execution limit', async () => {
     const loopType: NodeType = {
       ...echoType,

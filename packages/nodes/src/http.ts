@@ -100,22 +100,23 @@ export const httpRequestNode: NodeType = {
         }
       }
 
-      const response = await fetchWithTimeout(
+      const json = await withTimeout(
         ctx.helpers.fetch,
         url,
         init,
         timeout,
         ctx.signal,
+        async (response) => {
+          if (!response.ok) {
+            const text = await response.text().catch(() => '');
+            throw new Error(
+              `HTTP ${response.status} ${response.statusText}${text === '' ? '' : `: ${text.slice(0, 500)}`}`,
+            );
+          }
+          return readResponse(response, responseFormat);
+        },
       );
 
-      if (!response.ok) {
-        const text = await response.text().catch(() => '');
-        throw new Error(
-          `HTTP ${response.status} ${response.statusText}${text === '' ? '' : `: ${text.slice(0, 500)}`}`,
-        );
-      }
-
-      const json = await readResponse(response, responseFormat);
       output.push({ json, pairedItem: pairing(input, index) });
     });
 
@@ -153,26 +154,33 @@ async function readResponse(response: Response, format: string): Promise<JsonObj
   return { data: toJsonValue(parsed) };
 }
 
-async function fetchWithTimeout(
+async function withTimeout<T>(
   fetchFn: (input: string, init?: RequestInit) => Promise<Response>,
   url: string,
   init: RequestInit,
   timeout: number,
   signal: AbortSignal,
-): Promise<Response> {
+  consume: (response: Response) => Promise<T>,
+): Promise<T> {
   const controller = new AbortController();
   let timedOut = false;
 
   const timer = setTimeout(() => {
     timedOut = true;
-    controller.abort();
+    controller.abort(new Error(`Request timed out after ${timeout} ms`));
   }, Math.max(1, timeout));
 
-  const onAbort = (): void => controller.abort();
+  const onAbort = (): void => {
+    controller.abort(signal.reason instanceof Error ? signal.reason : new Error('Request aborted'));
+  };
   signal.addEventListener('abort', onAbort, { once: true });
 
   try {
-    return await fetchFn(url, { ...init, signal: controller.signal });
+    const response = await raceWithAbort(
+      fetchFn(url, { ...init, signal: controller.signal }),
+      controller.signal,
+    );
+    return await raceWithAbort(consume(response), controller.signal);
   } catch (error) {
     if (timedOut) throw new Error(`Request timed out after ${timeout} ms`);
     if (signal.aborted) throw new Error('Request aborted');
@@ -181,4 +189,44 @@ async function fetchWithTimeout(
     clearTimeout(timer);
     signal.removeEventListener('abort', onAbort);
   }
+}
+
+function raceWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(abortError(signal));
+
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+
+    const cleanup = (): void => {
+      signal.removeEventListener('abort', onAbort);
+    };
+
+    const onAbort = (): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(abortError(signal));
+    };
+
+    signal.addEventListener('abort', onAbort, { once: true });
+
+    promise.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      },
+      (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
+
+function abortError(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason : new Error('Request aborted');
 }

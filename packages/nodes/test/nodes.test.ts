@@ -108,6 +108,42 @@ describe('standard nodes', () => {
     expect(result.runData.s?.[0]?.output?.main?.[0]?.[0]?.json).toEqual({ x: 1, ok: true });
   });
 
+  it('does not mutate upstream nested data when editing fields', async () => {
+    const wf = workflow(
+      [
+        node('m', 'draflow.manualTrigger', 'Manual', 0),
+        node('s', 'draflow.set', 'Set', 200, {
+          mode: 'manual',
+          includeOtherFields: true,
+          assignments: [{ name: 'nested.x', value: 2, type: 'number' }],
+        }),
+      ],
+      [connect('m', 's')],
+    );
+
+    const result = await run(wf, seed({ nested: { x: 1 } }));
+    expect(result.status).toBe('success');
+    expect(result.runData.m?.[0]?.output?.main?.[0]?.[0]?.json).toEqual({ nested: { x: 1 } });
+    expect(result.runData.s?.[0]?.output?.main?.[0]?.[0]?.json).toEqual({ nested: { x: 2 } });
+  });
+
+  it('rejects prototype-related assignment paths', async () => {
+    const wf = workflow(
+      [
+        node('m', 'draflow.manualTrigger', 'Manual', 0),
+        node('s', 'draflow.set', 'Set', 200, {
+          mode: 'manual',
+          assignments: [{ name: '__proto__.polluted', value: 'yes' }],
+        }),
+      ],
+      [connect('m', 's')],
+    );
+
+    const result = await run(wf, seed({}));
+    expect(result.status).toBe('error');
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
   it('routes items through If branches', async () => {
     const wf = workflow(
       [
@@ -160,6 +196,37 @@ describe('standard nodes', () => {
 
     const result = await run(wf, seed({ n: 1 }, { n: 2 }, { n: 3 }));
     expect(result.runData.f?.[0]?.output?.main?.[0]).toHaveLength(2);
+  });
+
+  it('resolves $("Node").item through filter lineage', async () => {
+    const wf = workflow(
+      [
+        node('m', 'draflow.manualTrigger', 'Manual', 0),
+        node('f', 'draflow.filter', 'Filter', 200, {
+          conditions: {
+            combinator: 'and',
+            conditions: [{ left: '={{ $json.id }}', operator: 'gte', right: '1' }],
+          },
+        }),
+        node('s', 'draflow.set', 'Set', 400, {
+          mode: 'manual',
+          includeOtherFields: true,
+          assignments: [
+            { name: 'filtered', value: '={{ $("Filter").item.json.id }}' },
+            { name: 'fromManual', value: '={{ $("Manual").item.json.id }}' },
+          ],
+        }),
+      ],
+      [connect('m', 'f'), connect('f', 's')],
+    );
+
+    const result = await run(wf, seed({ id: 0 }, { id: 1 }, { id: 2 }));
+    expect(result.status).toBe('success');
+    const items = result.runData.s?.[0]?.output?.main?.[0] ?? [];
+    expect(items.map((entry) => entry.json)).toEqual([
+      { id: 1, filtered: 1, fromManual: 1 },
+      { id: 2, filtered: 2, fromManual: 2 },
+    ]);
   });
 
   it('merges two branches by key', async () => {
@@ -248,5 +315,59 @@ describe('standard nodes', () => {
     const result = await run(wf, seed({}), fetchImpl);
     expect(result.status).toBe('error');
     expect(result.error?.message).toMatch(/HTTP 500/);
+  });
+
+  it('keeps the HTTP timeout active while reading the body', async () => {
+    const fetchImpl = async (): Promise<Response> =>
+      ({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: () => new Promise<never>(() => {}),
+        text: () => new Promise<never>(() => {}),
+      }) as unknown as Response;
+
+    const wf = workflow(
+      [
+        node('m', 'draflow.manualTrigger', 'Manual', 0),
+        node('h', 'draflow.httpRequest', 'HTTP', 200, {
+          url: 'https://example.com/stall',
+          timeout: 10,
+        }),
+      ],
+      [connect('m', 'h')],
+    );
+
+    const result = await run(wf, seed({}), fetchImpl);
+    expect(result.status).toBe('error');
+    expect(result.error?.message).toMatch(/timed out/);
+  });
+
+  it('routes HTTP errors to a dynamically declared error output', async () => {
+    const fetchImpl = async (): Promise<Response> =>
+      new Response('nope', { status: 500, statusText: 'Server Error' });
+
+    const httpNode = node('h', 'draflow.httpRequest', 'HTTP', 200, {
+      url: 'https://example.com/fail',
+    });
+    httpNode.settings = { onError: 'errorOutput' };
+
+    const wf = workflow(
+      [
+        node('m', 'draflow.manualTrigger', 'Manual', 0),
+        httpNode,
+        node('handler', 'draflow.set', 'Handler', 400, {
+          mode: 'manual',
+          includeOtherFields: true,
+          assignments: [],
+        }),
+      ],
+      [connect('m', 'h'), connect('h', 'handler', 'error', 0)],
+    );
+
+    const result = await run(wf, seed({}), fetchImpl);
+    expect(result.status).toBe('success');
+    expect(result.runData.handler?.[0]?.output?.main?.[0]?.[0]?.json.error).toMatch(/HTTP 500/);
   });
 });

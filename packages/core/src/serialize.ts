@@ -1,11 +1,14 @@
 import { WorkflowValidationError } from './errors.js';
 import type {
+  BinaryRef,
   Connection,
   Item,
   JsonObject,
   JsonValue,
   NodePortRef,
+  PairedItem,
   ParamValue,
+  SerializedError,
   Workflow,
   WorkflowNode,
   WorkflowSettings,
@@ -250,7 +253,73 @@ function parseItem(input: unknown, path: string): Item {
   if (!isPlainObject(input)) throw new WorkflowValidationError(`${path} must be an object`);
   const jsonRaw = input.json ?? {};
   if (!isPlainObject(jsonRaw)) throw new WorkflowValidationError(`${path}.json must be an object`);
-  return { json: toJsonValue(jsonRaw) as JsonObject };
+
+  const item: Item = { json: toJsonValue(jsonRaw) as JsonObject };
+  if (input.binary !== undefined) {
+    item.binary = parseBinary(input.binary, `${path}.binary`);
+  }
+  if (input.pairedItem !== undefined) {
+    item.pairedItem = parsePairedItem(input.pairedItem, `${path}.pairedItem`);
+  }
+  if (input.error !== undefined) {
+    item.error = parseSerializedError(input.error, `${path}.error`);
+  }
+  return item;
+}
+
+function parseBinary(input: unknown, path: string): Record<string, BinaryRef> {
+  if (!isPlainObject(input)) throw new WorkflowValidationError(`${path} must be an object`);
+  const result: Record<string, BinaryRef> = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (!isPlainObject(value)) {
+      throw new WorkflowValidationError(`${path}.${key} must be an object`);
+    }
+    const ref: BinaryRef = {
+      mimeType: requireString(value.mimeType, `${path}.${key}.mimeType`),
+    };
+    if (value.fileName !== undefined) {
+      ref.fileName = requireString(value.fileName, `${path}.${key}.fileName`);
+    }
+    if (value.byteSize !== undefined) {
+      ref.byteSize = requireNumber(value.byteSize, `${path}.${key}.byteSize`);
+    }
+    if (value.id !== undefined) ref.id = requireString(value.id, `${path}.${key}.id`);
+    if (value.url !== undefined) ref.url = requireString(value.url, `${path}.${key}.url`);
+    result[key] = ref;
+  }
+  return result;
+}
+
+function parsePairedItem(input: unknown, path: string): PairedItem | PairedItem[] {
+  if (Array.isArray(input)) {
+    return input.map((entry, index) => parsePairedItemObject(entry, `${path}[${index}]`));
+  }
+  if (typeof input === 'number') {
+    return { item: requireNumber(input, path) };
+  }
+  return parsePairedItemObject(input, path);
+}
+
+function parsePairedItemObject(input: unknown, path: string): PairedItem {
+  if (!isPlainObject(input)) throw new WorkflowValidationError(`${path} must be an object`);
+  const paired: PairedItem = { item: requireNumber(input.item, `${path}.item`) };
+  if (input.input !== undefined) paired.input = requireNumber(input.input, `${path}.input`);
+  if (input.run !== undefined) paired.run = requireNumber(input.run, `${path}.run`);
+  return paired;
+}
+
+function parseSerializedError(input: unknown, path: string): SerializedError {
+  if (!isPlainObject(input)) throw new WorkflowValidationError(`${path} must be an object`);
+  const error: SerializedError = {
+    name: requireString(input.name, `${path}.name`),
+    message: requireString(input.message, `${path}.message`),
+  };
+  if (input.stack !== undefined) error.stack = requireString(input.stack, `${path}.stack`);
+  if (input.code !== undefined) error.code = requireString(input.code, `${path}.code`);
+  if (input.details !== undefined) {
+    error.details = toJsonValue(input.details);
+  }
+  return error;
 }
 
 function parseJson(value: string): unknown {

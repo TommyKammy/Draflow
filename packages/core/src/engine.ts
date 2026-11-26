@@ -16,9 +16,9 @@ import type {
   Logger,
   NodeContext,
   NodeHelpers,
-  NodeOutput,
   NodeType,
   ItemContext,
+  PortDef,
 } from './node.js';
 import { NodeRegistry, resolveNodeSettings } from './registry.js';
 import type {
@@ -165,8 +165,11 @@ export class ExecutionEngine {
     const mode: ExecutionMode = options.mode ?? 'manual';
 
     if (options.signal !== undefined) {
-      if (options.signal.aborted) controller.abort();
-      else options.signal.addEventListener('abort', () => controller.abort(), { once: true });
+      if (options.signal.aborted) controller.abort(new ExecutionCanceledError());
+      else
+        options.signal.addEventListener('abort', () => controller.abort(new ExecutionCanceledError()), {
+          once: true,
+        });
     }
 
     const done = this.#execute(workflow, graph, options, {
@@ -180,7 +183,7 @@ export class ExecutionEngine {
     return {
       id: runId,
       done,
-      cancel: () => controller.abort(),
+      cancel: () => controller.abort(new ExecutionCanceledError()),
       on: <K extends keyof EngineEvents>(event: K, handler: (payload: EngineEvents[K]) => void) =>
         bus.on(event, handler as (payload: unknown) => void),
     };
@@ -198,6 +201,9 @@ export class ExecutionEngine {
       bus: EventBus;
     },
   ): Promise<RunResult> {
+    // Let callers attach event listeners before execution starts.
+    await Promise.resolve();
+
     const timezone = workflow.settings.timezone ?? 'UTC';
     const timeout =
       workflow.settings.executionTimeout ?? this.#limits.executionTimeout;
@@ -220,10 +226,13 @@ export class ExecutionEngine {
     const stack = buildStartStack(workflow, graph, options, allowed, this.registry);
     const waiting = new Map<string, ExecEntry>();
     const queued = new Set<ExecEntry>();
+    const nextRunIndices = new Map<string, number>();
+    for (const entry of stack) nextRunIndices.set(entry.nodeId, 1);
     let executionIndex = nextExecutionIndex(runData);
     let lastKey = '';
     let status: RunStatus = 'success';
     let error: SerializedError | undefined;
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
 
     run.bus.emit('run:start', {
       runId: run.runId,
@@ -232,17 +241,24 @@ export class ExecutionEngine {
       startedAt: run.startedAt,
     });
 
+    if (timeout > 0 && Number.isFinite(timeout)) {
+      timeoutTimer = setTimeout(() => {
+        run.controller.abort(new ExecutionTimeoutError(timeout));
+      }, timeout);
+    }
+
     try {
       let executions = 0;
 
       while (true) {
         if (run.controller.signal.aborted) {
           status = 'canceled';
-          error = serializeError(new ExecutionCanceledError());
+          error = serializeError(abortReason(run.controller.signal));
           break;
         }
 
         if (this.#clock.now() - run.startedAt > timeout) {
+          run.controller.abort(new ExecutionTimeoutError(timeout));
           status = 'canceled';
           error = serializeError(new ExecutionTimeoutError(timeout));
           break;
@@ -319,9 +335,27 @@ export class ExecutionEngine {
             task: existing,
           });
           if (destination !== undefined && entry.nodeId === destination) break;
-          this.#route(graph, node, existing.output ?? { main: [[]] }, entry.runIndex, runData, waiting, queued, stack, allowed, options.runData !== undefined);
+          this.#route(
+            graph,
+            node,
+            existing.output ?? { main: [[]] },
+            entry.runIndex,
+            waiting,
+            queued,
+            stack,
+            allowed,
+            nextRunIndices,
+          );
           continue;
         }
+
+        run.bus.emit('node:start', {
+          runId: run.runId,
+          nodeId: node.id,
+          nodeName: node.name,
+          runIndex: entry.runIndex,
+          itemCount: primary.length,
+        });
 
         const task = await this.#runNode({
           workflow,
@@ -354,6 +388,12 @@ export class ExecutionEngine {
           task,
         });
 
+        if (run.controller.signal.aborted) {
+          status = 'canceled';
+          error = serializeError(abortReason(run.controller.signal));
+          break;
+        }
+
         if (task.status === 'error' && settings.onError === 'stop') {
           status = 'error';
           error = task.error;
@@ -362,16 +402,28 @@ export class ExecutionEngine {
 
         const output = task.output ?? { main: [[]] };
         if (destination !== undefined && entry.nodeId === destination) break;
-        this.#route(graph, node, output, entry.runIndex, runData, waiting, queued, stack, allowed, options.runData !== undefined);
+        this.#route(
+          graph,
+          node,
+          output,
+          entry.runIndex,
+          waiting,
+          queued,
+          stack,
+          allowed,
+          nextRunIndices,
+        );
       }
     } catch (caught) {
       if (run.controller.signal.aborted) {
         status = 'canceled';
-        error = serializeError(new ExecutionCanceledError());
+        error = serializeError(abortReason(run.controller.signal));
       } else {
         status = 'error';
         error = serializeError(caught);
       }
+    } finally {
+      if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
     }
 
     const result: RunResult = {
@@ -471,7 +523,8 @@ export class ExecutionEngine {
       pinData,
     });
 
-    if (nodeType.execute === undefined) {
+    const execute = nodeType.execute;
+    if (execute === undefined) {
       return {
         nodeId: node.id,
         runIndex: entry.runIndex,
@@ -501,7 +554,10 @@ export class ExecutionEngine {
       }
 
       try {
-        const result = await nodeType.execute(context);
+        const result = await raceWithAbort(
+          Promise.resolve().then(() => execute(context)),
+          input.signal,
+        );
         output = normalizeOutput(result);
         caught = undefined;
         break;
@@ -621,6 +677,7 @@ export class ExecutionEngine {
           const task = runIndex === undefined ? tasks[tasks.length - 1] : tasks[runIndex];
           return task?.output?.['main']?.[outputIndex] ?? [];
         },
+        resolveItem: (name) => resolveItemLineage(name, item, entry, graph, runData),
         nodeNames: [...graph.byName.keys()],
         vars: engine.#vars,
         timezone: input.timezone,
@@ -734,12 +791,11 @@ export class ExecutionEngine {
     node: WorkflowNode,
     output: PortData,
     runIndex: number,
-    runData: RunData,
     waiting: Map<string, ExecEntry>,
     queued: Set<ExecEntry>,
     stack: ExecEntry[],
     allowed: Set<string> | undefined,
-    reuse: boolean,
+    nextRunIndices: Map<string, number>,
   ): void {
     for (const connection of graph.outgoing.get(node.id) ?? []) {
       if (connection.from.port !== 'main' && connection.from.port !== 'error') continue;
@@ -753,11 +809,13 @@ export class ExecutionEngine {
 
       let entry = waiting.get(target.id);
       if (entry === undefined) {
+        const nextRunIndex = nextRunIndices.get(target.id) ?? 0;
+        nextRunIndices.set(target.id, nextRunIndex + 1);
         entry = {
           nodeId: target.id,
           input: {},
           source: [],
-          runIndex: reuse ? 0 : runData[target.id]?.length ?? 0,
+          runIndex: nextRunIndex,
         };
         waiting.set(target.id, entry);
       }
@@ -770,7 +828,8 @@ export class ExecutionEngine {
         runIndex,
       };
 
-      if (isReady(target, this.registry, entry.input)) {
+      const incomingCount = graph.incoming.get(target.id)?.length ?? 0;
+      if (incomingCount <= 1 && isReady(target, this.registry, entry.input)) {
         fillOptionalInputs(target, this.registry, entry.input);
         if (!queued.has(entry) && (allowed === undefined || allowed.has(target.id))) {
           queued.add(entry);
@@ -877,12 +936,12 @@ function isReady(node: WorkflowNode, registry: NodeRegistry, input: PortData): b
   const nodeType = registry.get(node.type, node.typeVersion);
   if (nodeType === undefined) return false;
 
-  for (const port of nodeType.ports.inputs) {
-    const count = portCount(nodeType, 'inputs', port.type);
-    for (let index = 0; index < count; index += 1) {
-      const items = input[port.type]?.[index];
-      if (items === undefined || items === null) {
-        if (port.required !== false) return false;
+  for (const [type, definitions] of groupInputs(nodeType)) {
+    for (let index = 0; index < definitions.length; index += 1) {
+      const definition = definitions[index];
+      const items = input[type]?.[index];
+      if ((items === undefined || items === null) && definition?.required !== false) {
+        return false;
       }
     }
   }
@@ -892,10 +951,10 @@ function isReady(node: WorkflowNode, registry: NodeRegistry, input: PortData): b
 function fillOptionalInputs(node: WorkflowNode, registry: NodeRegistry, input: PortData): void {
   const nodeType = registry.get(node.type, node.typeVersion);
   if (nodeType === undefined) return;
-  for (const port of nodeType.ports.inputs) {
-    const count = portCount(nodeType, 'inputs', port.type);
-    for (let index = 0; index < count; index += 1) {
-      const portData = (input[port.type] ??= []);
+
+  for (const [type, definitions] of groupInputs(nodeType)) {
+    const portData = (input[type] ??= []);
+    for (let index = 0; index < definitions.length; index += 1) {
       if (portData[index] === undefined || portData[index] === null) {
         portData[index] = [];
       }
@@ -903,8 +962,14 @@ function fillOptionalInputs(node: WorkflowNode, registry: NodeRegistry, input: P
   }
 }
 
-function portCount(nodeType: NodeType, direction: 'inputs' | 'outputs', type: string): number {
-  return nodeType.ports[direction].filter((port) => port.type === type).length;
+function groupInputs(nodeType: NodeType): Map<string, PortDef[]> {
+  const groups = new Map<string, PortDef[]>();
+  for (const port of nodeType.ports.inputs) {
+    const definitions = groups.get(port.type) ?? [];
+    definitions.push(port);
+    groups.set(port.type, definitions);
+  }
+  return groups;
 }
 
 function appendPortItems(input: PortData, port: string, index: number, items: Item[]): void {
@@ -1041,3 +1106,91 @@ const noopLogger: Logger = {
   warn: () => undefined,
   error: () => undefined,
 };
+
+function abortReason(signal: AbortSignal): Error {
+  const reason = signal.reason;
+  if (reason instanceof Error) return reason;
+  return new ExecutionCanceledError();
+}
+
+function resolveItemLineage(
+  targetName: string,
+  item: Item,
+  entry: ExecEntry,
+  graph: WorkflowGraph,
+  runData: RunData,
+): Item | undefined {
+  const target = graph.byName.get(targetName) ?? graph.nodes.get(targetName);
+  if (target === undefined) return undefined;
+  return followLineage(item, entry.source[0] ?? null, target.id, runData, 0);
+}
+
+function followLineage(
+  item: Item,
+  source: SourceRef | null,
+  targetId: string,
+  runData: RunData,
+  depth: number,
+): Item | undefined {
+  if (source === null || depth > 64) return undefined;
+  if (source.node === targetId) return item;
+
+  const task = runData[source.node]?.[source.runIndex];
+  if (task === undefined) return undefined;
+
+  const pairings =
+    item.pairedItem === undefined
+      ? []
+      : Array.isArray(item.pairedItem)
+        ? item.pairedItem
+        : [item.pairedItem];
+
+  for (const pairing of pairings) {
+    const inputIndex = pairing.input ?? 0;
+    const inputItems = task.input?.main?.[inputIndex] ?? [];
+    const nextItem = inputItems[pairing.item];
+    if (nextItem === undefined) continue;
+
+    const nextSource = task.source?.[inputIndex] ?? null;
+    const found = followLineage(nextItem, nextSource, targetId, runData, depth + 1);
+    if (found !== undefined) return found;
+  }
+
+  return undefined;
+}
+
+function raceWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(abortReason(signal));
+
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+
+    const cleanup = (): void => {
+      signal.removeEventListener('abort', onAbort);
+    };
+
+    const onAbort = (): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(abortReason(signal));
+    };
+
+    signal.addEventListener('abort', onAbort, { once: true });
+
+    promise.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      },
+      (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}

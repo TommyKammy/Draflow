@@ -16,8 +16,8 @@
 | 実行 | スタック、waiting（複数入力）、runIndex、リトライ、エラー 3 モード、ピン、無効化、executeOnce、部分実行、実行制限 |
 | ノード | Manual / NoOp / Set / If / Filter / Merge / HTTP Request |
 | 永続化 | JSON の読み書き、検証、デフォルト適用 |
-| テスト | 45 tests（core 38 / nodes 7） |
-| サイズ | core 33.6 KB gzip + nodes 7.4 KB gzip = **41.0 KB gzip** |
+| テスト | 58 tests（core 46 / nodes 12） |
+| サイズ | core 35.0 KB gzip + nodes 7.8 KB gzip = **42.8 KB gzip** |
 
 ---
 
@@ -259,7 +259,7 @@ pnpm test
 ✓ packages/core/test/engine.test.ts      (12)
 ✓ packages/nodes/test/nodes.test.ts        (7)
 ──────────────────────────────────────────────
-45 tests passed
+58 tests passed
 ```
 
 型チェック:
@@ -282,16 +282,38 @@ pnpm size
 ```
 package        files      raw       gzip
 ------------------------------------------
-core              21  155.8 KB   33.6 KB
-nodes              9   24.5 KB    7.4 KB
+core              21  163.8 KB   35.0 KB
+nodes              9   26.1 KB    7.8 KB
 ------------------------------------------
-total                 180.3 KB   41.0 KB
+total                 190.0 KB   42.8 KB
 ```
 
 gzip はファイルごとの gzip の合計（保守的な見積もり）。
 設計目標の 250 KB に対して、コアは **41 KB**。
 
 ---
+
+## 8.1 Codex レビュー対応
+
+PR #1 のレビュー指摘 13 件をすべて修正し、回帰テストを追加した。
+
+| 指摘 | 対応 |
+| --- | --- |
+| Set のプロトタイプ汚染 | `__proto__` / `prototype` / `constructor` をパスで拒否 |
+| 実行タイムアウトがノード実行中に効かない | 実行全体のタイマー + `AbortSignal` + `raceWithAbort` |
+| `$("Node").item` が Filter 後に誤った Item を返す | `pairedItem` と `source` を辿る系譜解決 |
+| Set が上流のネストデータを変更する | 入力 JSON をディープクローン |
+| HTTP のタイムアウトが body 読み取り前に解除される | body 消費までタイマーと abort を維持 |
+| `node:start` が通常実行で発火しない | 実行前にイベント発火 + 開始前の microtask |
+| `onError: errorOutput` の動的 error 出力が検証で拒否される | 検証時に動的 error ポートを許可 |
+| キャッシュ再生時に runIndex が 0 のまま | ノードごとの next runIndex を管理 |
+| ピン Item の binary / pairedItem が消える | `parseItem` で保持 |
+| `months` + `days` の日付計算で小さい単位が無視される | 暦計算後に残りの duration を加算 |
+| 同じ型の入力で required が全 index に適用される | 入力定義ごとに required を判定 |
+| 文字列リテラルの `)` / `]` が区切りとして消費される | トークン種別を区別 |
+| 長さの違う fan-in が 1 回にマージされない | 複数接続の入力は stack が空になるまで待機 |
+
+テストは 45 件から **58 件**に増えている。
 
 ## 9. デモ
 

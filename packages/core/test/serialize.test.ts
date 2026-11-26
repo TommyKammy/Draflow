@@ -59,7 +59,65 @@ describe('serialize', () => {
     expect(result.issues.some((issue) => issue.code === 'REQUIRED_PARAMETER_MISSING')).toBe(true);
   });
 
-  it('reports duplicate names and unknown types as errors', () => {
+  it('preserves pinned item binary references and pairing', () => {
+    const workflow = createWorkflow({
+      id: 'wf-pinned',
+      name: 'Pinned',
+      nodes: [createNode({ id: 'a', type: 'test.node', name: 'A' })],
+      pinData: {
+        a: [
+          {
+            json: { x: 1 },
+            binary: {
+              file: {
+                mimeType: 'text/plain',
+                fileName: 'a.txt',
+                byteSize: 3,
+                id: 'bin-1',
+              },
+            },
+            pairedItem: { item: 2, input: 0 },
+          },
+        ],
+      },
+    });
+
+    const parsed = parseWorkflow(serializeWorkflow(workflow));
+    expect(parsed.pinData?.a?.[0]).toEqual(workflow.pinData?.a?.[0]);
+  });
+
+  it('allows the dynamic error output when onError is errorOutput', () => {
+    const sourceType: NodeType = {
+      ...nodeType,
+      type: 'test.source',
+      ports: { inputs: [{ type: 'main' }], outputs: [{ type: 'main' }] },
+    };
+    const handlerType: NodeType = {
+      ...nodeType,
+      type: 'test.handler',
+      parameters: [],
+    };
+    const registry = new NodeRegistry().registerAll([sourceType, handlerType]);
+
+    const source = createNode({
+      id: 's',
+      type: 'test.source',
+      name: 'Source',
+      settings: { onError: 'errorOutput' },
+    });
+    const handler = createNode({ id: 'h', type: 'test.handler', name: 'Handler' });
+    const workflow = createWorkflow({
+      nodes: [source, handler],
+      connections: [
+        createConnection({ node: 's', port: 'error', index: 0 }, { node: 'h', port: 'main', index: 0 }),
+      ],
+    });
+
+    const result = validateWorkflow(workflow, registry);
+    expect(result.ok).toBe(true);
+  });
+
+  it('rejects duplicate names and unknown types as errors', () => {
     const registry = new NodeRegistry().register(nodeType);
     const workflow = createWorkflow({
       nodes: [

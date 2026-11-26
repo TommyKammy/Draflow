@@ -124,7 +124,10 @@ function validateConnection(
 
   if (fromType !== undefined) {
     const outputs = fromType.ports.outputs.filter((port) => port.type === connection.from.port);
-    if (outputs.length === 0) {
+    const dynamicErrorOutput =
+      connection.from.port === 'error' && from.settings?.onError === 'errorOutput';
+
+    if (outputs.length === 0 && !dynamicErrorOutput) {
       issues.push({
         severity: 'error',
         code: 'OUTPUT_PORT_MISSING',
@@ -132,7 +135,15 @@ function validateConnection(
         nodeId: from.id,
         connectionId: connection.id,
       });
-    } else if (connection.from.index >= outputs.length) {
+    } else if (outputs.length > 0 && connection.from.index >= outputs.length) {
+      issues.push({
+        severity: 'error',
+        code: 'OUTPUT_INDEX',
+        message: `Node "${from.name}" has no output "${connection.from.port}[${connection.from.index}]"`,
+        nodeId: from.id,
+        connectionId: connection.id,
+      });
+    } else if (outputs.length === 0 && dynamicErrorOutput && connection.from.index !== 0) {
       issues.push({
         severity: 'error',
         code: 'OUTPUT_INDEX',
