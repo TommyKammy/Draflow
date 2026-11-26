@@ -244,6 +244,7 @@ export function createCanvas(host: HTMLElement, registry: NodeRegistry, actions:
   observer.observe(surface);
   return {
     panel, scene, fitView,
+    selection: (): ReadonlySet<string> => selected,
     remove: editing.remove,
     cancelEdit: editing.cancel,
     centerPoint(preferred?: Point) {

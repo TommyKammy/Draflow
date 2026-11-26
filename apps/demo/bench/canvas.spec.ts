@@ -44,6 +44,28 @@ test('canvas baseline on the production embed', async ({ page, browser }, info) 
   });
   expect(rendering.nodes).toBe(200);
   expect(rendering.edges).toBe(500);
+  // Time the actual toolbar action through the first painted layout. Restore
+  // the original fixture between samples and for the existing motion baseline.
+  const tidy = page.getByRole('button', { name: '自動整列' });
+  const undo = page.getByRole('button', { name: '元に戻す' });
+  const tidySamples: number[] = [];
+  for (let i = 0; i < 8; i++) {
+    const elapsed = await tidy.evaluate(async button => {
+      const card = document.querySelector('draflow-editor')!.shadowRoot!.querySelector<HTMLElement>('[data-node-id="55"]')!;
+      const frame = () => new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+      await frame();
+      const before = card.style.left;
+      const start = performance.now();
+      (button as HTMLButtonElement).click();
+      await frame();
+      await frame();
+      if (card.style.left === before) throw new Error('Tidy Up did not move the fixture');
+      return performance.now() - start;
+    });
+    if (i) tidySamples.push(elapsed);
+    await undo.click();
+  }
+  rendering.times.tidy200 = tidySamples;
   const surface = page.locator('draflow-editor .canvas');
   await surface.focus();
   await page.keyboard.press('0');

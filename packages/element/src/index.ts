@@ -9,6 +9,7 @@ import { executionLog } from './execution-log.js';
 import { nodeDetails } from './details/view.js';
 import { fragment } from './store/edit.js';
 import { createNodeCreator } from './creator.js';
+import { tidyPositions } from './canvas/tidy.js';
 import { createCanvas } from './canvas/view.js';
 import { Autosave } from './store/autosave.js';
 import { History, applyEdit, type Edit } from './store/edit.js';
@@ -138,12 +139,17 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
   });
   const wiring = connectionDialog(canvas.scene, (from, to) => commit({ type: 'connect', from, to }));
   const connect = tool(() => wiring.open(translator(locale())));
+  const tidy = tool(() => {
+    if (!canEdit()) return;
+    const positions = tidyPositions(workflow, canvas.selection());
+    if (positions.size) commit({ type: 'move', positions });
+  });
   const remove = tool(canvas.remove);
   const backward = tool(undo), forward = tool(redo);
   const saveState = document.createElement('span');
   saveState.setAttribute('aria-live', 'polite');
   const retry = tool(() => saves.flush());
-  tools.append(add, connect, remove, backward, forward, saveState, retry);
+  tools.append(add, connect, tidy, remove, backward, forward, saveState, retry);
   shell.append(header, tools, canvas.panel, outputTitle, status, output, log.panel, wiring.dialog, creator.dialog, details.dialog);
   root.append(style, shell);
 
@@ -164,6 +170,8 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     retry.textContent = ja ? '保存を再試行' : 'Retry save';
     connect.textContent = translator(locale())('Connect nodes');
     connect.disabled = !canEdit() || !workflow.nodes.length;
+    tidy.textContent = ja ? '自動整列' : 'Tidy Up';
+    tidy.disabled = !canEdit() || !workflow.nodes.length;
     remove.disabled = !canEdit();
     add.disabled = !canEdit() || !catalog.some(t => !t.meta.hidden);
     backward.disabled = !canEdit() || !history.canUndo;
