@@ -145,6 +145,17 @@ describe('ExpressionEngine', () => {
     ).toBe('2026-01-15T09:00:00.000+09:00');
   });
 
+  it('starts local weeks on Monday across DST transitions', () => {
+    const newYork = new ExpressionEngine({ timezone: 'America/New_York' });
+    const newYorkContext = { ...context, timezone: 'America/New_York' };
+    expect(
+      newYork.resolve(
+        '={{ DateTime.fromISO("2026-11-01T23:30:00-05:00").beginningOf("week").format("yyyy-MM-dd") }}',
+        newYorkContext,
+      ),
+    ).toBe('2026-10-26');
+  });
+
   it('counts member and call chains against the evaluation budget', () => {
     const depthLimited = new ExpressionEngine({ timezone: 'UTC', maxDepth: 3 });
     expect(() => depthLimited.resolve('={{ "a".trim().trim().trim() }}', context)).toThrow(

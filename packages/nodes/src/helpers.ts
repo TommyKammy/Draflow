@@ -11,8 +11,8 @@ import {
   type PairedItem,
 } from '@draflow/core';
 
-export function pairing(item: Item, index: number, input = 0): PairedItem | PairedItem[] {
-  return item.pairedItem ?? { item: index, input };
+export function pairing(_item: Item, index: number, input = 0): PairedItem {
+  return { item: index, input };
 }
 
 export function item(json: unknown, pairedItem?: PairedItem | PairedItem[]): Item {

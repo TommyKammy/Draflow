@@ -459,6 +459,50 @@ describe('ExecutionEngine', () => {
     expect(Date.now() - started).toBeLessThan(1000);
   });
 
+  it('removes external abort listeners when runs finish', async () => {
+    const controller = new AbortController();
+    const signal = controller.signal;
+    let added = 0;
+    let removed = 0;
+
+    const originalAdd = signal.addEventListener.bind(signal);
+    const originalRemove = signal.removeEventListener.bind(signal);
+    const patched = signal as unknown as {
+      addEventListener: typeof signal.addEventListener;
+      removeEventListener: typeof signal.removeEventListener;
+    };
+    patched.addEventListener = (
+      type: string,
+      listener: EventListenerOrEventListenerObject,
+      options?: boolean | AddEventListenerOptions,
+    ) => {
+      if (type === 'abort') added += 1;
+      originalAdd(type, listener, options);
+    };
+    patched.removeEventListener = (
+      type: string,
+      listener: EventListenerOrEventListenerObject,
+      options?: boolean | EventListenerOptions,
+    ) => {
+      if (type === 'abort') removed += 1;
+      originalRemove(type, listener, options);
+    };
+
+    const wf = workflow(
+      [node('t', triggerType.type, 'Trigger', 0), node('a', echoType.type, 'A', 200)],
+      [connect('t', 'a')],
+    );
+    const engine = new ExecutionEngine({ registry });
+
+    for (let index = 0; index < 5; index += 1) {
+      await engine.run(wf, { signal }).done;
+      await Promise.resolve();
+    }
+
+    expect(added).toBe(5);
+    expect(removed).toBe(5);
+  });
+
   it('treats only each input definition as required', async () => {
     const optionalSecond: NodeType = {
       ...echoType,

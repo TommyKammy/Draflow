@@ -105,6 +105,28 @@ describe('parameters', () => {
     ).toBe(false);
   });
 
+  it('supports shorthand operator conditions', () => {
+    const node = createNode({
+      type: nodeType.type,
+      name: 'Node',
+      parameters: { resource: 'contact', limit: 10 },
+    });
+    expect(
+      evaluateDisplayOptions({ show: { limit: [{ gte: 5 }] } }, node, nodeType),
+    ).toBe(true);
+    expect(
+      evaluateDisplayOptions({ hide: { limit: [{ gte: 5 }] } }, node, nodeType),
+    ).toBe(false);
+
+    node.parameters.limit = 3;
+    expect(
+      evaluateDisplayOptions({ show: { limit: [{ gte: 5 }] } }, node, nodeType),
+    ).toBe(false);
+    expect(
+      evaluateDisplayOptions({ hide: { limit: [{ gte: 5 }] } }, node, nodeType),
+    ).toBe(true);
+  });
+
   it('applies nested defaults', () => {
     const values = applyParameterDefaults(nodeType, {});
     expect(values.resource).toBe('contact');

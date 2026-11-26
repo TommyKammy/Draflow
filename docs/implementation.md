@@ -16,8 +16,8 @@
 | 実行 | スタック、waiting（複数入力）、runIndex、リトライ、エラー 3 モード、ピン、無効化、executeOnce、部分実行、実行制限 |
 | ノード | Manual / NoOp / Set / If / Filter / Merge / HTTP Request |
 | 永続化 | JSON の読み書き、検証、デフォルト適用 |
-| テスト | 79 tests（core 58 / nodes 21） |
-| サイズ | core 36.6 KB gzip + nodes 7.9 KB gzip = **44.5 KB gzip** |
+| テスト | 83 tests（core 61 / nodes 22） |
+| サイズ | core 36.8 KB gzip + nodes 7.9 KB gzip = **44.8 KB gzip** |
 
 ---
 
@@ -254,13 +254,13 @@ pnpm test
 ```
 ✓ packages/core/test/utils.test.ts         (2)
 ✓ packages/core/test/graph.test.ts         (4)
-✓ packages/core/test/parameters.test.ts    (4)
+✓ packages/core/test/parameters.test.ts    (5)
 ✓ packages/core/test/serialize.test.ts     (7)
-✓ packages/core/test/expression.test.ts   (18)
-✓ packages/core/test/engine.test.ts       (23)
-✓ packages/nodes/test/nodes.test.ts       (21)
+✓ packages/core/test/expression.test.ts   (19)
+✓ packages/core/test/engine.test.ts       (24)
+✓ packages/nodes/test/nodes.test.ts       (22)
 ──────────────────────────────────────────────
-79 tests passed
+83 tests passed
 ```
 
 型チェック:
@@ -283,20 +283,20 @@ pnpm size
 ```
 package        files      raw       gzip
 ------------------------------------------
-core              21  172.5 KB   36.6 KB
+core              21  173.5 KB   36.8 KB
 nodes              9   27.3 KB    7.9 KB
 ------------------------------------------
-total                 199.8 KB   44.5 KB
+total                 200.8 KB   44.8 KB
 ```
 
 gzip はファイルごとの gzip の合計（保守的な見積もり）。
-設計目標の 250 KB に対して、コアは **44.5 KB**。
+設計目標の 250 KB に対して、コアは **44.8 KB**。
 
 ---
 
 ## 8.1 Codex レビュー対応
 
-PR #1 のレビュー指摘 13 件、追加 9 件、追加 5 件、追加 4 件、追加 3 件、合計 34 件をすべて修正し、回帰テストを追加した。
+PR #1 のレビュー指摘 13 件、追加 9 件、追加 5 件、追加 4 件、追加 3 件、追加 4 件、合計 38 件をすべて修正し、回帰テストを追加した。
 
 | 指摘 | 対応 |
 | --- | --- |
@@ -355,7 +355,16 @@ PR #1 のレビュー指摘 13 件、追加 9 件、追加 5 件、追加 4 件�
 | optional call が拡張メソッドを短絡する | 既知の拡張メソッドを判定してから短絡 |
 | `__proto__` ノード ID が runData を汚染する | 危険なノード ID を検証・グラフ構築で拒否 |
 
-テストは 76 件から **79 件**に増えている。
+追加レビュー（6 回目）:
+
+| 指摘 | 対応 |
+| --- | --- |
+| pairedItem が上流の index を引き継ぎ系譜が壊れる | 各ノードの即時入力 index で pairing を構築し、resolver は source の出力 Item から辿る |
+| `beginningOf("week")` が DST で誤った日付になる | ローカル暦の日付を月曜へ移動してから instant に変換 |
+| 外部 abort listener が run 終了後も残る | 実行完了時に forwarding listener を解除 |
+| displayOptions の短縮形 `{ gte: 2 }` が効かない | `_cnd` と短縮形の両方を正規化して評価 |
+
+テストは 79 件から **83 件**に増えている。
 
 ## 9. デモ
 

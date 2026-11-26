@@ -122,9 +122,9 @@ function checkConditions(conditions: Condition[], actualValues: unknown[]): bool
 }
 
 function matchesCondition(condition: Condition, actualValues: unknown[]): boolean {
-  if (isConditionObject(condition)) {
-    const [key, target] = Object.entries(condition._cnd)[0] ?? [];
-    if (key === undefined) return false;
+  const entry = conditionEntry(condition);
+  if (entry !== undefined) {
+    const [key, target] = entry;
 
     if (actualValues.length === 0) {
       return key === 'not' ? true : key === 'exists' ? false : false;
@@ -136,15 +136,36 @@ function matchesCondition(condition: Condition, actualValues: unknown[]): boolea
   return actualValues.includes(condition);
 }
 
-function isConditionObject(
-  condition: Condition,
-): condition is { _cnd: Record<string, unknown> } {
-  return (
-    typeof condition === 'object' &&
-    condition !== null &&
-    '_cnd' in condition &&
-    isPlainObject((condition as { _cnd?: unknown })._cnd)
-  );
+const DISPLAY_CONDITION_OPERATORS = new Set([
+  'eq',
+  'not',
+  'gte',
+  'lte',
+  'gt',
+  'lt',
+  'between',
+  'includes',
+  'startsWith',
+  'endsWith',
+  'regex',
+  'exists',
+]);
+
+function conditionEntry(condition: Condition): [string, unknown] | undefined {
+  if (typeof condition !== 'object' || condition === null) return undefined;
+
+  if ('_cnd' in condition) {
+    const wrapped = (condition as { _cnd?: unknown })._cnd;
+    if (!isPlainObject(wrapped)) return undefined;
+    return Object.entries(wrapped)[0];
+  }
+
+  const entries = Object.entries(condition);
+  if (entries.length !== 1) return undefined;
+
+  const entry = entries[0];
+  if (entry === undefined) return undefined;
+  return DISPLAY_CONDITION_OPERATORS.has(entry[0]) ? entry : undefined;
 }
 
 function applyCondition(key: string, value: unknown, target: unknown): boolean {

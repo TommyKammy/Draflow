@@ -163,13 +163,17 @@ export class ExecutionEngine {
     const bus = new EventBus();
     const controller = new AbortController();
     const mode: ExecutionMode = options.mode ?? 'manual';
+    const externalSignal = options.signal;
+    let removeExternalAbort: (() => void) | undefined;
 
-    if (options.signal !== undefined) {
-      if (options.signal.aborted) controller.abort(new ExecutionCanceledError());
-      else
-        options.signal.addEventListener('abort', () => controller.abort(new ExecutionCanceledError()), {
-          once: true,
-        });
+    if (externalSignal !== undefined) {
+      if (externalSignal.aborted) {
+        controller.abort(new ExecutionCanceledError());
+      } else {
+        const onAbort = (): void => controller.abort(new ExecutionCanceledError());
+        externalSignal.addEventListener('abort', onAbort, { once: true });
+        removeExternalAbort = () => externalSignal.removeEventListener('abort', onAbort);
+      }
     }
 
     const done = this.#execute(workflow, graph, options, {
@@ -179,6 +183,14 @@ export class ExecutionEngine {
       controller,
       bus,
     });
+
+    if (removeExternalAbort !== undefined) {
+      const cleanup = removeExternalAbort;
+      void done.then(
+        () => cleanup(),
+        () => cleanup(),
+      );
+    }
 
     return {
       id: runId,
@@ -480,7 +492,7 @@ export class ExecutionEngine {
         executionTime: 0,
         executionIndex: input.executionIndex,
         status: 'success',
-        input: stampedInput,
+        input: entry.input,
         output: previous?.output ?? { main: [primaryItems(stampedInput)] },
         ...(entry.source.length > 0 ? { source: entry.source } : {}),
         hints: [],
@@ -495,7 +507,7 @@ export class ExecutionEngine {
         executionTime: 0,
         executionIndex: input.executionIndex,
         status: 'success',
-        input: stampedInput,
+        input: entry.input,
         output: { main: [primaryItems(stampedInput)] },
         ...(entry.source.length > 0 ? { source: entry.source } : {}),
         hints: [],
@@ -512,7 +524,7 @@ export class ExecutionEngine {
         executionTime: 0,
         executionIndex: input.executionIndex,
         status: 'success',
-        input: stampedInput,
+        input: entry.input,
         output,
         ...(entry.source.length > 0 ? { source: entry.source } : {}),
         hints: [],
@@ -525,7 +537,7 @@ export class ExecutionEngine {
       node,
       nodeType,
       entry,
-      input: stampedInput,
+      input: entry.input,
       runData,
       mode: input.mode,
       runId: input.runId,
@@ -545,7 +557,7 @@ export class ExecutionEngine {
         executionTime: this.#clock.now() - startTime,
         executionIndex: input.executionIndex,
         status: 'success',
-        input: stampedInput,
+        input: entry.input,
         output: { main: [primaryItems(stampedInput)] },
         ...(entry.source.length > 0 ? { source: entry.source } : {}),
         hints: [],
@@ -602,7 +614,7 @@ export class ExecutionEngine {
           executionTime,
           executionIndex: input.executionIndex,
           status: 'error',
-          input: stampedInput,
+          input: entry.input,
           output: { main: [[]], error: [[errorItem]] },
           error: serialized,
           ...(entry.source.length > 0 ? { source: entry.source } : {}),
@@ -618,7 +630,7 @@ export class ExecutionEngine {
           executionTime,
           executionIndex: input.executionIndex,
           status: 'error',
-          input: stampedInput,
+          input: entry.input,
           output: { main: [primaryItems(stampedInput)] },
           error: serialized,
           ...(entry.source.length > 0 ? { source: entry.source } : {}),
@@ -633,7 +645,7 @@ export class ExecutionEngine {
         executionTime,
         executionIndex: input.executionIndex,
         status: 'error',
-        input: stampedInput,
+        input: entry.input,
         ...(output === undefined ? {} : { output }),
         error: serialized,
         ...(entry.source.length > 0 ? { source: entry.source } : {}),
@@ -653,7 +665,7 @@ export class ExecutionEngine {
       executionTime,
       executionIndex: input.executionIndex,
       status: 'success',
-      input: stampedInput,
+      input: entry.input,
       output: addMissingPairing(withAlways, stampedInput),
       ...(entry.source.length > 0 ? { source: entry.source } : {}),
       hints: [],
@@ -699,7 +711,7 @@ export class ExecutionEngine {
               : tasks[runIndex];
           return task?.output?.['main']?.[outputIndex] ?? [];
         },
-        resolveItem: (name) => resolveItemLineage(name, item, entry, graph, runData),
+        resolveItem: (name) => resolveItemLineage(name, itemIndex, entry, graph, runData),
         nodeNames: [...graph.byName.keys()],
         vars: engine.#vars,
         timezone: input.timezone,
@@ -1037,10 +1049,10 @@ function stampInput(input: PortData): PortData {
   for (const [port, ports] of Object.entries(input)) {
     result[port] = ports.map((items, portIndex) => {
       if (items === null) return null;
-      return items.map((item, itemIndex) => {
-        if (item.pairedItem !== undefined) return item;
-        return { ...item, pairedItem: { item: itemIndex, input: portIndex } };
-      });
+      return items.map((item, itemIndex) => ({
+        ...item,
+        pairedItem: { item: itemIndex, input: portIndex },
+      }));
     });
   }
   return result;
@@ -1160,14 +1172,23 @@ function abortReason(signal: AbortSignal): Error {
 
 function resolveItemLineage(
   targetName: string,
-  item: Item,
+  itemIndex: number,
   entry: ExecEntry,
   graph: WorkflowGraph,
   runData: RunData,
 ): Item | undefined {
   const target = graph.byName.get(targetName) ?? graph.nodes.get(targetName);
   if (target === undefined) return undefined;
-  return followLineage(item, entry.source[0] ?? null, target.id, runData, 0);
+
+  const source = entry.source[0] ?? null;
+  if (source === null) return undefined;
+
+  const task = runData[source.node]?.[source.runIndex];
+  const items = task?.output?.[source.port]?.[source.index] ?? [];
+  const item = items[itemIndex];
+  if (item === undefined) return undefined;
+
+  return followLineage(item, source, target.id, runData, 0);
 }
 
 function followLineage(

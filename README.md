@@ -11,7 +11,7 @@ The goal is not to reimplement n8n's 1,000 integrations. The goal is to port the
 any web app.
 
 > Status: **core engine implemented; editor UI next.**
-> 79 tests passing. Core + standard nodes: **44.5 KB gzip**.
+> 83 tests passing. Core + standard nodes: **44.8 KB gzip**.
 
 ## Quick start
 

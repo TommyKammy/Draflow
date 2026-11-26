@@ -381,6 +381,40 @@ describe('standard nodes', () => {
     expect(result.runData.merge?.[0]?.output?.main?.[0]).toHaveLength(1);
   });
 
+  it('tracks lineage through multiple nodes after a filter', async () => {
+    const wf = workflow(
+      [
+        node('m', 'draflow.manualTrigger', 'Manual', 0),
+        node('f', 'draflow.filter', 'Filter', 200, {
+          conditions: {
+            combinator: 'and',
+            conditions: [{ left: '={{ $json.id }}', operator: 'equals', right: 'c' }],
+          },
+        }),
+        node('s1', 'draflow.set', 'Set1', 400, {
+          mode: 'manual',
+          includeOtherFields: true,
+          assignments: [],
+        }),
+        node('s2', 'draflow.set', 'Set2', 600, {
+          mode: 'manual',
+          includeOtherFields: true,
+          assignments: [
+            { name: 'sourceId', value: '={{ $("Manual").item.json.id }}' },
+          ],
+        }),
+      ],
+      [connect('m', 'f'), connect('f', 's1'), connect('s1', 's2')],
+    );
+
+    const result = await run(wf, seed({ id: 'a' }, { id: 'b' }, { id: 'c' }));
+    expect(result.status).toBe('success');
+    expect(result.runData.s2?.[0]?.output?.main?.[0]?.[0]?.json).toEqual({
+      id: 'c',
+      sourceId: 'c',
+    });
+  });
+
   it('merges two branches by key', async () => {
     const wf = workflow(
       [

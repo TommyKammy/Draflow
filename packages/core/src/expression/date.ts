@@ -216,12 +216,14 @@ export class DraflowDateTime {
       parts.millisecond = 0;
     } else if (unit === 'week') {
       const daysSinceMonday = (parts.weekday + 6) % 7;
-      const shifted = new Date(this.#millis - daysSinceMonday * 86_400_000);
-      const shiftedParts = getParts(shifted.getTime(), this.timeZone);
-      shiftedParts.hour = 0;
-      shiftedParts.minute = 0;
-      shiftedParts.second = 0;
-      shiftedParts.millisecond = 0;
+      const shiftedParts = {
+        ...parts,
+        day: parts.day - daysSinceMonday,
+        hour: 0,
+        minute: 0,
+        second: 0,
+        millisecond: 0,
+      };
       return new DraflowDateTime(zonedTimeToUtc(shiftedParts, this.timeZone), this.timeZone);
     } else if (unit === 'day') {
       parts.hour = 0;
