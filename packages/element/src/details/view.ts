@@ -17,6 +17,10 @@ interface Actions {
   commit(node: WorkflowNode, control?: HTMLElement): void;
   duplicate(id: string): void;
   execute(id: string): void;
+  previous(id: string): void;
+  running(): boolean;
+  failure(): string | undefined;
+  stop(): void;
 }
 
 const settings: ParamSchema[] = [
@@ -45,6 +49,11 @@ export function nodeDetails(actions: Actions) {
     if (!draft || !flush(true)) return;
     try { actions.execute(draft.id); } catch (e) { feedback.textContent = String(e); }
   });
+  const previous = button('Execute previous nodes', () => {
+    if (!draft || !flush(true)) return;
+    try { actions.previous(draft.id); } catch (e) { feedback.textContent = String(e); }
+  });
+  const stop = button('Stop', actions.stop);
   const duplicate = button('Duplicate', () => {
     if (!draft || !flush(true)) return;
     const id = draft.id;
@@ -53,7 +62,7 @@ export function nodeDetails(actions: Actions) {
   });
   const discard = button('Discard invalid input', close);
   discard.hidden = true;
-  header.append(title, version, step, duplicate, button('Close', () => { if (flush(true)) close(); }), discard);
+  header.append(title, version, previous, step, stop, duplicate, button('Close', () => { if (flush(true)) close(); }), discard);
   const panes = document.createElement('div');
   panes.className = 'details-panes';
   const tabs = document.createElement('nav');
@@ -260,14 +269,15 @@ export function nodeDetails(actions: Actions) {
   function refreshData() {
     if (!draft) return;
     const id = draft.id;
-    step.disabled = duplicate.disabled = !actions.canEdit();
+    stop.hidden = !actions.running();
+    previous.disabled = step.disabled = duplicate.disabled = !actions.canEdit();
     const tasks = actions.tasks(id).filter(Boolean);
     if (!tasks.some(t => t.runIndex === runIndex)) runIndex = tasks.at(-1)?.runIndex ?? -1;
     runChoice.replaceChildren();
     if (tasks.length) runChoice.append(choice('Run index', tasks.map(t => [String(t.runIndex), 'Run ' + t.runIndex]),
       String(runIndex), v => {
         runIndex = Number(v); inputPanel.reset(); outputPanel.reset(); clearMapping();
-        refreshData(); for (const update of previews) update();
+        refreshData();
       }));
     const t = task();
     inputPanel.set(t?.input);
@@ -290,7 +300,8 @@ export function nodeDetails(actions: Actions) {
     pin.disabled = !actions.canEdit() || (pinned === undefined && (!pinnable || !items || t?.status !== 'success'));
     pinControls.append(pin);
     if (!pinnable) pinControls.append(' Pinning requires a single main[0] output.');
-    feedback.textContent = t?.error?.message ?? '';
+    for (const update of previews) update();
+    feedback.textContent = t?.error?.message ?? actions.failure() ?? '';
   }
   function refresh() { refreshData(); renderForm(); }
   return { dialog, close, refresh, refreshData, flush,

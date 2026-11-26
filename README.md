@@ -46,6 +46,12 @@ or settings, then choose **Execute step** to run through that node. Input and Ou
 show each port separately. Choose a run, port, and item to inspect its data in
 Schema, Table, or JSON. Table pages contain up to 100 rows.
 
+Use **Execute previous nodes** to run only the selected node’s ancestors. Both
+partial execution actions reuse clean upstream results. **Run workflow** starts
+fresh. Open a row in **Execution log** to inspect its input and output by node
+and run index. **Stop** cancels the active run. **Clear execution** removes
+displayed results and the partial execution cache while preserving edits and pins.
+
 In **Map from**, choose the current input or an upstream node. Select a field,
 then use **Insert** at the destination parameter, or drag the field onto it.
 **Insert at cursor** embeds a value in text. **Replace value** preserves the

@@ -11,6 +11,8 @@ export interface DraflowEditorElement extends HTMLElement {
   runNode: WorkflowEditor['runNode'];
   fitView(): void;
   focusNode(id: string): void;
+  runPreviousNodes: WorkflowEditor['runPreviousNodes'];
+  clearExecution(): void;
   stop(): void;
   destroy(): void;
 }
@@ -96,6 +98,11 @@ export function defineDraflowEditor(): void {
       if (!this.#editor) throw new Error('Editor is not mounted');
       return this.#editor.runNode(id);
     }
+    runPreviousNodes(id: string) {
+      if (!this.#editor) throw new Error('Editor is not mounted');
+      return this.#editor.runPreviousNodes(id);
+    }
+    clearExecution() { this.#editor?.clearExecution(); }
     undo() { this.#editor?.undo(); }
     redo() { this.#editor?.redo(); }
     fitView() { this.#editor?.fitView(); }
