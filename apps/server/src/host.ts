@@ -1,5 +1,5 @@
 import { setImmediate as yieldToHost } from 'node:timers/promises';
-import type { ExecutionEngineOptions, Workflow } from '@draflow/core';
+import { isPlainObject, type ExecutionEngineOptions, type Workflow } from '@draflow/core';
 import { MemoryRuntime, type TriggerEvent } from '@draflow/runtime';
 import type { ExecutionSummary } from '@draflow/storage';
 import { SqliteLedger } from './sqlite.js';
@@ -83,7 +83,16 @@ export class NodeHost {
 
   accept(id: string, trigger: string, event: Omit<TriggerEvent, 'runId'>): string {
     this.#ready();
+    if (event.key !== undefined && typeof event.key !== 'string')
+      throw new Error('Expected a string event key');
+    if (event.mode !== undefined && event.mode !== 'trigger' && event.mode !== 'webhook') {
+      throw new Error('Expected trigger or webhook mode');
+    }
     if (!Array.isArray(event.items)) throw new Error('Expected event items');
+    for (const item of event.items) {
+      if (!isPlainObject(item) || !isPlainObject(item.json))
+        throw new Error('Expected an item with a JSON object');
+    }
     const runId = this.#ledger.accept(id, trigger, event, this.#capacity, this.#ttl, (revision) => {
       const { workflow } = this.#ledger.publication(id, revision);
       const node = workflow.nodes.find((node) => node.id === trigger);

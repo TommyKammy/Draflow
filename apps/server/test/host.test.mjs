@@ -35,6 +35,8 @@ for (const phase of ['before', 'queued', 'running', 'finished']) {
     assert.equal(child.signal, 'SIGKILL', child.stderr);
     const db = new DatabaseSync(path);
     const before = db.prepare('SELECT runId,state FROM runs').all();
+    // Model downtime longer than the delivery window after an external effect.
+    if (phase === 'running') db.prepare('UPDATE deliveries SET expiresAt=0').run();
     db.close();
     assert.deepEqual(
       before.map((r) => r.state),
@@ -258,4 +260,31 @@ test('engine failure is recorded once and the worker continues with the next job
   assert.match(detail.error.message, /rejected by destination/);
   assert.equal(host.accept('flow', 'a', event), failed);
   assert.equal(attempts, 2);
+});
+
+test('rejects invalid event keys, modes and item envelopes before durable admission', async (t) => {
+  const host = open(t, database(t));
+  setup(host);
+  for (const invalid of [
+    { ...event, key: 42 },
+    { ...event, key: null },
+    { ...event, mode: 'manual' },
+    { ...event, items: [null] },
+    { ...event, items: [{ json: [] }] },
+  ]) {
+    assert.throws(() => host.accept('flow', 'a', invalid));
+  }
+  assert.equal(host.stats().queued, 0);
+  const id = host.accept('flow', 'a', { ...event, key: '42' });
+  await until(() => host.receipt(id).state === 'finished');
+});
+
+test('uses the host clock for receipt transitions and the injected engine clock for execution history', async (t) => {
+  const host = open(t, database(t), { clock: { now: () => 100, sleep: async () => {} } });
+  setup(host);
+  const id = host.accept('flow', 'a', event);
+  await until(() => host.receipt(id).state === 'finished');
+  const receipt = host.receipt(id);
+  assert.ok(receipt.stoppedAt >= receipt.startedAt);
+  assert.equal((await host.history.list('flow'))[0].stoppedAt, 100);
 });

@@ -170,7 +170,7 @@ export class SqliteLedger {
         const existing = this.#prepare(
           `SELECT d.runId FROM deliveries d JOIN runs USING(runId)
           WHERE d.workflowId=? AND d.triggerNodeId=? AND d.eventKey=?
-          AND (d.expiresAt>? OR runs.state IN ('queued','running'))`,
+          AND (d.expiresAt>? OR runs.state IN ('queued','running','interrupted'))`,
         ).get(id, trigger, event.key, now);
         if (existing) return String(existing.runId);
       }
@@ -246,7 +246,7 @@ export class SqliteLedger {
     this.#transaction(() => {
       const update = this.#prepare(
         `UPDATE runs SET state=?,stoppedAt=?,outcome=?,payload=NULL WHERE runId=? AND state='running'`,
-      ).run(interrupted ? 'interrupted' : 'finished', summary.stoppedAt, summary.status, receipt.runId);
+      ).run(interrupted ? 'interrupted' : 'finished', Date.now(), summary.status, receipt.runId);
       if (!update.changes) throw new Error('Run no longer owned');
       const policy = detail.workflow.settings.saveExecutionData;
       if (policy !== 'none' && (policy !== 'error' || summary.status === 'error'))
