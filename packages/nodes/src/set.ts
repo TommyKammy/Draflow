@@ -84,6 +84,7 @@ export const setNode: NodeType = {
       if (mode === 'json') {
         const raw = itemCtx.param<unknown>('jsonOutput', {});
         output.push({
+          ...input,
           json: parseJsonObject(raw),
           pairedItem: pairing(input, index),
         });
@@ -103,7 +104,7 @@ export const setNode: NodeType = {
         setPath(base, name, toJsonValue(value));
       }
 
-      output.push({ json: base, pairedItem: pairing(input, index) });
+      output.push({ ...input, json: base, pairedItem: pairing(input, index) });
     });
 
     return output;

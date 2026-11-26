@@ -212,9 +212,19 @@ function coercePair(left: unknown, right: unknown): [unknown, unknown] {
     if (Number.isFinite(number)) return [number, right];
   }
   if (typeof left === 'boolean' || typeof right === 'boolean') {
-    return [Boolean(left), Boolean(right)];
+    return [parseBoolean(left), parseBoolean(right)];
   }
   return [left, right];
+}
+
+function parseBoolean(value: unknown): boolean {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0 && !Number.isNaN(value);
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    return normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on';
+  }
+  return Boolean(value);
 }
 
 function isEmpty(value: unknown): boolean {
@@ -227,9 +237,6 @@ function isEmpty(value: unknown): boolean {
 function isTrue(value: unknown): boolean {
   if (typeof value === 'boolean') return value;
   if (typeof value === 'number') return value !== 0;
-  if (typeof value === 'string') {
-    const normalized = value.trim().toLowerCase();
-    return normalized === 'true' || normalized === '1';
-  }
+  if (typeof value === 'string') return parseBoolean(value);
   return false;
 }

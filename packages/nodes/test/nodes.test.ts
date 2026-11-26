@@ -166,6 +166,65 @@ describe('standard nodes', () => {
     expect(when).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
+  it('preserves binary references when editing fields', async () => {
+    const binary = {
+      file: { mimeType: 'text/plain', fileName: 'a.txt', id: 'bin-1' },
+    };
+    const options = { triggerData: { main: [[{ json: { x: 1 }, binary }]] } };
+
+    const manual = workflow(
+      [
+        node('m', 'draflow.manualTrigger', 'Manual', 0),
+        node('s', 'draflow.set', 'Set', 200, {
+          mode: 'manual',
+          includeOtherFields: true,
+          assignments: [],
+        }),
+      ],
+      [connect('m', 's')],
+    );
+    const manualResult = await run(manual, options);
+    expect(manualResult.runData.s?.[0]?.output?.main?.[0]?.[0]?.binary).toEqual(binary);
+
+    const json = workflow(
+      [
+        node('m', 'draflow.manualTrigger', 'Manual', 0),
+        node('s', 'draflow.set', 'Set', 200, {
+          mode: 'json',
+          jsonOutput: '{"y":2}',
+        }),
+      ],
+      [connect('m', 's')],
+    );
+    const jsonResult = await run(json, options);
+    expect(jsonResult.runData.s?.[0]?.output?.main?.[0]?.[0]?.binary).toEqual(binary);
+  });
+
+  it('parses boolean strings under loose filter validation', async () => {
+    const wf = workflow(
+      [
+        node('m', 'draflow.manualTrigger', 'Manual', 0),
+        node('f', 'draflow.filter', 'Filter', 200, {
+          looseTypeValidation: true,
+          conditions: {
+            combinator: 'and',
+            conditions: [
+              { left: '={{ $json.flag }}', operator: 'equals', right: '={{ true }}' },
+            ],
+          },
+        }),
+      ],
+      [connect('m', 'f')],
+    );
+
+    const result = await run(
+      wf,
+      seed({ flag: 'true' }, { flag: 'false' }, { flag: '1' }, { flag: '0' }),
+    );
+    const output = result.runData.f?.[0]?.output?.main?.[0] ?? [];
+    expect(output.map((entry) => entry.json.flag)).toEqual(['true', '1']);
+  });
+
   it('rejects prototype-related assignment paths', async () => {
     const wf = workflow(
       [

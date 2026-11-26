@@ -304,6 +304,33 @@ describe('ExecutionEngine', () => {
     expect(result.runData.c?.[0]?.output?.main?.[0]?.[0]?.json).toEqual({ pinned: true });
   });
 
+  it('honors an explicitly empty pin without executing the node', async () => {
+    let calls = 0;
+    const counted: NodeType = {
+      ...echoType,
+      type: 'test.count',
+      execute(ctx) {
+        calls += 1;
+        return [...ctx.items];
+      },
+    };
+    const local = new NodeRegistry().registerAll([triggerType, counted]);
+
+    const wf = workflow(
+      [node('t', triggerType.type, 'Trigger', 0), node('c', counted.type, 'Count', 200)],
+      [connect('t', 'c')],
+    );
+
+    const result = await execute(
+      wf,
+      { pinData: { c: [] } },
+      new ExecutionEngine({ registry: local }),
+    );
+    expect(result.status).toBe('success');
+    expect(calls).toBe(0);
+    expect(result.runData.c?.[0]?.output?.main?.[0]).toHaveLength(0);
+  });
+
   it('passes data through disabled nodes', async () => {
     let calls = 0;
     const counted: NodeType = {

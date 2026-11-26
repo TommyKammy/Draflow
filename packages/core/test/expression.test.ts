@@ -127,6 +127,25 @@ describe('ExpressionEngine', () => {
     ).toBe('2026-02-17T03:00:00.000Z');
   });
 
+  it('uses the workflow timezone for date extensions', () => {
+    const tokyo = new ExpressionEngine({ timezone: 'Asia/Tokyo' });
+    const tokyoContext = { ...context, timezone: 'Asia/Tokyo' };
+    expect(
+      tokyo.resolve('={{ DateTime.fromISO("2026-01-15T00:00:00Z").hour }}', tokyoContext),
+    ).toBe(9);
+    expect(tokyo.resolve('={{ "2026-01-15T00:00:00Z".toDateTime().hour }}', tokyoContext)).toBe(9);
+  });
+
+  it('counts member and call chains against the evaluation budget', () => {
+    const depthLimited = new ExpressionEngine({ timezone: 'UTC', maxDepth: 3 });
+    expect(() => depthLimited.resolve('={{ "a".trim().trim().trim() }}', context)).toThrow(
+      /depth/,
+    );
+
+    const stepLimited = new ExpressionEngine({ timezone: 'UTC', maxSteps: 3 });
+    expect(() => stepLimited.resolve('={{ "a".trim().trim() }}', context)).toThrow(/steps/);
+  });
+
   it('resolves nested values', () => {
     expect(
       engine.resolve(

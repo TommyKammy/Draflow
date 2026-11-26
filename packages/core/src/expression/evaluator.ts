@@ -76,6 +76,7 @@ export class Scope {
 export interface EvaluatorOptions {
   source: string;
   data: Record<string, unknown>;
+  timezone?: string;
   maxSteps?: number;
   maxDepth?: number;
 }
@@ -83,6 +84,7 @@ export interface EvaluatorOptions {
 export class Evaluator {
   readonly #source: string;
   readonly #data: Record<string, unknown>;
+  readonly #timezone: string;
   readonly #maxSteps: number;
   readonly #maxDepth: number;
   #steps = 0;
@@ -91,6 +93,7 @@ export class Evaluator {
   constructor(options: EvaluatorOptions) {
     this.#source = options.source;
     this.#data = options.data;
+    this.#timezone = options.timezone ?? 'UTC';
     this.#maxSteps = options.maxSteps ?? 100_000;
     this.#maxDepth = options.maxDepth ?? 64;
   }
@@ -191,26 +194,45 @@ export class Evaluator {
   }
 
   #evaluateChain(expression: Expr, scope: Scope): ChainResult {
-    if (expression.type === 'Member') {
-      const member = expression as MemberExpr;
-      const base = this.#evaluateChain(member.object, scope);
-      if (base.short) return base;
-
-      if (base.value === null || base.value === undefined) {
-        if (member.optional) return { short: true, value: undefined };
-        throw new ExpressionError('Cannot read a property of null or undefined', {
-          expression: this.#source,
-          position: member.start,
-        });
-      }
-
-      const key = member.computed
-        ? this.evaluate(member.property, scope)
-        : (member.property as IdentifierExpr).name;
-      return { short: false, value: this.getMember(base.value, String(key)) };
+    if (expression.type !== 'Member' && expression.type !== 'Call') {
+      return { short: false, value: this.evaluate(expression, scope) };
     }
 
-    if (expression.type === 'Call') {
+    this.#steps += 1;
+    if (this.#steps > this.#maxSteps) {
+      throw new ExpressionLimitError(
+        `Expression exceeded ${this.#maxSteps} evaluation steps`,
+        this.#source,
+      );
+    }
+    if (this.#depth > this.#maxDepth) {
+      throw new ExpressionLimitError(
+        `Expression exceeded maximum depth ${this.#maxDepth}`,
+        this.#source,
+      );
+    }
+
+    this.#depth += 1;
+    try {
+      if (expression.type === 'Member') {
+        const member = expression as MemberExpr;
+        const base = this.#evaluateChain(member.object, scope);
+        if (base.short) return base;
+
+        if (base.value === null || base.value === undefined) {
+          if (member.optional) return { short: true, value: undefined };
+          throw new ExpressionError('Cannot read a property of null or undefined', {
+            expression: this.#source,
+            position: member.start,
+          });
+        }
+
+        const key = member.computed
+          ? this.evaluate(member.property, scope)
+          : (member.property as IdentifierExpr).name;
+        return { short: false, value: this.getMember(base.value, String(key)) };
+      }
+
       const call = expression as CallExpr;
 
       if (call.callee.type === 'Member') {
@@ -263,9 +285,9 @@ export class Evaluator {
 
       const args = call.args.map((argument) => this.evaluate(argument, scope));
       return { short: false, value: this.invoke(callee.value, args) };
+    } finally {
+      this.#depth -= 1;
     }
-
-    return { short: false, value: this.evaluate(expression, scope) };
   }
 
   #evaluateUnary(expression: UnaryExpr, scope: Scope): unknown {
@@ -512,7 +534,7 @@ export class Evaluator {
 
     return callExtension(receiver, name, args, {
       source: this.#source,
-      timezone: 'UTC',
+      timezone: this.#timezone,
       invoke: (fn, values) => this.invoke(fn, values),
     });
   }

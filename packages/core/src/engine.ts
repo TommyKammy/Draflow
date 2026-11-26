@@ -499,7 +499,7 @@ export class ExecutionEngine {
     }
 
     const pinned = pinData[node.id];
-    if (pinned !== undefined && pinned.length > 0) {
+    if (pinned !== undefined) {
       const output = normalizeOutput(pinned);
       return {
         nodeId: node.id,

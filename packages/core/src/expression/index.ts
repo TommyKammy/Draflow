@@ -110,6 +110,7 @@ export class ExpressionEngine {
     const evaluator = new Evaluator({
       source,
       data,
+      timezone: ctx.timezone ?? this.timezone,
       maxSteps: this.#maxSteps,
       maxDepth: this.#maxDepth,
     });

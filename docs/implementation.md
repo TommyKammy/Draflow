@@ -16,8 +16,8 @@
 | 実行 | スタック、waiting（複数入力）、runIndex、リトライ、エラー 3 モード、ピン、無効化、executeOnce、部分実行、実行制限 |
 | ノード | Manual / NoOp / Set / If / Filter / Merge / HTTP Request |
 | 永続化 | JSON の読み書き、検証、デフォルト適用 |
-| テスト | 68 tests（core 52 / nodes 16） |
-| サイズ | core 35.5 KB gzip + nodes 7.8 KB gzip = **43.3 KB gzip** |
+| テスト | 73 tests（core 55 / nodes 18） |
+| サイズ | core 35.6 KB gzip + nodes 7.8 KB gzip = **43.4 KB gzip** |
 
 ---
 
@@ -256,11 +256,11 @@ pnpm test
 ✓ packages/core/test/graph.test.ts         (4)
 ✓ packages/core/test/parameters.test.ts    (4)
 ✓ packages/core/test/serialize.test.ts     (6)
-✓ packages/core/test/expression.test.ts   (16)
-✓ packages/core/test/engine.test.ts       (20)
-✓ packages/nodes/test/nodes.test.ts       (16)
+✓ packages/core/test/expression.test.ts   (18)
+✓ packages/core/test/engine.test.ts       (21)
+✓ packages/nodes/test/nodes.test.ts       (18)
 ──────────────────────────────────────────────
-68 tests passed
+73 tests passed
 ```
 
 型チェック:
@@ -283,20 +283,20 @@ pnpm size
 ```
 package        files      raw       gzip
 ------------------------------------------
-core              21  167.3 KB   35.5 KB
-nodes              9   26.3 KB    7.8 KB
+core              21  168.0 KB   35.6 KB
+nodes              9   26.7 KB    7.8 KB
 ------------------------------------------
-total                 193.6 KB   43.3 KB
+total                 194.6 KB   43.4 KB
 ```
 
 gzip はファイルごとの gzip の合計（保守的な見積もり）。
-設計目標の 250 KB に対して、コアは **43.3 KB**。
+設計目標の 250 KB に対して、コアは **43.4 KB**。
 
 ---
 
 ## 8.1 Codex レビュー対応
 
-PR #1 のレビュー指摘 13 件と追加 9 件、合計 22 件をすべて修正し、回帰テストを追加した。
+PR #1 のレビュー指摘 13 件、追加 9 件、追加 5 件、合計 27 件をすべて修正し、回帰テストを追加した。
 
 | 指摘 | 対応 |
 | --- | --- |
@@ -328,7 +328,17 @@ PR #1 のレビュー指摘 13 件と追加 9 件、合計 22 件をすべて修
 | `alwaysOutputData` が他出力を消す | 既存出力を保持し、全出力が空のときだけ placeholder |
 | `Promise.reject(undefined)` が成功扱いになる | `failed` フラグで失敗を追跡 |
 
-テストは 58 件から **68 件**に増えている。
+追加レビュー（3 回目）:
+
+| 指摘 | 対応 |
+| --- | --- |
+| 空配列の pin が無視されてノードが実行される | pin の存在だけで実行をスキップ |
+| Set が `binary` を落とす | Item の `binary` / `error` を引き継ぐ |
+| 文字列・数値の日付変換が UTC 固定 | 式コンテキストのタイムゾーンを拡張メソッドへ渡す |
+| loose 比較で `"false"` が true になる | boolean 文字列を明示的にパース |
+| メンバー/呼び出しチェーンが評価予算を回避 | チェーン各ノードで steps / depth を加算 |
+
+テストは 68 件から **73 件**に増えている。
 
 ## 9. デモ
 
