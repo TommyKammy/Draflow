@@ -150,6 +150,18 @@ describe('ExpressionEngine', () => {
     expect(evaluate('={{ "10" <= 2 }}')).toBe(false);
   });
 
+  it.each([
+    ['={{ "ab".replaceAll("", "-") }}', '-a-b-'],
+    ['={{ "hello".replaceAll("l", "$&$&") }}', 'hellllo'],
+  ])('applies string replacement semantics in %s', (source, expected) => {
+    expect(evaluate(source)).toBe(expected);
+  });
+
+  it.each(['null', '$json.missing'])('distinguishes an optional call from an optional receiver on %s', receiver => {
+    expect(() => evaluate(`={{ ${receiver}.trim?.() }}`)).toThrow(/null or undefined/);
+    expect(evaluate(`={{ ${receiver}?.trim() }}`)).toBeUndefined();
+  });
+
   it('short-circuits optional chains through the whole chain', () => {
     expect(evaluate('={{ $json.missing?.nested.name ?? "fallback" }}')).toBe('fallback');
     expect(evaluate('={{ $json.nested?.missing?.deep ?? "fallback" }}')).toBe('fallback');

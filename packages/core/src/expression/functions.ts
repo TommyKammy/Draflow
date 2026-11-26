@@ -52,7 +52,7 @@ function callString(
     case 'replace':
       return value.replace(String(args[0] ?? ''), String(args[1] ?? ''));
     case 'replaceAll':
-      return value.split(String(args[0] ?? '')).join(String(args[1] ?? ''));
+      return value.replaceAll(String(args[0] ?? ''), String(args[1] ?? ''));
     case 'includes':
       return value.includes(String(args[0] ?? ''));
     case 'startsWith':

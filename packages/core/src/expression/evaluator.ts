@@ -244,7 +244,7 @@ export class Evaluator {
         if (receiver.short) return receiver;
 
         if (receiver.value === null || receiver.value === undefined) {
-          if (call.optional || member.optional) return { short: true, value: undefined };
+          if (member.optional) return { short: true, value: undefined };
           throw new ExpressionError('Cannot call a method of null or undefined', {
             expression: this.#source,
             position: call.start,
