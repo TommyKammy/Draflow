@@ -1,4 +1,4 @@
-import { getVisibleParameters, resolveNodeSettings, type ExecutionEngine, type NodeRegistry, type NodeSettings,
+import { getVisibleParameters, isParameterVisible, resolveNodeSettings, type ExecutionEngine, type NodeRegistry, type NodeSettings,
   type ParamSchema, type ParamValue, type PortData, type TaskData, type WorkflowNode } from '@draflow/core';
 import { button, renderFields } from './fields.js';
 
@@ -84,12 +84,21 @@ export function nodeDetails(actions: Actions) {
   let pending = false;
   let fieldNames = '';
   const modes = new Map<string, { fixed: ParamValue; expression: ParamValue }>();
-  function visibleFields(node: WorkflowNode) {
-    const type = actions.registry.get(node.type, node.typeVersion);
-    return type ? getVisibleParameters(type, node) : [];
-  }
   function signature(node: WorkflowNode) {
-    return settingsMode ? String(node.settings?.retryOnFail ?? false) : JSON.stringify(visibleFields(node).map(f => f.name));
+    if (settingsMode) return String(node.settings?.retryOnFail ?? false);
+    const type = actions.registry.get(node.type, node.typeVersion);
+    if (!type) return '';
+    const paths: string[][] = [];
+    function visit(fields: ParamSchema[], parent: string[]) {
+      for (const field of fields) {
+        if (field.type === 'hidden' || !isParameterVisible(field, node, type!)) continue;
+        const path = [...parent, field.name];
+        paths.push(path);
+        if (field.type === 'collection' || field.type === 'fixedCollection') visit(field.fields, path);
+      }
+    }
+    visit(type.parameters, []);
+    return JSON.stringify(paths);
   }
   let editingControl: HTMLElement | undefined;
 

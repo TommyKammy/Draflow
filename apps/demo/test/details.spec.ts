@@ -240,3 +240,34 @@ test('keeps invalid HTTP headers when another field requests a redraw', async ({
     .nodes.find(n => n.type === 'draflow.httpRequest')!.parameters);
   expect(params).toMatchObject({ method: '={{ "GET" }}', headers: { Accept: 'application/json' } });
 });
+
+test('updates conditional fields inside collections without reopening the dialog', async ({ page }) => {
+  await page.goto('/');
+  const card = page.locator('[data-node-id="set"]');
+  await expect(card).toBeVisible();
+  await page.evaluate(() => {
+    const editor = document.querySelector('draflow-editor')!;
+    editor.nodeTypes = editor.nodeTypes.map(type => type.type !== 'draflow.set' ? type : {
+      ...type, parameters: [{ type: 'collection', name: 'options', label: 'Options', fields: [
+        { type: 'select', name: 'mode', label: 'Mode', default: 'basic',
+          options: [{ value: 'basic', label: 'Basic' }, { value: 'advanced', label: 'Advanced' }] },
+        { type: 'fixedCollection', name: 'rows', label: 'Rows', multiple: true, default: [{}], fields: [
+          { type: 'string', name: 'detail', label: 'Advanced detail',
+            displayOptions: { show: { '/options.mode': ['advanced'] } } },
+        ] },
+      ] }],
+    });
+  });
+  await card.dblclick();
+  const dialog = page.getByRole('dialog');
+  const mode = dialog.getByRole('combobox', { name: 'Mode' });
+  const detail = dialog.getByLabel('Advanced detail', { exact: true });
+  await expect(detail).toHaveCount(0);
+  await mode.selectOption('advanced');
+  await expect(detail).toBeVisible();
+  await detail.fill('preserved');
+  await mode.selectOption('basic');
+  await expect(detail).toHaveCount(0);
+  await mode.selectOption('advanced');
+  await expect(detail).toHaveValue('preserved');
+});
