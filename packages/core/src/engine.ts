@@ -555,7 +555,7 @@ export class ExecutionEngine {
 
       try {
         const result = await raceWithAbort(
-          Promise.resolve().then(() => execute(context)),
+          Promise.resolve().then(() => execute.call(nodeType, context)),
           input.signal,
         );
         output = normalizeOutput(result);
