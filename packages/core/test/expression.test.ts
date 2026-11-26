@@ -162,6 +162,18 @@ describe('ExpressionEngine', () => {
     expect(evaluate(`={{ ${receiver}?.trim() }}`)).toBeUndefined();
   });
 
+  it.each([
+    ['"a,b,a".indexOf("a", 1)', 4],
+    ['"ababa".lastIndexOf("a", 1)', 0],
+    ['"abc".includes("a", 1)', false],
+    ['"abc".startsWith("b", "1")', true],
+    ['"abc".endsWith("b", 2)', true],
+    ['"abc".endsWith("c", undefined)', true],
+    ['"ababa".lastIndexOf("a")', 4],
+  ] as const)('uses the search position in %s', (expression, expected) => {
+    expect(evaluate(`={{ ${expression} }}`)).toBe(expected);
+  });
+
   it('short-circuits optional chains through the whole chain', () => {
     expect(evaluate('={{ $json.missing?.nested.name ?? "fallback" }}')).toBe('fallback');
     expect(evaluate('={{ $json.nested?.missing?.deep ?? "fallback" }}')).toBe('fallback');

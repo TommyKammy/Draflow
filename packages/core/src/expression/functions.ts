@@ -54,11 +54,13 @@ function callString(
     case 'replaceAll':
       return value.replaceAll(String(args[0] ?? ''), String(args[1] ?? ''));
     case 'includes':
-      return value.includes(String(args[0] ?? ''));
     case 'startsWith':
-      return value.startsWith(String(args[0] ?? ''));
     case 'endsWith':
-      return value.endsWith(String(args[0] ?? ''));
+    case 'indexOf':
+    case 'lastIndexOf': {
+      const position = args[1] === undefined ? undefined : Number(args[1]);
+      return value[name](String(args[0] ?? ''), position);
+    }
     case 'slice':
       return value.slice(numberArg(args, 0, 0), args[1] === undefined ? undefined : numberArg(args, 1, 0));
     case 'substring':
@@ -69,10 +71,6 @@ function callString(
       return value.padEnd(numberArg(args, 0, 0), String(args[1] ?? ' '));
     case 'repeat':
       return value.repeat(numberArg(args, 0, 0));
-    case 'indexOf':
-      return value.indexOf(String(args[0] ?? ''));
-    case 'lastIndexOf':
-      return value.lastIndexOf(String(args[0] ?? ''));
     case 'charAt':
       return value.charAt(numberArg(args, 0, 0));
     case 'length':
