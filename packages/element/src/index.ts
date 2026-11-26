@@ -1,5 +1,5 @@
 import {
-  ExecutionEngine, NodeRegistry, buildGraph, createWorkflow, downstreamOf,
+  ExecutionEngine, NodeRegistry, buildGraph, createWorkflow, downstreamOf, upstreamOf,
   type EngineEvents, type ExecutionEngineOptions, type NodeType,
   type RunData, type TaskData, type RunHandle, type RunOptions, type RunResult, type Workflow,
 } from '@draflow/core';
@@ -87,17 +87,24 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
   let cached: RunData | undefined;
   const dirty = new Set<string>();
   const displayed = new Map<string, TaskData>();
-  const previewInputs = new Map<string, TaskData>();
+  const previewInputs = new Map<string, TaskData[]>();
   const details = nodeDetails({ registry, engine, canEdit,
     get: id => workflow.nodes.find(n => n.id === id),
-    task: id => previewInputs.get(id),
-    output: id => displayed.get(id)?.output,
+    tasks: id => previewInputs.get(id) ?? [],
+    hasOutput: id => displayed.has(id),
+    ancestors: id => {
+      const ids = upstreamOf(buildGraph(workflow), id);
+      return workflow.nodes.filter(n => n.id !== id && ids.has(n.id)).map(n => n.name);
+    },
+    pinned: id => workflow.pinData && Object.hasOwn(workflow.pinData, id) ? workflow.pinData[id] : undefined,
+    pin: (id, items) => commit({ type: 'pin', id, items }),
     commit: (node, control) => {
       const before = workflow.nodes.find(n => n.id === node.id);
       const declared = registry.get(node.type, node.typeVersion)?.ports.outputs;
       const removeErrorOutput = before?.settings?.onError === 'errorOutput' && node.settings?.onError !== 'errorOutput' &&
         !!declared && !declared.some(p => p.type === 'error');
-      commit({ type: 'configure', node, removeErrorOutput }, control);
+      const removePin = node.settings?.onError === 'errorOutput' && before?.settings?.onError !== 'errorOutput';
+      commit({ type: 'configure', node, removeErrorOutput, removePin }, control);
     },
     execute: runNode,
     duplicate: id => commit({ type: 'paste', fragment: fragment(workflow, new Set([id])) }),
@@ -160,14 +167,14 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     canvas.applyWorkflow(next, added);
     if (source === 'add') canvas.focusNode(next.nodes[next.nodes.length - 1]!.id);
     // Undo of a move shares all computation-relevant fields with the previous revision.
-    let structural = previous.connections !== next.connections || previous.pinData !== next.pinData ||
+    let structural = previous.connections !== next.connections ||
       previous.nodes.length !== next.nodes.length;
     const changed = new Set<string>();
     previous.nodes.forEach((before, i) => {
       const after = next.nodes[i];
       if (!after || before.id !== after.id || before.name !== after.name) structural = true;
       else if (before.parameters !== after.parameters || before.settings !== after.settings ||
-        before.disabled !== after.disabled) changed.add(after.id);
+        before.disabled !== after.disabled || previous.pinData?.[after.id] !== next.pinData?.[after.id]) changed.add(after.id);
     });
     if (structural || changed.size) {
       if (structural) {
@@ -308,7 +315,9 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
       }),
       handle.on('node:finish', detail => {
         displayed.set(detail.nodeId, detail.task);
-        previewInputs.set(detail.nodeId, detail.task);
+        const tasks = previewInputs.get(detail.nodeId) ?? [];
+        tasks[detail.runIndex] = detail.task;
+        previewInputs.set(detail.nodeId, tasks);
         const count = Object.values(detail.task.output ?? {}).reduce(
           (total, ports) => total + ports.reduce((sum, items) => sum + (items?.length ?? 0), 0), 0,
         );

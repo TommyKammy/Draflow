@@ -20,13 +20,13 @@ export class NodeProxy {
   readonly name: string;
   readonly #getItems: (name: string, outputIndex?: number, runIndex?: number) => readonly Item[];
   readonly #getCurrentItem: () => Item | undefined;
-  readonly #resolveItem: ((name: string) => Item | undefined) | undefined;
+  readonly #resolveItem: ExpressionContext['resolveItem'];
 
   constructor(
     name: string,
     getItems: (name: string, outputIndex?: number, runIndex?: number) => readonly Item[],
     getCurrentItem: () => Item | undefined,
-    resolveItem?: (name: string) => Item | undefined,
+    resolveItem?: ExpressionContext['resolveItem'],
   ) {
     this.name = name;
     this.#getItems = getItems;
@@ -50,6 +50,11 @@ export class NodeProxy {
   itemMatching(index: unknown): Item | undefined {
     if (typeof index !== 'number' || !Number.isInteger(index)) return undefined;
     return this.all()[index];
+  }
+
+  itemFrom(port: unknown, slot: unknown, index: unknown): Item | undefined {
+    if (typeof port !== 'string' || typeof slot !== 'number' || typeof index !== 'number') return undefined;
+    return this.#resolveItem?.(this.name, index, port, slot);
   }
 
   get item(): Item | undefined {
@@ -80,13 +85,13 @@ export class NodeMap {
   readonly #getItems: (name: string, outputIndex?: number, runIndex?: number) => readonly Item[];
   readonly #getCurrentItem: () => Item | undefined;
   readonly #names: () => readonly string[];
-  readonly #resolveItem: ((name: string) => Item | undefined) | undefined;
+  readonly #resolveItem: ExpressionContext['resolveItem'];
 
   constructor(
     getItems: (name: string, outputIndex?: number, runIndex?: number) => readonly Item[],
     getCurrentItem: () => Item | undefined,
     names: () => readonly string[],
-    resolveItem?: (name: string) => Item | undefined,
+    resolveItem?: ExpressionContext['resolveItem'],
   ) {
     this.#getItems = getItems;
     this.#getCurrentItem = getCurrentItem;
@@ -108,16 +113,21 @@ export class NodeMap {
 }
 
 export class InputProxy {
-  readonly #getInput: () => readonly Item[];
+  readonly #getInput: ExpressionContext['input'];
   readonly #getCurrentItem: () => Item | undefined;
 
-  constructor(getInput: () => readonly Item[], getCurrentItem: () => Item | undefined) {
+  constructor(getInput: ExpressionContext['input'], getCurrentItem: () => Item | undefined) {
     this.#getInput = getInput;
     this.#getCurrentItem = getCurrentItem;
   }
 
   all(): readonly Item[] {
-    return this.#getInput();
+    return this.#getInput('main', 0);
+  }
+
+  itemFrom(port: unknown, slot: unknown, index: unknown): Item | undefined {
+    if (typeof port !== 'string' || typeof slot !== 'number' || typeof index !== 'number') return undefined;
+    return this.#getInput(port, slot)[index];
   }
 
   first(): Item | undefined {
@@ -150,7 +160,7 @@ export function createDataProxy(ctx: ExpressionContext): Record<string, unknown>
     $json: ctx.item.json,
     $binary: ctx.item.binary ?? {},
     $item: ctx.item,
-    $input: new InputProxy(inputItems, currentItem),
+    $input: new InputProxy(ctx.input, currentItem),
     $items: new HostFunction('$items', (nodeName, outputIndex, runIndex) => {
       if (typeof nodeName !== 'string') {
         return inputItems();

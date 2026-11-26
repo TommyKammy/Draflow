@@ -7,7 +7,7 @@ export interface ExpressionContext {
   input: (port?: string, index?: number) => readonly Item[];
   nodeOutput: (nodeName: string, outputIndex?: number, runIndex?: number) => readonly Item[];
   /** Resolves the item in `nodeName` that corresponds to the current item's lineage. */
-  resolveItem?: (nodeName: string) => Item | undefined;
+  resolveItem?: (nodeName: string, itemIndex?: number, port?: string, slot?: number) => Item | undefined;
   nodeNames?: readonly string[];
   vars?: Readonly<Record<string, JsonValue>>;
   timezone?: string;

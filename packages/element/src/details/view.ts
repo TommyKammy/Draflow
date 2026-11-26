@@ -1,13 +1,18 @@
 import { getVisibleParameters, isParameterVisible, resolveNodeSettings, type ExecutionEngine, type NodeRegistry, type NodeSettings,
-  type ParamSchema, type ParamValue, type PortData, type TaskData, type WorkflowNode } from '@draflow/core';
+  type ParamSchema, type ParamValue, type Item, type TaskData, type WorkflowNode } from '@draflow/core';
+import { choice, dataPanel, entries } from './data.js';
+import { fieldPath, type Mapping } from './mapping.js';
 import { button, renderFields } from './fields.js';
 
 interface Actions {
   registry: NodeRegistry;
   engine: ExecutionEngine;
   get(id: string): WorkflowNode | undefined;
-  task(id: string): TaskData | undefined;
-  output(id: string): PortData | undefined;
+  tasks(id: string): TaskData[];
+  hasOutput(id: string): boolean;
+  ancestors(id: string): string[];
+  pinned(id: string): Item[] | undefined;
+  pin(id: string, items: Item[] | undefined): void;
   canEdit(): boolean;
   commit(node: WorkflowNode, control?: HTMLElement): void;
   duplicate(id: string): void;
@@ -81,6 +86,67 @@ export function nodeDetails(actions: Actions) {
   sections[1]!.append(mode, form, feedback);
   dialog.append(header, tabs, panes);
   let draft: WorkflowNode | undefined;
+  const previews: (() => void)[] = [];
+  let runIndex = -1;
+  const runChoice = document.createElement('span');
+  header.insertBefore(runChoice, step);
+  let ancestor = '', append = false, dragging = false;
+  let mapping: Mapping | undefined;
+  let mappingTask: TaskData | undefined;
+  const mappingControls = document.createElement('div');
+  const pinControls = document.createElement('div');
+  const inputPanel = dataPanel('Input', () => {
+    clearMapping();
+    renderMapping();
+    // Refresh previews without replacing controls containing uncommitted text.
+    for (const update of previews) update();
+  });
+  const outputPanel = dataPanel('Output', () => {});
+  sections[0]!.append(inputPanel.root, mappingControls);
+  sections[2]!.append(outputPanel.root, pinControls);
+  function task() { return draft && actions.tasks(draft.id)[runIndex]; }
+  function clearMapping() {
+    mapping = undefined;
+    dragging = false;
+    delete dialog.dataset.mapping;
+  }
+  function renderMapping() {
+    mappingControls.replaceChildren();
+    const selected = inputPanel.selection();
+    const t = task();
+    if (!draft || !t || !selected.item || !actions.canEdit()) { clearMapping(); return; }
+    const names = actions.ancestors(draft.id);
+    const source = choice('Map from', [['', 'Current input'], ...names.map(n => [n, n] as [string, string])], ancestor, v => {
+      ancestor = v; clearMapping(); renderMapping();
+    });
+    const position = choice('Mapping insertion', [['replace', 'Replace value'], ['cursor', 'Insert at cursor']],
+      append ? 'cursor' : 'replace', v => { append = v === 'cursor'; });
+    mappingControls.append(source, position);
+    const item = ancestor ? actions.engine.previewAncestor(t, ancestor, selected.index, selected.port, selected.slot) : selected.item;
+    if (!item) { mappingControls.append('No linked item'); clearMapping(); return; }
+    const fields = document.createElement('div');
+    fields.className = 'mapping-fields';
+    for (const { path, value } of entries(item.json)) {
+      const key = fieldPath(path);
+      function select() {
+        mapping = { path, ...(ancestor && { ancestor }),
+          ...(selected.port !== 'main' || selected.slot !== 0 ? { input: { port: selected.port, slot: selected.slot } } : {}) };
+        dialog.dataset.mapping = 'true';
+        for (const b of fields.querySelectorAll('button')) b.setAttribute('aria-pressed', String(b === field));
+      }
+      const field = button(key, select);
+      field.setAttribute('aria-pressed', String(mapping?.ancestor === (ancestor || undefined) && fieldPath(mapping?.path ?? []) === key));
+      field.title = JSON.stringify(value);
+      field.draggable = true;
+      field.ondragstart = e => {
+        select(); dragging = true;
+        e.dataTransfer?.setData('text/plain', key);
+      };
+      field.ondragend = () => { dragging = false; };
+      fields.append(field);
+    }
+    mappingControls.append(fields);
+  }
   let pending = false;
   let fieldNames = '';
   const modes = new Map<string, { fixed: ParamValue; expression: ParamValue }>();
@@ -134,6 +200,10 @@ export function nodeDetails(actions: Actions) {
     editingControl = undefined;
     pending = false;
     draft = undefined;
+    clearMapping(); mappingTask = undefined; mappingControls.replaceChildren();
+    previews.length = 0;
+    runIndex = -1; ancestor = ''; append = false;
+    inputPanel.reset(); outputPanel.reset();
     modes.clear();
     discard.hidden = true;
     dialog.close();
@@ -146,6 +216,7 @@ export function nodeDetails(actions: Actions) {
     fieldNames = signature(node);
     const type = actions.registry.get(node.type, node.typeVersion);
     form.replaceChildren();
+    previews.length = 0;
     const fields = document.createElement('fieldset');
     fields.disabled = !actions.canEdit();
     form.append(fields);
@@ -153,12 +224,14 @@ export function nodeDetails(actions: Actions) {
     switches[0]!.setAttribute('aria-pressed', String(!settingsMode));
     switches[1]!.setAttribute('aria-pressed', String(settingsMode));
     if (!type) { fields.textContent = node.type; return; }
-    const context = { modes, canRedraw, expression: actions.engine.expression, type, node, changed,
+    const context = { modes, canRedraw, previews, expression: actions.engine.expression, type, node, changed,
       preview(value: string) {
-        const task = actions.task(node.id);
-        if (!task?.input?.main?.[0]?.length) return 'No preview input';
-        try { return JSON.stringify(actions.engine.preview(task, value, 0, node.parameters)) ?? 'undefined'; }
-        catch (e) { return String(e); }
+        const t = task(), selected = inputPanel.selection();
+        if (!t || !selected.item) return { text: 'No preview input' };
+        try {
+          const result = actions.engine.preview(t, value, selected.index, node.parameters, selected.port, selected.slot);
+          return { text: JSON.stringify(result) ?? 'undefined', type: result === null ? 'null' : Array.isArray(result) ? 'array' : typeof result };
+        } catch (e) { return { text: String(e) }; }
       },
     };
     if (settingsMode) {
@@ -180,28 +253,44 @@ export function nodeDetails(actions: Actions) {
     } else {
       const schemas = getVisibleParameters(type, node);
       if (!schemas.length) fields.textContent = 'No parameters';
-      renderFields(fields, schemas, node.parameters, context);
+      renderFields(fields, schemas, node.parameters, { ...context, mapping: () => mapping,
+        insertAtCursor: () => append, dragging: () => dragging });
     }
-  }
-  function dataPane(section: HTMLElement, name: string, data?: PortData) {
-    const heading = document.createElement('h3');
-    heading.textContent = name;
-    section.replaceChildren(heading);
-    for (const [port, slots] of Object.entries(data ?? {})) slots.forEach((items, index) => {
-      const label = document.createElement('h4');
-      label.textContent = port + '[' + index + '] · ' + (items?.length ?? 0);
-      const pre = document.createElement('pre');
-      pre.textContent = JSON.stringify((items ?? []).slice(0, 100).map(i => i.json), null, 2);
-      section.append(label, pre);
-    });
   }
   function refreshData() {
     if (!draft) return;
+    const id = draft.id;
     step.disabled = duplicate.disabled = !actions.canEdit();
-    const task = actions.task(draft.id);
-    dataPane(sections[0]!, 'Input', task?.input);
-    dataPane(sections[2]!, 'Output', actions.output(draft.id));
-    feedback.textContent = task?.error?.message ?? '';
+    const tasks = actions.tasks(id).filter(Boolean);
+    if (!tasks.some(t => t.runIndex === runIndex)) runIndex = tasks.at(-1)?.runIndex ?? -1;
+    runChoice.replaceChildren();
+    if (tasks.length) runChoice.append(choice('Run index', tasks.map(t => [String(t.runIndex), 'Run ' + t.runIndex]),
+      String(runIndex), v => {
+        runIndex = Number(v); inputPanel.reset(); outputPanel.reset(); clearMapping();
+        refreshData(); for (const update of previews) update();
+      }));
+    const t = task();
+    inputPanel.set(t?.input);
+    const output = actions.hasOutput(id) ? t?.output : undefined;
+    const pinned = actions.pinned(id);
+    outputPanel.set(output ?? (pinned !== undefined ? { main: [pinned] } : undefined));
+    if (mappingTask !== t || !actions.canEdit()) {
+      mappingTask = t;
+      renderMapping();
+    }
+    pinControls.replaceChildren();
+    const type = actions.registry.get(draft.type, draft.typeVersion);
+    const ports = type?.ports.outputs ?? [];
+    const pinnable = ports.length === 1 && ports[0]?.type === 'main' && draft.settings?.onError !== 'errorOutput' &&
+      (!output || (Object.keys(output).every(k => k === 'main') && (output.main?.length ?? 0) <= 1));
+    const items = output?.main?.[0];
+    const pin = button(pinned !== undefined ? 'Unpin' : 'Pin output', () => {
+      if (flush(true)) actions.pin(id, pinned !== undefined ? undefined : items ?? undefined);
+    });
+    pin.disabled = !actions.canEdit() || (pinned === undefined && (!pinnable || !items || t?.status !== 'success'));
+    pinControls.append(pin);
+    if (!pinnable) pinControls.append(' Pinning requires a single main[0] output.');
+    feedback.textContent = t?.error?.message ?? '';
   }
   function refresh() { refreshData(); renderForm(); }
   return { dialog, close, refresh, refreshData, flush,

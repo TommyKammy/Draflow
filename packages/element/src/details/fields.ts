@@ -1,3 +1,4 @@
+import { insertMapping, type Mapping } from './mapping.js';
 import { isPlainObject, isParameterVisible, type ExpressionEngine, type JsonObject, type JsonValue,
   type NodeType, type ParamSchema, type ParamValue, type WorkflowNode } from '@draflow/core';
 
@@ -18,11 +19,15 @@ export function group(title: string) {
 type Values = Record<string, ParamValue>;
 interface Context {
   expression: ExpressionEngine;
-  preview(value: string): string;
+  previews: (() => void)[];
+  preview(value: string): { text: string; type?: string };
   node: WorkflowNode;
   type: NodeType;
   modes: Map<string, { fixed: ParamValue; expression: ParamValue }>;
   canRedraw(removing?: HTMLElement): boolean;
+  mapping?: () => Mapping | undefined;
+  insertAtCursor?: () => boolean;
+  dragging?: () => boolean;
   changed(redraw: boolean, control?: HTMLElement): void;
 }
 
@@ -120,6 +125,40 @@ export function renderFields(parent: HTMLElement, schemas: ParamSchema[], values
       toggle.setAttribute('aria-label', field.label + ' · ' + toggle.textContent);
       parent.append(toggle);
     }
+    function bindMapping(control: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement) {
+      const dataPath = field.type === 'string' ? field.requiresDataPath : undefined;
+      if (!ctx.mapping || (field.noExpression && !dataPath)) return;
+      function insert() {
+        const source = ctx.mapping?.();
+        if (!source || !ctx.canRedraw()) return;
+        const current = currentValue();
+        const text = typeof current === 'string' ? current : current === undefined ? '' : JSON.stringify(current);
+        let range: [number, number] | undefined;
+        if (ctx.insertAtCursor?.()) {
+          const start = 'selectionStart' in control ? control.selectionStart : null;
+          const end = 'selectionEnd' in control ? control.selectionEnd : null;
+          range = [start ?? text.length, end ?? text.length];
+        }
+        const next = insertMapping(source, text, range, dataPath);
+        if (!dataPath && ctx.expression.validate(next).length) {
+          control.setCustomValidity('Choose an insertion point outside the expression.');
+          control.reportValidity(); control.setCustomValidity('');
+          return;
+        }
+        if (constrained && !expressionValue) {
+          ctx.modes.set(JSON.stringify(key), { fixed: current, expression: next });
+        }
+        write(next, true);
+      }
+      const apply = button('Insert', insert);
+      apply.className = 'insert-mapping';
+      apply.setAttribute('aria-label', 'Insert into ' + field.label);
+      parent.append(apply);
+      control.ondragover = e => { if (ctx.dragging?.()) e.preventDefault(); };
+      control.ondrop = e => {
+        if (ctx.dragging?.()) { e.preventDefault(); insert(); }
+      };
+    }
     if (!expressionValue && (field.type === 'select' || field.type === 'multiSelect') && Array.isArray(field.options)) {
       const select = document.createElement('select');
       select.name = field.name;
@@ -135,6 +174,7 @@ export function renderFields(parent: HTMLElement, schemas: ParamSchema[], values
       select.required = field.required ?? false;
       select.onchange = () => write(select.multiple ? [...select.selectedOptions].map(o => o.value) : select.value);
       label.append(select);
+      bindMapping(select);
       continue;
     }
 
@@ -154,7 +194,17 @@ export function renderFields(parent: HTMLElement, schemas: ParamSchema[], values
     text.placeholder = field.placeholder ?? '';
     text.value = field.type === 'json' && !expressionValue ? JSON.stringify(value, null, 2) ?? '' : String(value ?? '');
     const preview = document.createElement('small');
+    function updatePreview(source: string) {
+      const result = ctx.preview(source);
+      preview.textContent = result.text;
+      if (result.type) preview.dataset.type = result.type;
+      else delete preview.dataset.type;
+    }
+    ctx.previews.push(() => {
+      if (text.validity.valid && text.value.startsWith('=') && !field.noExpression) updatePreview(text.value);
+    });
     function read() {
+      delete preview.dataset.type;
       text.setCustomValidity('');
       text.removeAttribute('aria-invalid');
       try {
@@ -165,7 +215,7 @@ export function renderFields(parent: HTMLElement, schemas: ParamSchema[], values
         else if (source.startsWith('=') && !field.noExpression) {
           const issue = ctx.expression.validate(source)[0];
           if (issue) throw new Error(issue.message);
-          preview.textContent = ctx.preview(source);
+          updatePreview(source);
         } else if (field.type === 'json') next = source ? JSON.parse(source) as JsonValue : undefined;
         if (!source.startsWith('=')) preview.textContent = '';
         if (text.validity.valid) write(next, false, text);
@@ -180,10 +230,12 @@ export function renderFields(parent: HTMLElement, schemas: ParamSchema[], values
     if (expressionValue) {
       const issue = ctx.expression.validate(value)[0];
       if (issue) { text.setCustomValidity(issue.message); text.setAttribute('aria-invalid', 'true'); }
-      preview.textContent = issue?.message ?? ctx.preview(value);
+      if (issue) preview.textContent = issue.message;
+      else updatePreview(value);
     }
     text.oninput = read;
     label.append(text);
     parent.append(preview);
+    bindMapping(text);
   }
 }

@@ -43,8 +43,15 @@ card or an edge and press Delete to remove it. The toolbar supports Undo and Red
 Ctrl/Cmd+D duplicates a selection and Ctrl/Cmd+C/V copies and pastes a subgraph.
 Double-click a card or focus it and press Enter to open its details. Edit parameters
 or settings, then choose **Execute step** to run through that node. Input and Output
-show each port separately. Use expressions such as `={{ $json.amount }}` to preview
-a value against the first input item from the last execution.
+show each port separately. Choose a run, port, and item to inspect its data in
+Schema, Table, or JSON. Table pages contain up to 100 rows.
+
+In **Map from**, choose the current input or an upstream node. Select a field,
+then use **Insert** at the destination parameter, or drag the field onto it.
+**Insert at cursor** embeds a value in text. **Replace value** preserves the
+source type. For example, `={{ $('Source').item.json.amount }}` follows the
+selected item's lineage through a Filter. **Pin output** saves a single main
+output (including an empty array) in the workflow for subsequent runs.
 
 The demo saves edits in localStorage after 500 ms and restores them on reload.
 Embedded hosts can supply their own `ports.storage` or listen for `draflow-change`.
