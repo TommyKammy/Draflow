@@ -48,7 +48,11 @@ pnpm size
 AI agents, 1,000 integrations, forms, evaluations, RBAC/SSO, queue mode,
 collaboration, version history, and enterprise features.
 
-## License note
+## License
+
+Draflow is released under the [MIT License](LICENSE).
+
+### n8n notice
 
 n8n is licensed under the Sustainable Use License, not an OSI license.
 Draflow is a clean-room implementation based on observed behavior and public
