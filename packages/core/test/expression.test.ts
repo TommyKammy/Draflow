@@ -14,6 +14,7 @@ const primary: Item = {
       { name: 'Alice', score: 10 },
       { name: 'Bob', score: 20 },
     ],
+    tags: ['a', 'b'],
   },
 };
 
@@ -72,7 +73,7 @@ describe('ExpressionEngine', () => {
   it('supports string and object extensions', () => {
     expect(evaluate('={{ $json.name.toUpperCase() }}')).toBe('ALICE');
     expect(evaluate('={{ "a,b,c".split(",").length }}')).toBe(3);
-    expect(evaluate('={{ $json.keys() }}')).toEqual(['name', 'age', 'active', 'nested', 'items', 'people']);
+    expect(evaluate('={{ $json.keys() }}')).toEqual(['name', 'age', 'active', 'nested', 'items', 'people', 'tags']);
     expect(evaluate('={{ $json.hasField("age") }}')).toBe(true);
     expect(evaluate('={{ $json.items.sum() }}')).toBe(6);
     expect(evaluate('={{ $json.items.average() }}')).toBe(2);
@@ -100,6 +101,8 @@ describe('ExpressionEngine', () => {
     expect(evaluate('={{ $json.nested?.missing?.deep ?? "fallback" }}')).toBe('fallback');
     expect(evaluate('={{ $json.maybe?.() ?? "none" }}')).toBe('none');
     expect(() => evaluate('={{ $json.nested?.missing.deep }}')).toThrow();
+    expect(evaluate('={{ $json.tags?.map?.(x => x.toUpperCase()) }}')).toEqual(['A', 'B']);
+    expect(evaluate('={{ " a ".trim?.() }}')).toBe('a');
   });
 
   it('builds objects and arrays', () => {

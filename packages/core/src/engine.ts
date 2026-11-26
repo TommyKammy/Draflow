@@ -824,10 +824,16 @@ export class ExecutionEngine {
       if (allowed !== undefined && !allowed.has(connection.to.node)) continue;
 
       const items = portItems(output, connection.from.port, connection.from.index);
-      if (items.length === 0) continue;
 
       const target = graph.nodes.get(connection.to.node);
       if (target === undefined) continue;
+
+      const targetType = this.registry.get(target.type, target.typeVersion);
+      const inputCount = targetType?.ports.inputs.length ?? 0;
+      const incomingCount = graph.incoming.get(target.id)?.length ?? 0;
+      const synchronizes = inputCount > 1;
+
+      if (items.length === 0 && !synchronizes) continue;
 
       let entry = waiting.get(target.id);
       if (entry === undefined) {
@@ -842,7 +848,13 @@ export class ExecutionEngine {
         waiting.set(target.id, entry);
       }
 
-      appendPortItems(entry.input, connection.to.port, connection.to.index, items);
+      if (items.length > 0) {
+        appendPortItems(entry.input, connection.to.port, connection.to.index, items);
+      } else {
+        const ports = (entry.input[connection.to.port] ??= []);
+        ports[connection.to.index] ??= [];
+      }
+
       entry.source[connection.to.index] = {
         node: node.id,
         port: connection.from.port,
@@ -850,7 +862,6 @@ export class ExecutionEngine {
         runIndex,
       };
 
-      const incomingCount = graph.incoming.get(target.id)?.length ?? 0;
       if (incomingCount <= 1 && isReady(target, this.registry, entry.input)) {
         fillOptionalInputs(target, this.registry, entry.input);
         if (!queued.has(entry) && (allowed === undefined || allowed.has(target.id))) {

@@ -1,5 +1,6 @@
 import {
   isPlainObject,
+  isUnsafeObjectKey,
   toJsonValue,
   type FilterCondition,
   type FilterOperator,
@@ -29,13 +30,11 @@ export function toJson(value: unknown): JsonValue {
   return toJsonValue(value);
 }
 
-const UNSAFE_PATH_SEGMENTS = new Set(['__proto__', 'prototype', 'constructor']);
-
 export function getPath(value: unknown, path: string): unknown {
   const parts = path.split('.').filter((part) => part !== '');
   let current: unknown = value;
   for (const part of parts) {
-    if (UNSAFE_PATH_SEGMENTS.has(part)) return undefined;
+    if (isUnsafeObjectKey(part)) return undefined;
     if (Array.isArray(current)) {
       const index = Number(part);
       if (!Number.isInteger(index)) return undefined;
@@ -55,7 +54,7 @@ export function setPath(target: JsonObject, path: string, value: JsonValue): voi
   if (parts.length === 0) return;
 
   for (const part of parts) {
-    if (UNSAFE_PATH_SEGMENTS.has(part)) {
+    if (isUnsafeObjectKey(part)) {
       throw new Error(`Unsafe field path segment "${part}"`);
     }
   }

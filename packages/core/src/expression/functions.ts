@@ -615,6 +615,53 @@ function base64Decode(value: string): string {
   return new TextDecoder().decode(bytes);
 }
 
+const STRING_METHODS = new Set([
+  'toUpperCase', 'toLowerCase', 'trim', 'trimStart', 'trimEnd', 'split', 'replace',
+  'replaceAll', 'includes', 'startsWith', 'endsWith', 'slice', 'substring', 'padStart',
+  'padEnd', 'repeat', 'indexOf', 'lastIndexOf', 'charAt', 'length', 'isEmpty', 'isNotEmpty',
+  'toNumber', 'toFloat', 'toInt', 'toBoolean', 'toJsonString', 'parseJson', 'toDateTime',
+  'toDate', 'base64Encode', 'base64Decode', 'urlEncode', 'urlDecode', 'isEmail', 'isUrl',
+  'isNumeric', 'isDomain', 'toSentenceCase', 'toSnakeCase', 'toTitleCase', 'removeTags',
+  'removeMarkdown', 'replaceSpecialChars', 'extractEmail', 'extractDomain', 'extractUrl',
+  'extractUrlPath', 'quote', 'toString',
+]);
+
+const ARRAY_METHODS = new Set([
+  'length', 'first', 'last', 'isEmpty', 'isNotEmpty', 'join', 'slice', 'concat', 'includes',
+  'indexOf', 'reverse', 'map', 'flatMap', 'filter', 'find', 'findIndex', 'some', 'every',
+  'forEach', 'reduce', 'flat', 'sort', 'unique', 'compact', 'sum', 'min', 'max', 'average',
+  'chunk', 'difference', 'intersection', 'union', 'append', 'pluck', 'fieldNames', 'merge',
+  'toJsonString', 'toString',
+]);
+
+const NUMBER_METHODS = new Set([
+  'ceil', 'floor', 'round', 'abs', 'isInteger', 'isEven', 'isOdd', 'toBoolean', 'toDateTime',
+  'toDate', 'toNumber', 'toInt', 'format', 'toString', 'isEmpty',
+]);
+
+const BOOLEAN_METHODS = new Set(['toNumber', 'toString', 'toBoolean', 'isEmpty']);
+
+const OBJECT_METHODS = new Set([
+  'keys', 'values', 'hasField', 'removeField', 'removeFieldsContaining', 'keepFieldsContaining',
+  'isEmpty', 'isNotEmpty', 'compact', 'toJsonString', 'toString',
+]);
+
+const DATE_METHODS = new Set([
+  'format', 'toFormat', 'toISO', 'toMillis', 'toNumber', 'plus', 'minus', 'diffTo',
+  'diffToNow', 'beginningOf', 'endOfMonth', 'isWeekend', 'isDst', 'isBetween', 'toString',
+  'isEmpty',
+]);
+
+export function hasExtensionMethod(receiver: unknown, name: string): boolean {
+  if (typeof receiver === 'string') return STRING_METHODS.has(name);
+  if (typeof receiver === 'number') return NUMBER_METHODS.has(name);
+  if (typeof receiver === 'boolean') return BOOLEAN_METHODS.has(name);
+  if (Array.isArray(receiver)) return ARRAY_METHODS.has(name);
+  if (receiver instanceof DraflowDateTime) return DATE_METHODS.has(name);
+  if (isPlainObject(receiver)) return OBJECT_METHODS.has(name);
+  return false;
+}
+
 function unknownMethod(name: string, type: string, ctx: ExtensionContext): ExpressionError {
   return new ExpressionError(`Unknown ${type} method "${name}"`, { expression: ctx.source });
 }

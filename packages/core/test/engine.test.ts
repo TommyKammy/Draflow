@@ -653,6 +653,17 @@ describe('ExecutionEngine', () => {
     expect(result.error?.message).toMatch(/limit of 2/);
   });
 
+  it('rejects unsafe node ids before execution', () => {
+    const wf = workflow(
+      [node('__proto__', triggerType.type, 'Unsafe', 0)],
+      [],
+    );
+
+    expect(() => new ExecutionEngine({ registry }).run(wf)).toThrow(/Unsafe node id/);
+    expect(({} as Record<string, unknown>)['0']).toBeUndefined();
+    expect(([] as unknown[])[0]).toBeUndefined();
+  });
+
   it('stops runaway loops at the execution limit', async () => {
     const loopType: NodeType = {
       ...echoType,

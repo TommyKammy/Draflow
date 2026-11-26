@@ -355,6 +355,32 @@ describe('standard nodes', () => {
     expect(result.runData.i?.[0]?.output?.main?.[0]?.[0]?.binary).toEqual(binary);
   });
 
+  it('runs a merge when one input branch is empty', async () => {
+    const wf = workflow(
+      [
+        node('m', 'draflow.manualTrigger', 'Manual', 0),
+        node('n', 'draflow.noOp', 'Noop', 200),
+        node('f', 'draflow.filter', 'Filter', 200, {
+          conditions: {
+            combinator: 'and',
+            conditions: [{ left: '={{ $json.id }}', operator: 'gt', right: '5' }],
+          },
+        }),
+        node('merge', 'draflow.merge', 'Merge', 400, { mode: 'append' }),
+      ],
+      [
+        connect('m', 'n'),
+        connect('m', 'f'),
+        connect('n', 'merge', 'main', 0, 0),
+        connect('f', 'merge', 'main', 0, 1),
+      ],
+    );
+
+    const result = await run(wf, seed({ id: 1 }));
+    expect(result.status).toBe('success');
+    expect(result.runData.merge?.[0]?.output?.main?.[0]).toHaveLength(1);
+  });
+
   it('merges two branches by key', async () => {
     const wf = workflow(
       [

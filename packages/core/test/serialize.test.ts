@@ -117,6 +117,17 @@ describe('serialize', () => {
     expect(result.ok).toBe(true);
   });
 
+  it('rejects unsafe node ids during validation', () => {
+    const registry = new NodeRegistry().register(nodeType);
+    const workflow = createWorkflow({
+      nodes: [createNode({ id: '__proto__', type: 'test.node', name: 'Unsafe' })],
+    });
+
+    const result = validateWorkflow(workflow, registry);
+    expect(result.ok).toBe(false);
+    expect(result.issues.some((issue) => issue.code === 'UNSAFE_NODE_ID')).toBe(true);
+  });
+
   it('rejects duplicate names and unknown types as errors', () => {
     const registry = new NodeRegistry().register(nodeType);
     const workflow = createWorkflow({

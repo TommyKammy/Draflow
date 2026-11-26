@@ -18,7 +18,7 @@ import {
   ExpressionLimitError,
   ExpressionSecurityError,
 } from '../errors.js';
-import { callExtension } from './functions.js';
+import { callExtension, hasExtensionMethod } from './functions.js';
 import { HostFunction, InputProxy, NodeMap, NodeProxy } from './proxy.js';
 import { isPlainObject } from '../utils.js';
 
@@ -259,7 +259,9 @@ export class Evaluator {
         }
 
         if (call.optional && (property === undefined || property === null)) {
-          return { short: true, value: undefined };
+          if (!hasExtensionMethod(receiver.value, String(key))) {
+            return { short: true, value: undefined };
+          }
         }
 
         const args = call.args.map((argument) => this.evaluate(argument, scope));

@@ -2,6 +2,7 @@ import { WorkflowValidationError } from './errors.js';
 import type { NodeRegistry } from './registry.js';
 import type { Connection, ValidationIssue, ValidationResult, Workflow, WorkflowNode } from './types.js';
 import { isParameterVisible } from './parameters.js';
+import { isUnsafeObjectKey } from './utils.js';
 
 export function validateWorkflow(
   workflow: Workflow,
@@ -22,6 +23,15 @@ export function validateWorkflow(
   const names = new Set<string>();
 
   for (const node of workflow.nodes) {
+    if (isUnsafeObjectKey(node.id)) {
+      issues.push({
+        severity: 'error',
+        code: 'UNSAFE_NODE_ID',
+        message: `Unsafe node id "${node.id}"`,
+        nodeId: node.id,
+      });
+    }
+
     if (ids.has(node.id)) {
       issues.push({
         severity: 'error',

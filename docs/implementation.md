@@ -16,8 +16,8 @@
 | 実行 | スタック、waiting（複数入力）、runIndex、リトライ、エラー 3 モード、ピン、無効化、executeOnce、部分実行、実行制限 |
 | ノード | Manual / NoOp / Set / If / Filter / Merge / HTTP Request |
 | 永続化 | JSON の読み書き、検証、デフォルト適用 |
-| テスト | 76 tests（core 56 / nodes 20） |
-| サイズ | core 35.8 KB gzip + nodes 8.0 KB gzip = **43.8 KB gzip** |
+| テスト | 79 tests（core 58 / nodes 21） |
+| サイズ | core 36.6 KB gzip + nodes 7.9 KB gzip = **44.5 KB gzip** |
 
 ---
 
@@ -255,12 +255,12 @@ pnpm test
 ✓ packages/core/test/utils.test.ts         (2)
 ✓ packages/core/test/graph.test.ts         (4)
 ✓ packages/core/test/parameters.test.ts    (4)
-✓ packages/core/test/serialize.test.ts     (6)
+✓ packages/core/test/serialize.test.ts     (7)
 ✓ packages/core/test/expression.test.ts   (18)
-✓ packages/core/test/engine.test.ts       (22)
-✓ packages/nodes/test/nodes.test.ts       (20)
+✓ packages/core/test/engine.test.ts       (23)
+✓ packages/nodes/test/nodes.test.ts       (21)
 ──────────────────────────────────────────────
-76 tests passed
+79 tests passed
 ```
 
 型チェック:
@@ -283,20 +283,20 @@ pnpm size
 ```
 package        files      raw       gzip
 ------------------------------------------
-core              21  169.0 KB   35.8 KB
-nodes              9   27.3 KB    8.0 KB
+core              21  172.5 KB   36.6 KB
+nodes              9   27.3 KB    7.9 KB
 ------------------------------------------
-total                 196.3 KB   43.8 KB
+total                 199.8 KB   44.5 KB
 ```
 
 gzip はファイルごとの gzip の合計（保守的な見積もり）。
-設計目標の 250 KB に対して、コアは **43.8 KB**。
+設計目標の 250 KB に対して、コアは **44.5 KB**。
 
 ---
 
 ## 8.1 Codex レビュー対応
 
-PR #1 のレビュー指摘 13 件、追加 9 件、追加 5 件、追加 4 件、合計 31 件をすべて修正し、回帰テストを追加した。
+PR #1 のレビュー指摘 13 件、追加 9 件、追加 5 件、追加 4 件、追加 3 件、合計 34 件をすべて修正し、回帰テストを追加した。
 
 | 指摘 | 対応 |
 | --- | --- |
@@ -347,7 +347,15 @@ PR #1 のレビュー指摘 13 件、追加 9 件、追加 5 件、追加 4 件�
 | 複数入力の 2 番目以降が item 上限を回避する | 全 input port / index を検査 |
 | `CONTENT-TYPE` の大文字小文字で重複ヘッダーが付く | ヘッダー名を大文字小文字無視で確認 |
 
-テストは 73 件から **76 件**に増えている。
+追加レビュー（5 回目）:
+
+| 指摘 | 対応 |
+| --- | --- |
+| 空ブランチが Merge の入力として記録されない | 複数入力ノードでは空入力を完了として記録 |
+| optional call が拡張メソッドを短絡する | 既知の拡張メソッドを判定してから短絡 |
+| `__proto__` ノード ID が runData を汚染する | 危険なノード ID を検証・グラフ構築で拒否 |
+
+テストは 76 件から **79 件**に増えている。
 
 ## 9. デモ
 

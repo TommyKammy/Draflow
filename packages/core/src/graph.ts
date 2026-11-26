@@ -1,5 +1,6 @@
 import { WorkflowValidationError } from './errors.js';
 import type { Connection, Workflow, WorkflowNode } from './types.js';
+import { isUnsafeObjectKey } from './utils.js';
 
 export interface WorkflowGraph {
   workflow: Workflow;
@@ -20,6 +21,9 @@ export function buildGraph(workflow: Workflow): WorkflowGraph {
   for (const node of workflow.nodes) {
     if (nodes.has(node.id)) {
       throw new WorkflowValidationError(`Duplicate node id "${node.id}"`, { nodeId: node.id });
+    }
+    if (isUnsafeObjectKey(node.id)) {
+      throw new WorkflowValidationError(`Unsafe node id "${node.id}"`, { nodeId: node.id });
     }
     if (byName.has(node.name)) {
       throw new WorkflowValidationError(`Duplicate node name "${node.name}"`, { nodeId: node.id });
