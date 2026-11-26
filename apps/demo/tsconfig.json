@@ -1,5 +1,5 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": { "noEmit": true, "customConditions": [] },
-  "include": ["main.ts", "test/**/*.ts"]
+  "include": ["main.ts", "test/**/*.ts", "bench/**/*.ts"]
 }
