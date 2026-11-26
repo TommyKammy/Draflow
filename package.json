@@ -14,7 +14,8 @@
     "test:watch": "vitest",
     "size": "node scripts/size-report.mjs",
     "dev": "tsc -b tsconfig.json && pnpm --filter @draflow/demo dev",
-    "test:browser": "playwright test"
+    "test:browser": "playwright test",
+    "bench:canvas": "playwright test -c playwright.bench.config.ts"
   },
   "devDependencies": {
     "typescript": "7.0.2",

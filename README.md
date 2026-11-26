@@ -30,6 +30,14 @@ Manual → Set example to display one item containing `{"message":"Hello Draflow
 To test the production embed in Chromium, run `pnpm build`,
 `pnpm exec playwright install chromium`, then `pnpm test:browser`.
 
+Pan the canvas with Space + drag or the middle mouse button. Use Ctrl/Cmd + wheel
+to zoom around the pointer, or use the zoom and fit buttons. Click a node to
+select it, Shift-click to toggle another, or drag the background to select a region.
+With the canvas focused, `+` / `-` zoom, `0` restores 100%, and `1` fits the graph.
+
+After building, run `pnpm bench:canvas` to measure rendering, panning and zooming
+in the production embed. [M1 baseline and measurement conditions](docs/implementation.md#m1-canvas-baseline).
+
 ## Documents
 
 | Document | Contents |

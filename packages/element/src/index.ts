@@ -3,6 +3,7 @@ import {
   type EngineEvents, type ExecutionEngineOptions, type NodeType,
   type RunHandle, type RunOptions, type RunResult, type Workflow,
 } from '@draflow/core';
+import { createCanvas } from './canvas/view.js';
 import { styles } from './styles.js';
 
 export interface EditorOptions {
@@ -54,7 +55,8 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
   status.setAttribute('role', 'status');
   const output = document.createElement('pre');
   header.append(title, button);
-  shell.append(header, outputTitle, status, output);
+  const canvas = createCanvas(host, registry);
+  shell.append(header, canvas.panel, outputTitle, status, output);
   root.append(style, shell);
 
   function updateButton() {
@@ -72,6 +74,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
 
   function resetView() {
     title.textContent = workflow.name;
+    canvas.setWorkflow(workflow);
     failure = undefined;
     summary = undefined;
     output.textContent = '';
@@ -115,16 +118,31 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     if (disposed || readonly || active) throw new Error('Editor cannot start a run');
     const handle = engine.run(workflow, runOptions);
     active = handle;
+    canvas.scene.resetRun();
     output.textContent = '';
     failure = undefined;
     summary = undefined;
     refresh();
     subscriptions = [
       handle.on('run:start', detail => publish({ type: 'run:start', detail })),
-      handle.on('node:start', detail => publish({ type: 'node:start', detail })),
-      handle.on('node:finish', detail => publish({ type: 'node:finish', detail })),
+      handle.on('node:start', detail => {
+        canvas.scene.mark(detail.nodeId, 'running');
+        publish({ type: 'node:start', detail });
+      }),
+      handle.on('node:finish', detail => {
+        const count = Object.values(detail.task.output ?? {}).reduce(
+          (total, ports) => total + ports.reduce((sum, items) => sum + (items?.length ?? 0), 0), 0,
+        );
+        if (detail.task.status !== 'waiting') canvas.scene.mark(detail.nodeId, detail.task.status, count);
+        publish({ type: 'node:finish', detail });
+      }),
       handle.on('run:finish', detail => {
         if (active !== handle) return;
+        if (detail.result.status === 'error' || detail.result.status === 'canceled') {
+          for (const [id, card] of canvas.scene.cards) {
+            if (card.state === 'running') canvas.scene.mark(id, detail.result.status);
+          }
+        }
         detach();
         showResult(detail.result);
         refresh();
@@ -147,14 +165,18 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
       refresh();
     }
   };
+  canvas.setLocale(options.locale ?? 'en');
   resetView();
   return {
+    fitView: canvas.fitView,
+    focusNode: canvas.focusNode,
     run,
     setPresentation(settings: Pick<EditorOptions, 'locale' | 'theme' | 'readonly'>) {
       if (settings.theme !== undefined) shell.dataset.theme = settings.theme;
       if (settings.locale !== undefined) {
         labels = messages[settings.locale];
         shell.lang = settings.locale;
+        canvas.setLocale(settings.locale);
       }
       if (settings.readonly !== undefined) {
         readonly = settings.readonly;
@@ -176,6 +198,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
       disposed = true;
       abandon();
       button.onclick = null;
+      canvas.destroy();
       shell.remove();
       style.remove();
     },
