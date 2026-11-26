@@ -29,6 +29,11 @@ export const styles = `
   .canvas:focus-visible { outline:2px solid Highlight; outline-offset:-2px }
   .canvas.panning, .canvas.panning * { cursor:grabbing }
   .world { position:absolute; top:0; left:0; transform-origin:0 0; will-change:transform }
+  .group-frame {position:absolute;box-sizing:border-box;pointer-events:none;border:2px solid #708da5;border-radius:8px;background:color-mix(in srgb,#708da5 9%,transparent)}
+  .group-frame>div {display:flex;align-items:center;gap:4px;width:fit-content;max-width:100%;height:40px;padding:0 4px;pointer-events:auto}
+  .group-frame button {max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:Canvas;color:CanvasText;padding:.2rem .45rem}
+  .group-frame button+button {cursor:grab;touch-action:none}
+  .world .node-card[hidden] {display:none}
   .world svg { position:absolute; top:0; left:0; overflow:visible; pointer-events:none }
   .world path { fill:none; stroke:color-mix(in srgb, CanvasText 49%, Canvas); stroke-width:2 }
   .sticky-card { position:absolute; display:flex; flex-direction:column; box-sizing:border-box; overflow:hidden;

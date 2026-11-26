@@ -1,3 +1,4 @@
+import { groupLayer } from './groups.js';
 import { translator } from '../locale.js';
 import { notesOf } from '../store/notes.js';
 import { noteLayer } from './notes.js';
@@ -43,10 +44,46 @@ export function createCanvas(host: HTMLElement, registry: NodeRegistry, actions:
   const sticky = noteLayer(actions.enabled, () => scale, actions.openNote, value => actions.commit({ type: 'note', id: value.id, value }));
   scene.world.prepend(sticky.layer);
   let language: keyof typeof labels = 'en';
+  const overrides = new Map<string, boolean>();
+  const groups = groupLayer({
+    enabled: actions.enabled, scale: () => scale,
+    edit(id) {
+      const group = scene.groups?.find(g => g.id === id);
+      if (group) actions.editGroup(group);
+    },
+    toggle(id) {
+      const g = scene.groups?.find(g => g.id === id);
+      if (!g) return;
+      const collapsed = !scene.collapsed.has(id);
+      if (actions.enabled()) actions.commit({ type: 'group', id, value: { ...g, collapsed } });
+      else {
+        overrides.set(id, collapsed);
+        updateScene(actions.document());
+        select(new Set([...selected].filter(node => !scene.cards.get(node)?.element.hidden)));
+      }
+    },
+    preview(id) {
+      return scene.previewMove(new Set(scene.groups?.find(g => g.id === id)?.members));
+    },
+    move(id, offset) {
+      const positions = new Map<string, Point>();
+      for (const member of scene.groups?.find(g => g.id === id)?.members ?? []) {
+        const p = scene.cards.get(member)!.node.position;
+        positions.set(member, { x: p.x + offset.x, y: p.y + offset.y });
+      }
+      if (positions.size) actions.commit({ type: 'move', positions });
+    },
+  });
+  scene.positionGroup = groups.position;
+  scene.world.prepend(groups.layer);
+  function refreshGroups() {
+    groups.render(scene.groups ?? [], scene.boxes, scene.collapsed, translator(language));
+  }
   let lastMeta: Workflow['meta'];
   let lastNotes: ReturnType<typeof notesOf> = [];
   function updateScene(workflow: Workflow) {
-    scene.setWorkflow(workflow, registry);
+    scene.setWorkflow(workflow, registry, overrides);
+    refreshGroups();
     if (workflow.meta !== lastMeta) {
       lastMeta = workflow.meta;
       lastNotes = notesOf(workflow);
@@ -57,7 +94,7 @@ export function createCanvas(host: HTMLElement, registry: NodeRegistry, actions:
       scene.include(n.x + n.width, n.y + n.height);
     }
   }
-  function cancelEdit() { editing.cancel(); sticky.cancel(); }
+  function cancelEdit() { editing.cancel(); sticky.cancel(); groups.cancel(); }
   let minScale = 0.1;
   let fitting = true;
   let frame = 0;
@@ -110,6 +147,7 @@ export function createCanvas(host: HTMLElement, registry: NodeRegistry, actions:
     for (const id of selected) if (!ids.has(id)) scene.cards.get(id)?.element.setAttribute('aria-pressed', 'false');
     for (const id of ids) scene.cards.get(id)?.element.setAttribute('aria-pressed', 'true');
     selected = ids;
+    actions.selectionChanged();
     host.dispatchEvent(new CustomEvent('draflow-selection', {
       detail: { nodeIds: [...ids] }, bubbles: true, composed: true,
     }));
@@ -189,6 +227,7 @@ export function createCanvas(host: HTMLElement, registry: NodeRegistry, actions:
       const { start } = gesture;
       const ids = gesture.additive ? new Set(selected) : new Set<string>();
       for (const [id, card] of scene.cards) {
+        if (card.element.hidden) continue;
         const left = card.node.position.x * scale + x, top = card.node.position.y * scale + y;
         if (left <= Math.max(start.x, p.x) && left + cardWidth * scale >= Math.min(start.x, p.x) &&
             top <= Math.max(start.y, p.y) && top + cardHeight * scale >= Math.min(start.y, p.y)) ids.add(id);
@@ -222,6 +261,13 @@ export function createCanvas(host: HTMLElement, registry: NodeRegistry, actions:
   win.addEventListener('blur', () => { space = false; endGesture(); }, opts);
 
   surface.addEventListener('focusin', event => {
+    const groupElement = event.target instanceof Element && event.target.closest<HTMLElement>('.group-frame');
+    if (groupElement) {
+      editing.clearEdge();
+      select(new Set());
+      reveal(groupElement.offsetLeft, groupElement.offsetTop, Math.min(groupElement.offsetWidth, 212), 48);
+      return;
+    }
     const cardElement = event.target instanceof Element && event.target.closest<HTMLElement>('.sticky-card');
     if (cardElement) {
       editing.clearEdge();
@@ -273,6 +319,10 @@ export function createCanvas(host: HTMLElement, registry: NodeRegistry, actions:
   observer.observe(surface);
   return {
     panel, scene, fitView,
+    refreshGroups, focusGroup: groups.focus,
+    resetGroupView() {
+      if (overrides.size) { overrides.clear(); updateScene(actions.document()); select(new Set([...selected].filter(id => !scene.cards.get(id)?.element.hidden))); }
+    },
     selection: (): ReadonlySet<string> => selected,
     remove: editing.remove,
     cancelEdit,
@@ -305,7 +355,7 @@ export function createCanvas(host: HTMLElement, registry: NodeRegistry, actions:
       cancelEdit();
       editing.clearEdge();
       updateScene(workflow);
-      const ids = newIds ?? new Set([...selected].filter(id => scene.cards.has(id)));
+      const ids = new Set([...(newIds ?? selected)].filter(id => scene.cards.has(id) && !scene.cards.get(id)!.element.hidden));
       select(ids);
       for (const id of ids) scene.cards.get(id)?.element.setAttribute('aria-pressed', 'true');
     },
@@ -313,12 +363,14 @@ export function createCanvas(host: HTMLElement, registry: NodeRegistry, actions:
       cancelEdit();
       editing.clearEdge();
       endGesture();
+      overrides.clear();
       select(new Set());
       updateScene(workflow);
       fitView();
     },
     setLocale(locale: keyof typeof labels) {
       language = locale;
+      refreshGroups();
       if (lastNotes?.length) sticky.render(lastNotes, translator(locale));
       const [name, out, into, fit] = labels[locale];
       surface.setAttribute('aria-label', name);
@@ -330,6 +382,13 @@ export function createCanvas(host: HTMLElement, registry: NodeRegistry, actions:
     focusNode(id: string) {
       const card = scene.cards.get(id);
       if (!card) return;
+      if (card.element.hidden) {
+        const group = scene.owner.get(id)!;
+        const box = scene.boxes.get(group)!;
+        reveal(box.x, box.y, box.width, box.height);
+        groups.focus(group);
+        return;
+      }
       center(card.node.position);
       select(new Set([id]));
       card.element.focus({ preventScroll: true });

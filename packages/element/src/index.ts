@@ -1,3 +1,4 @@
+import { groupDialog } from './group-dialog.js';
 import { noteDialog } from './sticky.js';
 import {
   createId, ExecutionEngine, NodeRegistry, buildGraph, createWorkflow, downstreamOf, upstreamOf,
@@ -126,7 +127,13 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     if (value) canvas.focusNote(id);
     else addNote.focus();
   });
+  const groupForm = groupDialog((id, value) => {
+    commit({ type: 'group', id, ...(value && { value }) });
+    if (value) canvas.focusGroup(id);
+    else canvas.panel.querySelector<HTMLElement>('.canvas')?.focus();
+  });
   const canvas = createCanvas(host, registry, { enabled: canEdit, document: () => workflow, commit, undo, redo,
+    editGroup: g => groupForm.open(g, true, translator(locale())), selectionChanged: refreshEditing,
     openNote: note => sticky.open(note, true, canEdit(), translator(locale())),
     openDetails: id => details.open(id),
     createFrom: from => { if (canEdit()) creator.open(locale(), { from }); },
@@ -151,6 +158,10 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     sticky.open({ id: createId('note'), text: '', color: 'yellow', ...canvas.centerPoint(undefined, 208, 128), width: 208, height: 128 },
       false, true, translator(locale()));
   });
+  const group = tool(() => {
+    const members = [...canvas.selection()];
+    groupForm.open({ id: createId('group'), label: translator(locale())('Group'), members, collapsed: false }, false, translator(locale()));
+  });
   const tidy = tool(() => {
     if (!canEdit()) return;
     const positions = tidyPositions(workflow, canvas.selection());
@@ -161,8 +172,8 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
   const saveState = document.createElement('span');
   saveState.setAttribute('aria-live', 'polite');
   const retry = tool(() => saves.flush());
-  tools.append(add, connect, addNote, tidy, remove, backward, forward, saveState, retry);
-  shell.append(header, tools, canvas.panel, outputTitle, status, output, log.panel, sticky.dialog, wiring.dialog, creator.dialog, details.dialog);
+  tools.append(add, connect, addNote, group, tidy, remove, backward, forward, saveState, retry);
+  shell.append(header, tools, canvas.panel, outputTitle, status, output, log.panel, groupForm.dialog, sticky.dialog, wiring.dialog, creator.dialog, details.dialog);
   root.append(style, shell);
 
   function updateButton() {
@@ -184,6 +195,10 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     connect.disabled = !canEdit() || !workflow.nodes.length;
     addNote.textContent = translator(locale())('Add sticky note');
     addNote.disabled = !canEdit() || !canvas.notesEditable();
+    group.textContent = translator(locale())('Group nodes');
+    group.disabled = !canEdit() || !canvas.scene.groups || !canvas.selection().size ||
+      [...canvas.selection()].some(id => canvas.scene.owner.has(id));
+    canvas.refreshGroups();
     tidy.textContent = ja ? '自動整列' : 'Tidy Up';
     tidy.disabled = !canEdit() || !workflow.nodes.length;
     remove.disabled = !canEdit();
@@ -198,6 +213,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     if (next === workflow) return;
     if (source !== 'configure') lastControl = undefined;
     const previous = workflow;
+    groupForm.dialog.close();
     sticky.dialog.close();
     wiring.dialog.close();
     creator.dialog.close();
@@ -287,6 +303,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     previewInputs.clear();
     lastControl = undefined;
     title.textContent = workflow.name;
+    groupForm.dialog.close();
     sticky.dialog.close();
     wiring.dialog.close();
     creator.dialog.close();
@@ -302,6 +319,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
     for (const off of subscriptions) off();
     subscriptions = [];
     active = undefined;
+    if (!readonly) canvas.resetGroupView();
   }
 
   function abandon() {
@@ -371,6 +389,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
       throw error;
     }
     log.start(handle.id, snapshot.name);
+    groupForm.dialog.close();
     sticky.dialog.close();
     wiring.dialog.close();
     creator.dialog.close();
@@ -455,6 +474,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
       if (localeChanged || (settings.readonly !== undefined && settings.readonly !== readonly)) {
         details.flush();
         details.close();
+        groupForm.dialog.close();
         sticky.dialog.close();
         wiring.dialog.close();
         creator.dialog.close();
@@ -469,8 +489,9 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
         oldDialog.replaceWith(details.dialog);
         log.setLocale(translator(nextLocale));
       }
-      if (settings.readonly !== undefined) {
+      if (settings.readonly !== undefined && settings.readonly !== readonly) {
         readonly = settings.readonly;
+        canvas.resetGroupView();
         if (readonly) { canvas.cancelEdit(); active?.cancel(); }
       }
       refresh();

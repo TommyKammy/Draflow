@@ -1,3 +1,4 @@
+import { groupsOf, withGroups, type Group } from './groups.js';
 import { editNote, type Note } from './notes.js';
 import { createConnection, createId, createNode, type Connection, type Item, type NodePortRef, type NodeType, type WorkflowNode, type Workflow } from '@draflow/core';
 import type { Point } from '../canvas/scene.js';
@@ -21,6 +22,7 @@ export function creatorPorts(type: NodeType, placement: Placement) {
 }
 
 export type Edit =
+  | { type: 'group'; id: string; value?: Group }
   | { type: 'note'; id: string; value?: Note }
   | { type: 'configure'; node: WorkflowNode; removeErrorOutput?: boolean; removePin?: boolean }
   | { type: 'pin'; id: string; items: Item[] | undefined }
@@ -41,11 +43,22 @@ export function fragment(workflow: Workflow, ids: Set<string>): Workflow {
   const nodes = workflow.nodes.filter(n => ids.has(n.id));
   const connections = workflow.connections.filter(e => ids.has(e.from.node) && ids.has(e.to.node));
   const pinData = Object.fromEntries(Object.entries(workflow.pinData ?? {}).filter(([id]) => ids.has(id)));
-  return { schema: 'draflow/v1', id: 'clipboard', name: 'Selection', nodes, connections, settings: {}, pinData };
+  const copy: Workflow = { schema: 'draflow/v1', id: 'clipboard', name: 'Selection', nodes, connections, settings: {}, pinData };
+  const groups = groupsOf(workflow)?.filter(g => g.members.every(id => ids.has(id)));
+  return groups?.length ? withGroups(copy, groups) : copy;
 }
 
 export function applyEdit(w: Workflow, edit: Edit): Workflow {
   switch (edit.type) {
+    case 'group': {
+      const groups = groupsOf(w);
+      if (!groups) return w;
+      const remaining = groups.filter(g => g.id !== edit.id);
+      if (!edit.value) return remaining.length === groups.length ? w : withGroups(w, remaining);
+      const value = edit.value;
+      const next = withGroups(w, remaining.length === groups.length ? [...groups, value] : groups.map(g => g.id === edit.id ? value : g));
+      return groupsOf(next) ? next : w;
+    }
     case 'note': return editNote(w, edit.id, edit.value);
     case 'pin': {
       const pinData = { ...w.pinData };
@@ -80,6 +93,13 @@ export function applyEdit(w: Workflow, edit: Edit): Workflow {
       if (nodes.length === w.nodes.length && connections.length === w.connections.length) return w;
       const next = { ...w, nodes, connections };
       if (w.pinData) next.pinData = Object.fromEntries(Object.entries(w.pinData).filter(([id]) => !edit.nodes.has(id)));
+      const groups = groupsOf(w);
+      if (groups?.some(g => g.members.some(id => edit.nodes.has(id)))) {
+        return withGroups(next, groups.flatMap(g => {
+          const members = g.members.filter(id => !edit.nodes.has(id));
+          return members.length ? [{ ...g, members }] : [];
+        }));
+      }
       return next;
     }
     case 'add': {
@@ -114,6 +134,10 @@ export function applyEdit(w: Workflow, edit: Edit): Workflow {
         const copy = ids.get(id);
         if (copy) next.pinData = { ...next.pinData, [copy]: items };
       }
+      const copied = groupsOf(src), groups = groupsOf(w);
+      if (copied?.length && groups) return withGroups(next, [...groups, ...copied.map(g => ({
+        ...g, id: createId('group'), members: g.members.map(id => ids.get(id)!),
+      }))]);
       return next;
     }
   }
