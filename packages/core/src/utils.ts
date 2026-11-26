@@ -50,6 +50,19 @@ export function toJsonValue(value: unknown): JsonValue {
   if (type === 'string' || type === 'boolean') return value as string | boolean;
   if (type === 'number') return Number.isFinite(value as number) ? (value as number) : null;
   if (type === 'bigint') return (value as bigint).toString();
+
+  if (type === 'object') {
+    const candidate = value as { toJSON?: unknown };
+    if (typeof candidate.toJSON === 'function') {
+      try {
+        const converted = (candidate.toJSON as () => unknown).call(value);
+        if (converted !== value) return toJsonValue(converted);
+      } catch {
+        // Fall through to ordinary object conversion.
+      }
+    }
+  }
+
   if (Array.isArray(value)) return value.map((entry) => toJsonValue(entry));
   if (isRecord(value)) {
     const result: JsonObject = {};

@@ -99,7 +99,7 @@ export const setNode: NodeType = {
         if (name === '') continue;
 
         const type = String(assignment.type ?? 'auto');
-        const value = castValue(itemCtx.resolve(assignment.value), type);
+        const value = castValue(assignment.value, type);
         setPath(base, name, toJsonValue(value));
       }
 

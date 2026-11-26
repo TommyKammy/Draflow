@@ -127,6 +127,45 @@ describe('standard nodes', () => {
     expect(result.runData.s?.[0]?.output?.main?.[0]?.[0]?.json).toEqual({ nested: { x: 2 } });
   });
 
+  it('does not resolve assignment values twice', async () => {
+    const wf = workflow(
+      [
+        node('m', 'draflow.manualTrigger', 'Manual', 0),
+        node('s', 'draflow.set', 'Set', 200, {
+          mode: 'manual',
+          includeOtherFields: false,
+          assignments: [{ name: 'copied', value: '={{ $json.text }}' }],
+        }),
+      ],
+      [connect('m', 's')],
+    );
+
+    const result = await run(wf, seed({ text: '={{ 1 + 2 }}' }));
+    expect(result.status).toBe('success');
+    expect(result.runData.s?.[0]?.output?.main?.[0]?.[0]?.json).toEqual({
+      copied: '={{ 1 + 2 }}',
+    });
+  });
+
+  it('serializes date expression results as ISO strings', async () => {
+    const wf = workflow(
+      [
+        node('m', 'draflow.manualTrigger', 'Manual', 0),
+        node('s', 'draflow.set', 'Set', 200, {
+          mode: 'manual',
+          includeOtherFields: false,
+          assignments: [{ name: 'when', value: '={{ $now }}' }],
+        }),
+      ],
+      [connect('m', 's')],
+    );
+
+    const result = await run(wf, seed({}));
+    const when = result.runData.s?.[0]?.output?.main?.[0]?.[0]?.json.when;
+    expect(typeof when).toBe('string');
+    expect(when).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
   it('rejects prototype-related assignment paths', async () => {
     const wf = workflow(
       [
@@ -229,6 +268,34 @@ describe('standard nodes', () => {
     ]);
   });
 
+  it('preserves binary references through Filter and If', async () => {
+    const binary = {
+      file: { mimeType: 'text/plain', fileName: 'a.txt', id: 'bin-1' },
+    };
+    const wf = workflow(
+      [
+        node('m', 'draflow.manualTrigger', 'Manual', 0),
+        node('f', 'draflow.filter', 'Filter', 200, {
+          conditions: { combinator: 'and', conditions: [] },
+        }),
+        node('i', 'draflow.if', 'If', 400, {
+          conditions: {
+            combinator: 'and',
+            conditions: [{ left: '={{ String($json.id) }}', operator: 'equals', right: '1' }],
+          },
+        }),
+      ],
+      [connect('m', 'f'), connect('f', 'i')],
+    );
+
+    const result = await run(wf, {
+      triggerData: { main: [[{ json: { id: 1 }, binary }]] },
+    });
+    expect(result.status).toBe('success');
+    expect(result.runData.f?.[0]?.output?.main?.[0]?.[0]?.binary).toEqual(binary);
+    expect(result.runData.i?.[0]?.output?.main?.[0]?.[0]?.binary).toEqual(binary);
+  });
+
   it('merges two branches by key', async () => {
     const wf = workflow(
       [
@@ -296,6 +363,45 @@ describe('standard nodes', () => {
       ok: true,
       items: [1, 2],
     });
+  });
+
+  it('handles successful bodyless responses', async () => {
+    const wf = workflow(
+      [
+        node('m', 'draflow.manualTrigger', 'Manual', 0),
+        node('h', 'draflow.httpRequest', 'HTTP', 200, {
+          method: 'HEAD',
+          url: 'https://example.com/empty',
+        }),
+      ],
+      [connect('m', 'h')],
+    );
+
+    const noContent = await run(
+      wf,
+      seed({}),
+      async () =>
+        new Response(null, {
+          status: 204,
+          statusText: 'No Content',
+          headers: { 'content-type': 'application/json' },
+        }),
+    );
+    expect(noContent.status).toBe('success');
+    expect(noContent.runData.h?.[0]?.output?.main?.[0]?.[0]?.json).toEqual({});
+
+    const emptyOk = await run(
+      wf,
+      seed({}),
+      async () =>
+        new Response('', {
+          status: 200,
+          statusText: 'OK',
+          headers: { 'content-type': 'application/json' },
+        }),
+    );
+    expect(emptyOk.status).toBe('success');
+    expect(emptyOk.runData.h?.[0]?.output?.main?.[0]?.[0]?.json).toEqual({});
   });
 
   it('reports HTTP failures as node errors', async () => {

@@ -40,7 +40,7 @@ export const filterNode: NodeType = {
       });
       const loose = itemCtx.param<boolean>('looseTypeValidation', false);
       if (evaluateFilter(filter, loose)) {
-        output.push({ json: { ...input.json }, pairedItem: pairing(input, index) });
+        output.push({ ...input, pairedItem: pairing(input, index) });
       }
     });
 

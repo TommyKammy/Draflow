@@ -46,7 +46,7 @@ export const ifNode: NodeType = {
       const loose = itemCtx.param<boolean>('looseTypeValidation', false);
       const match = evaluateFilter(filter, loose);
       const target = match ? passed : failed;
-      target.push({ json: { ...input.json }, pairedItem: pairing(input, index) });
+      target.push({ ...input, pairedItem: pairing(input, index) });
     });
 
     return { main: [passed, failed] };

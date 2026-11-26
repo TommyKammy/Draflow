@@ -135,13 +135,25 @@ function normalizeHeaders(value: unknown): Record<string, string> {
 }
 
 async function readResponse(response: Response, format: string): Promise<JsonObject> {
+  if (response.status === 204 || response.status === 205 || response.status === 304) {
+    return {};
+  }
+
+  if (response.headers.get('content-length') === '0') {
+    return {};
+  }
+
+  const text = await response.text();
+  if (text.trim() === '') {
+    return {};
+  }
+
   if (format === 'text') {
-    return { data: await response.text() };
+    return { data: text };
   }
 
   const contentType = response.headers.get('content-type') ?? '';
   if (!contentType.includes('json')) {
-    const text = await response.text();
     try {
       return toJsonObject(JSON.parse(text));
     } catch {
@@ -149,7 +161,7 @@ async function readResponse(response: Response, format: string): Promise<JsonObj
     }
   }
 
-  const parsed: unknown = await response.json();
+  const parsed: unknown = JSON.parse(text);
   if (isPlainObject(parsed)) return toJsonValue(parsed) as JsonObject;
   return { data: toJsonValue(parsed) };
 }

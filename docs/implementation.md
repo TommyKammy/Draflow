@@ -16,8 +16,8 @@
 | 実行 | スタック、waiting（複数入力）、runIndex、リトライ、エラー 3 モード、ピン、無効化、executeOnce、部分実行、実行制限 |
 | ノード | Manual / NoOp / Set / If / Filter / Merge / HTTP Request |
 | 永続化 | JSON の読み書き、検証、デフォルト適用 |
-| テスト | 58 tests（core 46 / nodes 12） |
-| サイズ | core 35.0 KB gzip + nodes 7.8 KB gzip = **42.8 KB gzip** |
+| テスト | 68 tests（core 52 / nodes 16） |
+| サイズ | core 35.5 KB gzip + nodes 7.8 KB gzip = **43.3 KB gzip** |
 
 ---
 
@@ -252,14 +252,15 @@ pnpm test
 ```
 
 ```
-✓ packages/core/test/graph.test.ts        (4)
-✓ packages/core/test/parameters.test.ts   (4)
-✓ packages/core/test/serialize.test.ts    (4)
-✓ packages/core/test/expression.test.ts  (14)
-✓ packages/core/test/engine.test.ts      (12)
-✓ packages/nodes/test/nodes.test.ts        (7)
+✓ packages/core/test/utils.test.ts         (2)
+✓ packages/core/test/graph.test.ts         (4)
+✓ packages/core/test/parameters.test.ts    (4)
+✓ packages/core/test/serialize.test.ts     (6)
+✓ packages/core/test/expression.test.ts   (16)
+✓ packages/core/test/engine.test.ts       (20)
+✓ packages/nodes/test/nodes.test.ts       (16)
 ──────────────────────────────────────────────
-58 tests passed
+68 tests passed
 ```
 
 型チェック:
@@ -282,20 +283,20 @@ pnpm size
 ```
 package        files      raw       gzip
 ------------------------------------------
-core              21  163.8 KB   35.0 KB
-nodes              9   26.1 KB    7.8 KB
+core              21  167.3 KB   35.5 KB
+nodes              9   26.3 KB    7.8 KB
 ------------------------------------------
-total                 190.0 KB   42.8 KB
+total                 193.6 KB   43.3 KB
 ```
 
 gzip はファイルごとの gzip の合計（保守的な見積もり）。
-設計目標の 250 KB に対して、コアは **41 KB**。
+設計目標の 250 KB に対して、コアは **43.3 KB**。
 
 ---
 
 ## 8.1 Codex レビュー対応
 
-PR #1 のレビュー指摘 13 件をすべて修正し、回帰テストを追加した。
+PR #1 のレビュー指摘 13 件と追加 9 件、合計 22 件をすべて修正し、回帰テストを追加した。
 
 | 指摘 | 対応 |
 | --- | --- |
@@ -313,7 +314,21 @@ PR #1 のレビュー指摘 13 件をすべて修正し、回帰テストを追�
 | 文字列リテラルの `)` / `]` が区切りとして消費される | トークン種別を区別 |
 | 長さの違う fan-in が 1 回にマージされない | 複数接続の入力は stack が空になるまで待機 |
 
-テストは 45 件から **58 件**に増えている。
+追加レビュー（2 回目）:
+
+| 指摘 | 対応 |
+| --- | --- |
+| Set の代入値が二重に式評価される | `param('assignments')` の解決結果をそのまま使用 |
+| replay 時に dirty ノードの古いタスクが残る | dirty ノードと下流のタスクを事前削除 + current run index を追跡 |
+| Filter / If が `binary` を落とす | Item 全体を引き継ぐ |
+| Date / DraflowDateTime が `{ timeZone }` や `{}` になる | `toJSON()` を尊重 |
+| 204 / HEAD の bodyless JSON 応答が失敗する | 空 body を `{}` として処理 |
+| `"2" <= 2` / `"2" >= 2` が false になる | inclusive 比較で一貫した数値変換 |
+| optional chain の短絡が途中で切れる | チェーン全体で short-circuit を伝播 |
+| `alwaysOutputData` が他出力を消す | 既存出力を保持し、全出力が空のときだけ placeholder |
+| `Promise.reject(undefined)` が成功扱いになる | `failed` フラグで失敗を追跡 |
+
+テストは 58 件から **68 件**に増えている。
 
 ## 9. デモ
 

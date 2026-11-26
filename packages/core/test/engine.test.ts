@@ -521,6 +521,91 @@ describe('ExecutionEngine', () => {
     expect(replay.runData.loop).toHaveLength(3);
   });
 
+  it('removes stale tasks for dirty replay nodes', async () => {
+    let stopAt = 2;
+    const loop: NodeType = {
+      ...echoType,
+      type: 'test.replayStale',
+      execute(ctx) {
+        return ctx.runIndex >= stopAt ? [] : [...ctx.items];
+      },
+    };
+    const local = new NodeRegistry().registerAll([triggerType, loop]);
+    const wf = workflow(
+      [node('t', triggerType.type, 'Trigger', 0), node('loop', loop.type, 'Loop', 200)],
+      [connect('t', 'loop'), connect('loop', 'loop')],
+    );
+
+    const engine = new ExecutionEngine({ registry: local });
+    const first = await engine.run(wf).done;
+    expect(first.runData.loop).toHaveLength(3);
+
+    stopAt = 1;
+    const replay = await engine
+      .run(wf, { runData: first.runData, dirtyNodeIds: ['loop'] })
+      .done;
+
+    expect(replay.status).toBe('success');
+    expect(replay.runData.loop).toHaveLength(2);
+  });
+
+  it('treats a rejection with an undefined reason as a failure', async () => {
+    const rejecting: NodeType = {
+      ...echoType,
+      type: 'test.rejectUndefined',
+      execute() {
+        return Promise.reject(undefined);
+      },
+    };
+    const local = new NodeRegistry().registerAll([triggerType, rejecting]);
+    const wf = workflow(
+      [node('t', triggerType.type, 'Trigger', 0), node('r', rejecting.type, 'Reject', 200)],
+      [connect('t', 'r')],
+    );
+
+    const result = await execute(wf, {}, new ExecutionEngine({ registry: local }));
+    expect(result.status).toBe('error');
+    expect(result.runData.r?.[0]?.status).toBe('error');
+    expect(result.error?.message).toBe('undefined');
+  });
+
+  it('preserves a populated second output when alwaysOutputData is set', async () => {
+    const falseBranch: NodeType = {
+      ...branchType,
+      type: 'test.falseBranch',
+      execute(ctx) {
+        return {
+          main: [
+            [],
+            ctx.items.map((item, index) => ({
+              json: { ...item.json },
+              pairedItem: item.pairedItem ?? { item: index },
+            })),
+          ],
+        };
+      },
+    };
+    const local = new NodeRegistry().registerAll([triggerType, falseBranch, echoType]);
+    const branch = node('branch', falseBranch.type, 'Branch', 200, {
+      alwaysOutputData: true,
+    });
+
+    const wf = workflow(
+      [
+        node('t', triggerType.type, 'Trigger', 0),
+        branch,
+        node('false', echoType.type, 'False', 400),
+      ],
+      [connect('t', 'branch'), connect('branch', 'false', 'main', 1)],
+    );
+
+    const result = await execute(wf, {}, new ExecutionEngine({ registry: local }));
+    expect(result.status).toBe('success');
+    expect(result.runData.branch?.[0]?.output?.main?.[0]).toHaveLength(0);
+    expect(result.runData.branch?.[0]?.output?.main?.[1]).toHaveLength(1);
+    expect(result.runData.false?.[0]?.output?.main?.[0]).toHaveLength(1);
+  });
+
   it('stops runaway loops at the execution limit', async () => {
     const loopType: NodeType = {
       ...echoType,

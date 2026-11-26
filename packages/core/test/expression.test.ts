@@ -90,6 +90,16 @@ describe('ExpressionEngine', () => {
     expect(evaluate('={{ $json.age === 30 }}')).toBe(true);
     expect(evaluate('={{ $json.age !== 30 }}')).toBe(false);
     expect(evaluate('={{ "age" in $json }}')).toBe(true);
+    expect(evaluate('={{ "2" <= 2 }}')).toBe(true);
+    expect(evaluate('={{ "2" >= 2 }}')).toBe(true);
+    expect(evaluate('={{ "10" <= 2 }}')).toBe(false);
+  });
+
+  it('short-circuits optional chains through the whole chain', () => {
+    expect(evaluate('={{ $json.missing?.nested.name ?? "fallback" }}')).toBe('fallback');
+    expect(evaluate('={{ $json.nested?.missing?.deep ?? "fallback" }}')).toBe('fallback');
+    expect(evaluate('={{ $json.maybe?.() ?? "none" }}')).toBe('none');
+    expect(() => evaluate('={{ $json.nested?.missing.deep }}')).toThrow();
   });
 
   it('builds objects and arrays', () => {

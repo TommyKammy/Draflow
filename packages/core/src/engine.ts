@@ -211,6 +211,9 @@ export class ExecutionEngine {
     const pinData = options.pinData ?? workflow.pinData ?? {};
     const runData = cloneRunData(options.runData ?? {});
     const dirty = computeDirtySet(graph, options);
+    if (options.runData !== undefined) {
+      for (const nodeId of dirty) delete runData[nodeId];
+    }
     const destination = options.destinationNodeId;
     const allowed =
       destination === undefined
@@ -227,6 +230,7 @@ export class ExecutionEngine {
     const waiting = new Map<string, ExecEntry>();
     const queued = new Set<ExecEntry>();
     const nextRunIndices = new Map<string, number>();
+    const currentRunIndices = new Map<string, number>();
     for (const entry of stack) nextRunIndices.set(entry.nodeId, 1);
     let executionIndex = nextExecutionIndex(runData);
     let lastKey = '';
@@ -334,6 +338,7 @@ export class ExecutionEngine {
             runIndex: entry.runIndex,
             task: existing,
           });
+          markCurrentRunIndex(currentRunIndices, node.id, entry.runIndex);
           if (destination !== undefined && entry.nodeId === destination) break;
           this.#route(
             graph,
@@ -371,6 +376,7 @@ export class ExecutionEngine {
           startedAt: run.startedAt,
           signal: run.controller.signal,
           executionIndex,
+          currentRunIndices,
         });
         executionIndex += 1;
 
@@ -379,6 +385,7 @@ export class ExecutionEngine {
           tasks[entry.runIndex] = task;
           runData[node.id] = tasks;
         }
+        markCurrentRunIndex(currentRunIndices, node.id, entry.runIndex);
 
         run.bus.emit('node:finish', {
           runId: run.runId,
@@ -453,6 +460,7 @@ export class ExecutionEngine {
     startedAt: number;
     signal: AbortSignal;
     executionIndex: number;
+    currentRunIndices: Map<string, number>;
   }): Promise<TaskData> {
     const { node, nodeType, entry, runData, pinData, graph, workflow } = input;
     const settings = resolveNodeSettings(node);
@@ -521,6 +529,7 @@ export class ExecutionEngine {
       startedAt: input.startedAt,
       signal: input.signal,
       pinData,
+      currentRunIndices: input.currentRunIndices,
     });
 
     const execute = nodeType.execute;
@@ -541,6 +550,7 @@ export class ExecutionEngine {
 
     let output: PortData | undefined;
     let caught: unknown;
+    let failed = false;
     const maxTries = settings.retryOnFail ? settings.maxTries : 1;
 
     for (let attempt = 0; attempt < maxTries; attempt += 1) {
@@ -548,6 +558,7 @@ export class ExecutionEngine {
         try {
           await this.#clock.sleep(settings.waitBetweenTries, input.signal);
         } catch {
+          failed = true;
           caught = new ExecutionCanceledError();
           break;
         }
@@ -559,9 +570,11 @@ export class ExecutionEngine {
           input.signal,
         );
         output = normalizeOutput(result);
+        failed = false;
         caught = undefined;
         break;
       } catch (error) {
+        failed = true;
         caught = error;
         if (input.signal.aborted) break;
       }
@@ -569,7 +582,7 @@ export class ExecutionEngine {
 
     const executionTime = this.#clock.now() - startTime;
 
-    if (caught !== undefined) {
+    if (failed) {
       const serialized = serializeError(caught);
       const errorItem: Item = {
         json: { error: serialized.message },
@@ -657,6 +670,7 @@ export class ExecutionEngine {
     startedAt: number;
     signal: AbortSignal;
     pinData: Record<string, Item[]>;
+    currentRunIndices: Map<string, number>;
   }): NodeContext {
     const { node, nodeType, entry, input: portData, runData, graph, workflow } = input;
     const items = primaryItems(portData);
@@ -674,7 +688,11 @@ export class ExecutionEngine {
           if (target === undefined) throw new NodeNotFoundError(name);
           const tasks = runData[target.id];
           if (tasks === undefined) return [];
-          const task = runIndex === undefined ? tasks[tasks.length - 1] : tasks[runIndex];
+          const latestRunIndex = input.currentRunIndices.get(target.id);
+          const task =
+            runIndex === undefined
+              ? tasks[latestRunIndex ?? tasks.length - 1]
+              : tasks[runIndex];
           return task?.output?.['main']?.[outputIndex] ?? [];
         },
         resolveItem: (name) => resolveItemLineage(name, item, entry, graph, runData),
@@ -1065,8 +1083,8 @@ function isItem(value: unknown): value is Item {
 
 function ensureAlwaysOutputData(output: PortData, input: PortData): PortData {
   const main = output.main ?? [];
-  const first = main[0];
-  if (first !== undefined && first !== null && first.length > 0) return output;
+  const hasAnyOutput = main.some((items) => items !== null && items.length > 0);
+  if (hasAnyOutput) return output;
 
   const paired: Array<{ item: number; input: number }> = [];
   for (const [port, ports] of Object.entries(input)) {
@@ -1079,8 +1097,9 @@ function ensureAlwaysOutputData(output: PortData, input: PortData): PortData {
     });
   }
 
-  const result: PortData = { ...output, main: [[{ json: {}, pairedItem: paired }]] };
-  return result;
+  const nextMain = main.length > 0 ? [...main] : [];
+  nextMain[0] = [{ json: {}, pairedItem: paired }];
+  return { ...output, main: nextMain };
 }
 
 function nextExecutionIndex(runData: RunData): number {
@@ -1089,6 +1108,17 @@ function nextExecutionIndex(runData: RunData): number {
     for (const task of tasks) max = Math.max(max, task.executionIndex);
   }
   return max + 1;
+}
+
+function markCurrentRunIndex(
+  currentRunIndices: Map<string, number>,
+  nodeId: string,
+  runIndex: number,
+): void {
+  const current = currentRunIndices.get(nodeId);
+  if (current === undefined || runIndex > current) {
+    currentRunIndices.set(nodeId, runIndex);
+  }
 }
 
 function computeDirtySet(graph: WorkflowGraph, options: RunOptions): Set<string> {

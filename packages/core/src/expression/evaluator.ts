@@ -46,6 +46,11 @@ export class ArrowClosure {
   }
 }
 
+interface ChainResult {
+  short: boolean;
+  value: unknown;
+}
+
 export class Scope {
   readonly #values: Map<string, unknown>;
   readonly #parent: Scope | undefined;
@@ -178,50 +183,89 @@ export class Evaluator {
   }
 
   #evaluateMember(expression: MemberExpr, scope: Scope): unknown {
-    const object = this.evaluate(expression.object, scope);
-    if (object === null || object === undefined) {
-      if (expression.optional) return undefined;
-      throw new ExpressionError('Cannot read a property of null or undefined', {
-        expression: this.#source,
-        position: expression.start,
-      });
-    }
-
-    const key = expression.computed
-      ? this.evaluate(expression.property, scope)
-      : (expression.property as IdentifierExpr).name;
-
-    return this.getMember(object, String(key));
+    return this.#evaluateChain(expression, scope).value;
   }
 
   #evaluateCall(expression: CallExpr, scope: Scope): unknown {
-    const args = expression.args.map((argument) => this.evaluate(argument, scope));
+    return this.#evaluateChain(expression, scope).value;
+  }
 
-    if (expression.callee.type === 'Member') {
-      const member = expression.callee as MemberExpr;
-      const receiver = this.evaluate(member.object, scope);
-      if (receiver === null || receiver === undefined) {
-        if (expression.optional || member.optional) return undefined;
-        throw new ExpressionError('Cannot call a method of null or undefined', {
+  #evaluateChain(expression: Expr, scope: Scope): ChainResult {
+    if (expression.type === 'Member') {
+      const member = expression as MemberExpr;
+      const base = this.#evaluateChain(member.object, scope);
+      if (base.short) return base;
+
+      if (base.value === null || base.value === undefined) {
+        if (member.optional) return { short: true, value: undefined };
+        throw new ExpressionError('Cannot read a property of null or undefined', {
           expression: this.#source,
-          position: expression.start,
+          position: member.start,
         });
       }
+
       const key = member.computed
         ? this.evaluate(member.property, scope)
         : (member.property as IdentifierExpr).name;
-      return this.callMethod(receiver, String(key), args);
+      return { short: false, value: this.getMember(base.value, String(key)) };
     }
 
-    const fn = this.evaluate(expression.callee, scope);
-    if (fn === null || fn === undefined) {
-      if (expression.optional) return undefined;
-      throw new ExpressionError('Cannot call a value that is not a function', {
-        expression: this.#source,
-        position: expression.start,
-      });
+    if (expression.type === 'Call') {
+      const call = expression as CallExpr;
+
+      if (call.callee.type === 'Member') {
+        const member = call.callee as MemberExpr;
+        const receiver = this.#evaluateChain(member.object, scope);
+        if (receiver.short) return receiver;
+
+        if (receiver.value === null || receiver.value === undefined) {
+          if (call.optional || member.optional) return { short: true, value: undefined };
+          throw new ExpressionError('Cannot call a method of null or undefined', {
+            expression: this.#source,
+            position: call.start,
+          });
+        }
+
+        const key = member.computed
+          ? this.evaluate(member.property, scope)
+          : (member.property as IdentifierExpr).name;
+
+        const property = this.getMember(receiver.value, String(key));
+        if (property instanceof HostFunction || property instanceof ArrowClosure) {
+          const args = call.args.map((argument) => this.evaluate(argument, scope));
+          return { short: false, value: this.invoke(property, args) };
+        }
+
+        if (call.optional && (property === undefined || property === null)) {
+          return { short: true, value: undefined };
+        }
+
+        const args = call.args.map((argument) => this.evaluate(argument, scope));
+        return {
+          short: false,
+          value: this.callMethod(receiver.value, String(key), args),
+        };
+      }
+
+      const callee =
+        call.callee.type === 'Call'
+          ? this.#evaluateChain(call.callee, scope)
+          : { short: false, value: this.evaluate(call.callee, scope) };
+
+      if (callee.short) return callee;
+      if (callee.value === null || callee.value === undefined) {
+        if (call.optional) return { short: true, value: undefined };
+        throw new ExpressionError('Cannot call a value that is not a function', {
+          expression: this.#source,
+          position: call.start,
+        });
+      }
+
+      const args = call.args.map((argument) => this.evaluate(argument, scope));
+      return { short: false, value: this.invoke(callee.value, args) };
     }
-    return this.invoke(fn, args);
+
+    return { short: false, value: this.evaluate(expression, scope) };
   }
 
   #evaluateUnary(expression: UnaryExpr, scope: Scope): unknown {
@@ -279,11 +323,11 @@ export class Evaluator {
       case '<':
         return lessThan(left, right);
       case '<=':
-        return lessThan(left, right) || left === right;
+        return lessThan(left, right) || relationalEqual(left, right);
       case '>':
         return lessThan(right, left);
       case '>=':
-        return lessThan(right, left) || left === right;
+        return lessThan(right, left) || relationalEqual(left, right);
       case 'in':
         return isIn(left, right);
       default:
@@ -525,6 +569,15 @@ function looseEqual(left: unknown, right: unknown): boolean {
 function lessThan(left: unknown, right: unknown): boolean {
   if (typeof left === 'string' && typeof right === 'string') return left < right;
   return Number(left) < Number(right);
+}
+
+function relationalEqual(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (typeof left === 'string' && typeof right === 'string') return false;
+  if (left === null || right === null || left === undefined || right === undefined) {
+    return false;
+  }
+  return Number(left) === Number(right);
 }
 
 function isIn(left: unknown, right: unknown): boolean {
