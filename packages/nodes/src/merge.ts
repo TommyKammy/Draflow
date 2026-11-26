@@ -67,11 +67,11 @@ export const mergeNode: NodeType = {
 
     if (mode === 'chooseBranch') {
       const branch = ctx.param<string>('branch', 0, 'input1');
-      return branch === 'input2' ? [...right] : [...left];
+      return branch === 'input2' ? withInputPairing(right, 1) : withInputPairing(left, 0);
     }
 
     if (mode === 'append') {
-      return [...left, ...right];
+      return [...withInputPairing(left, 0), ...withInputPairing(right, 1)];
     }
 
     const key = ctx.param<string>('key', 0, 'id');
@@ -139,6 +139,13 @@ function mergeBinary(
 ): Item['binary'] {
   if (left === undefined && right === undefined) return undefined;
   return { ...left, ...right };
+}
+
+function withInputPairing(items: readonly Item[], input: number): Item[] {
+  return items.map((item, index) => ({
+    ...item,
+    pairedItem: { item: index, input },
+  }));
 }
 
 function combinePairings(

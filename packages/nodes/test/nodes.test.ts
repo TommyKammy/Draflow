@@ -451,6 +451,49 @@ describe('standard nodes', () => {
     expect(output[1]?.json).toEqual({ id: 2, group: 'b' });
   });
 
+  it('tracks lineage through an append merge', async () => {
+    const wf = workflow(
+      [
+        node('m', 'draflow.manualTrigger', 'Manual', 0),
+        node('left', 'draflow.filter', 'Left', 200, {
+          conditions: {
+            combinator: 'and',
+            conditions: [{ left: '={{ $json.id }}', operator: 'equals', right: 'a' }],
+          },
+        }),
+        node('right', 'draflow.filter', 'Right', 200, {
+          conditions: {
+            combinator: 'and',
+            conditions: [{ left: '={{ $json.id }}', operator: 'equals', right: 'b' }],
+          },
+        }),
+        node('merge', 'draflow.merge', 'Merge', 400, { mode: 'append' }),
+        node('s', 'draflow.set', 'Set', 600, {
+          mode: 'manual',
+          includeOtherFields: true,
+          assignments: [
+            { name: 'sourceId', value: '={{ $("Manual").item.json.id }}' },
+          ],
+        }),
+      ],
+      [
+        connect('m', 'left'),
+        connect('m', 'right'),
+        connect('left', 'merge', 'main', 0, 0),
+        connect('right', 'merge', 'main', 0, 1),
+        connect('merge', 's'),
+      ],
+    );
+
+    const result = await run(wf, seed({ id: 'a' }, { id: 'b' }));
+    expect(result.status).toBe('success');
+    const items = result.runData.s?.[0]?.output?.main?.[0] ?? [];
+    expect(items.map((entry) => entry.json)).toEqual([
+      { id: 'a', sourceId: 'a' },
+      { id: 'b', sourceId: 'b' },
+    ]);
+  });
+
   it('preserves binary references in merge-by-key outputs', async () => {
     const binary = {
       file: { mimeType: 'text/plain', fileName: 'a.txt', id: 'bin-1' },

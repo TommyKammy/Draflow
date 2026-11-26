@@ -44,8 +44,11 @@ function callString(
       return value.trimStart();
     case 'trimEnd':
       return value.trimEnd();
-    case 'split':
-      return value.split(String(args[0] ?? ''));
+    case 'split': {
+      const separator = args[0] === undefined ? undefined : String(args[0]);
+      const limit = typeof args[1] === 'number' ? args[1] : undefined;
+      return value.split(separator as string, limit);
+    }
     case 'replace':
       return value.replace(String(args[0] ?? ''), String(args[1] ?? ''));
     case 'replaceAll':

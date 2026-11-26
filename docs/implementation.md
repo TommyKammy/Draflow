@@ -16,8 +16,8 @@
 | 実行 | スタック、waiting（複数入力）、runIndex、リトライ、エラー 3 モード、ピン、無効化、executeOnce、部分実行、実行制限 |
 | ノード | Manual / NoOp / Set / If / Filter / Merge / HTTP Request |
 | 永続化 | JSON の読み書き、検証、デフォルト適用 |
-| テスト | 85 tests（core 63 / nodes 22） |
-| サイズ | core 37.3 KB gzip + nodes 7.9 KB gzip = **45.2 KB gzip** |
+| テスト | 88 tests（core 65 / nodes 23） |
+| サイズ | core 37.4 KB gzip + nodes 8.0 KB gzip = **45.4 KB gzip** |
 
 ---
 
@@ -256,11 +256,11 @@ pnpm test
 ✓ packages/core/test/graph.test.ts         (4)
 ✓ packages/core/test/parameters.test.ts    (5)
 ✓ packages/core/test/serialize.test.ts     (7)
-✓ packages/core/test/expression.test.ts   (20)
+✓ packages/core/test/expression.test.ts   (22)
 ✓ packages/core/test/engine.test.ts       (25)
-✓ packages/nodes/test/nodes.test.ts       (22)
+✓ packages/nodes/test/nodes.test.ts       (23)
 ──────────────────────────────────────────────
-85 tests passed
+88 tests passed
 ```
 
 型チェック:
@@ -283,20 +283,20 @@ pnpm size
 ```
 package        files      raw       gzip
 ------------------------------------------
-core              21  176.2 KB   37.3 KB
-nodes              9   27.3 KB    7.9 KB
+core              21  176.8 KB   37.4 KB
+nodes              9   27.5 KB    8.0 KB
 ------------------------------------------
-total                 203.4 KB   45.2 KB
+total                 204.3 KB   45.4 KB
 ```
 
 gzip はファイルごとの gzip の合計（保守的な見積もり）。
-設計目標の 250 KB に対して、コアは **45.2 KB**。
+設計目標の 250 KB に対して、コアは **45.4 KB**。
 
 ---
 
 ## 8.1 Codex レビュー対応
 
-PR #1 のレビュー指摘 13 件、追加 9 件、追加 5 件、追加 4 件、追加 3 件、追加 4 件、追加 2 件、合計 40 件をすべて修正し、回帰テストを追加した。
+PR #1 のレビュー指摘 13 件、追加 9 件、追加 5 件、追加 4 件、追加 3 件、追加 4 件、追加 2 件、追加 3 件、合計 43 件をすべて修正し、回帰テストを追加した。
 
 | 指摘 | 対応 |
 | --- | --- |
@@ -371,7 +371,15 @@ PR #1 のレビュー指摘 13 件、追加 9 件、追加 5 件、追加 4 件�
 | 同一入力ポートの fan-in で producer の系譜が上書きされる | item ごとに producer と producer 内 index を保持し、lineage 解決に使用 |
 | `DateTime.now()` / `diffToNow()` が注入時計を無視する | expression context の now を DateTime と diffToNow に伝播 |
 
-テストは 83 件から **85 件**に増えている。
+追加レビュー（8 回目）:
+
+| 指摘 | 対応 |
+| --- | --- |
+| Append / Choose Branch が上流 pairing を保持する | Merge 入力 index と位置で即時 pairing を再生成 |
+| テンプレート内コメントの `}}` を終端と誤認する | line / block comment をスキャン時にスキップ |
+| `split()` の separator 省略と limit が失われる | ネイティブの `split(separator, limit)` セマンティクスを保持 |
+
+テストは 85 件から **88 件**に増えている。
 
 ## 9. デモ
 

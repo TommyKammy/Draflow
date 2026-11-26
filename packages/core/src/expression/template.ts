@@ -136,6 +136,21 @@ function readExpression(
       continue;
     }
 
+    if (char === '/' && raw[index + 1] === '/') {
+      index += 2;
+      while (index < raw.length && raw[index] !== '\n') index += 1;
+      continue;
+    }
+
+    if (char === '/' && raw[index + 1] === '*') {
+      const end = raw.indexOf('*/', index + 2);
+      if (end === -1) {
+        throw new ExpressionSyntaxError('Unterminated comment', source, index);
+      }
+      index = end + 2;
+      continue;
+    }
+
     if (char === "'" || char === '"' || char === '`') {
       quote = char;
       index += 1;

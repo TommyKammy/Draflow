@@ -85,6 +85,16 @@ describe('ExpressionEngine', () => {
     expect(evaluate('={{ ")" + "(" }}')).toBe(')(');
   });
 
+  it('preserves split separator and limit semantics', () => {
+    expect(evaluate('={{ "abc".split() }}')).toEqual(['abc']);
+    expect(evaluate('={{ "a,b,c".split(",", 2) }}')).toEqual(['a', 'b']);
+  });
+
+  it('ignores template delimiters inside expression comments', () => {
+    expect(evaluate('={{ 1 /* }} */ + 2 }}')).toBe(3);
+    expect(evaluate('=before {{ 1 // }}\n + 2 }} after')).toBe('before 3 after');
+  });
+
   it('supports nullish, comparisons, and ternary', () => {
     expect(evaluate('={{ $json.missing ?? "fallback" }}')).toBe('fallback');
     expect(evaluate('={{ $json.age > 18 ? "adult" : "minor" }}')).toBe('adult');
