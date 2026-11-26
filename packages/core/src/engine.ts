@@ -306,10 +306,14 @@ export class ExecutionEngine {
         }
 
         const primary = primaryItems(entry.input);
-        if (primary.length > maxItems) {
-          throw new ExecutionLimitError(
-            `Node "${node.name}" received ${primary.length} items, above the limit of ${maxItems}`,
-          );
+        for (const [port, ports] of Object.entries(entry.input)) {
+          ports.forEach((items, index) => {
+            if (items !== null && items.length > maxItems) {
+              throw new ExecutionLimitError(
+                `Node "${node.name}" input ${port}[${index}] received ${items.length} items, above the limit of ${maxItems}`,
+              );
+            }
+          });
         }
 
         const nodeType = this.registry.get(node.type, node.typeVersion);

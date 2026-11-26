@@ -391,6 +391,58 @@ describe('standard nodes', () => {
     expect(output[1]?.json).toEqual({ id: 2, group: 'b' });
   });
 
+  it('preserves binary references in merge-by-key outputs', async () => {
+    const binary = {
+      file: { mimeType: 'text/plain', fileName: 'a.txt', id: 'bin-1' },
+    };
+    const wf = workflow(
+      [
+        node('m', 'draflow.manualTrigger', 'Manual', 0),
+        node('left', 'draflow.filter', 'Left', 200, {
+          conditions: {
+            combinator: 'and',
+            conditions: [
+              { left: '={{ String($json.id) }}', operator: 'lte', right: '2' },
+            ],
+          },
+        }),
+        node('right', 'draflow.filter', 'Right', 200, {
+          conditions: {
+            combinator: 'and',
+            conditions: [
+              { left: '={{ String($json.id) }}', operator: 'gte', right: '2' },
+            ],
+          },
+        }),
+        node('merge', 'draflow.merge', 'Merge', 400, {
+          mode: 'mergeByKey',
+          key: 'id',
+          joinMode: 'outer',
+        }),
+      ],
+      [
+        connect('m', 'left'),
+        connect('m', 'right'),
+        connect('left', 'merge', 'main', 0, 0),
+        connect('right', 'merge', 'main', 0, 1),
+      ],
+    );
+
+    const result = await run(wf, {
+      triggerData: {
+        main: [[
+          { json: { id: 1 }, binary },
+          { json: { id: 2 }, binary },
+          { json: { id: 3 }, binary },
+        ]],
+      },
+    });
+    expect(result.status).toBe('success');
+    const output = result.runData.merge?.[0]?.output?.main?.[0] ?? [];
+    expect(output).toHaveLength(3);
+    expect(output.map((entry) => entry.binary)).toEqual([binary, binary, binary]);
+  });
+
   it('calls HTTP endpoints and parses JSON', async () => {
     let requested = '';
     let method = '';
@@ -461,6 +513,35 @@ describe('standard nodes', () => {
     );
     expect(emptyOk.status).toBe('success');
     expect(emptyOk.runData.h?.[0]?.output?.main?.[0]?.[0]?.json).toEqual({});
+  });
+
+  it('checks Content-Type headers case-insensitively', async () => {
+    let sentHeaders: Record<string, string> = {};
+    const fetchImpl = async (_input: string, init?: RequestInit): Promise<Response> => {
+      sentHeaders = init?.headers as Record<string, string>;
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+
+    const wf = workflow(
+      [
+        node('m', 'draflow.manualTrigger', 'Manual', 0),
+        node('h', 'draflow.httpRequest', 'HTTP', 200, {
+          method: 'POST',
+          url: 'https://example.com/data',
+          headers: { 'CONTENT-TYPE': 'application/vnd.api+json' },
+          body: { hello: 'world' },
+        }),
+      ],
+      [connect('m', 'h')],
+    );
+
+    const result = await run(wf, seed({}), fetchImpl);
+    expect(result.status).toBe('success');
+    expect(sentHeaders['CONTENT-TYPE']).toBe('application/vnd.api+json');
+    expect(sentHeaders['content-type']).toBeUndefined();
   });
 
   it('reports HTTP failures as node errors', async () => {

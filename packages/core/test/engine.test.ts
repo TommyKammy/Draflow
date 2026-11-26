@@ -633,6 +633,26 @@ describe('ExecutionEngine', () => {
     expect(result.runData.false?.[0]?.output?.main?.[0]).toHaveLength(1);
   });
 
+  it('enforces the item limit on every input port', async () => {
+    const local = new NodeRegistry().registerAll([mergeType]);
+    const wf = workflow([node('m', mergeType.type, 'Merge', 0)], []);
+
+    const result = await new ExecutionEngine({
+      registry: local,
+      limits: { maxItemsPerNode: 2 },
+    })
+      .run(wf, {
+        startNodeId: 'm',
+        triggerData: {
+          main: [[{ json: { side: 'left' } }], [{ json: {} }, { json: {} }, { json: {} }]],
+        },
+      })
+      .done;
+
+    expect(result.status).toBe('error');
+    expect(result.error?.message).toMatch(/limit of 2/);
+  });
+
   it('stops runaway loops at the execution limit', async () => {
     const loopType: NodeType = {
       ...echoType,

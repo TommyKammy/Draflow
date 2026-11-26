@@ -16,8 +16,8 @@
 | 実行 | スタック、waiting（複数入力）、runIndex、リトライ、エラー 3 モード、ピン、無効化、executeOnce、部分実行、実行制限 |
 | ノード | Manual / NoOp / Set / If / Filter / Merge / HTTP Request |
 | 永続化 | JSON の読み書き、検証、デフォルト適用 |
-| テスト | 73 tests（core 55 / nodes 18） |
-| サイズ | core 35.6 KB gzip + nodes 7.8 KB gzip = **43.4 KB gzip** |
+| テスト | 76 tests（core 56 / nodes 20） |
+| サイズ | core 35.8 KB gzip + nodes 8.0 KB gzip = **43.8 KB gzip** |
 
 ---
 
@@ -257,10 +257,10 @@ pnpm test
 ✓ packages/core/test/parameters.test.ts    (4)
 ✓ packages/core/test/serialize.test.ts     (6)
 ✓ packages/core/test/expression.test.ts   (18)
-✓ packages/core/test/engine.test.ts       (21)
-✓ packages/nodes/test/nodes.test.ts       (18)
+✓ packages/core/test/engine.test.ts       (22)
+✓ packages/nodes/test/nodes.test.ts       (20)
 ──────────────────────────────────────────────
-73 tests passed
+76 tests passed
 ```
 
 型チェック:
@@ -283,20 +283,20 @@ pnpm size
 ```
 package        files      raw       gzip
 ------------------------------------------
-core              21  168.0 KB   35.6 KB
-nodes              9   26.7 KB    7.8 KB
+core              21  169.0 KB   35.8 KB
+nodes              9   27.3 KB    8.0 KB
 ------------------------------------------
-total                 194.6 KB   43.4 KB
+total                 196.3 KB   43.8 KB
 ```
 
 gzip はファイルごとの gzip の合計（保守的な見積もり）。
-設計目標の 250 KB に対して、コアは **43.4 KB**。
+設計目標の 250 KB に対して、コアは **43.8 KB**。
 
 ---
 
 ## 8.1 Codex レビュー対応
 
-PR #1 のレビュー指摘 13 件、追加 9 件、追加 5 件、合計 27 件をすべて修正し、回帰テストを追加した。
+PR #1 のレビュー指摘 13 件、追加 9 件、追加 5 件、追加 4 件、合計 31 件をすべて修正し、回帰テストを追加した。
 
 | 指摘 | 対応 |
 | --- | --- |
@@ -338,7 +338,16 @@ PR #1 のレビュー指摘 13 件、追加 9 件、追加 5 件、合計 27 件
 | loose 比較で `"false"` が true になる | boolean 文字列を明示的にパース |
 | メンバー/呼び出しチェーンが評価予算を回避 | チェーン各ノードで steps / depth を加算 |
 
-テストは 68 件から **73 件**に増えている。
+追加レビュー（4 回目）:
+
+| 指摘 | 対応 |
+| --- | --- |
+| offset なし ISO がホストのタイムゾーンで解釈される | ワークフローのタイムゾーンで日時成分を構築 |
+| Merge By Key が `binary` を落とす | matched / unmatched の全経路で binary を保持・結合 |
+| 複数入力の 2 番目以降が item 上限を回避する | 全 input port / index を検査 |
+| `CONTENT-TYPE` の大文字小文字で重複ヘッダーが付く | ヘッダー名を大文字小文字無視で確認 |
+
+テストは 73 件から **76 件**に増えている。
 
 ## 9. デモ
 

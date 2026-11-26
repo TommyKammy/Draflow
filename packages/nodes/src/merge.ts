@@ -93,18 +93,27 @@ export const mergeNode: NodeType = {
         const rightItem = right[rightIndex];
         usedRight.add(rightIndex);
         if (rightItem === undefined) return;
-        output.push({
+        const merged: Item = {
           json: { ...leftItem.json, ...rightItem.json },
           pairedItem: combinePairings(
             pairing(leftItem, leftIndex, 0),
             pairing(rightItem, rightIndex, 1),
           ),
-        });
+        };
+        const binary = mergeBinary(leftItem.binary, rightItem.binary);
+        if (binary !== undefined) merged.binary = binary;
+        const error = leftItem.error ?? rightItem.error;
+        if (error !== undefined) merged.error = error;
+        output.push(merged);
         return;
       }
 
       if (joinMode !== 'inner') {
-        output.push({ json: { ...leftItem.json }, pairedItem: pairing(leftItem, leftIndex, 0) });
+        output.push({
+          ...leftItem,
+          json: { ...leftItem.json },
+          pairedItem: pairing(leftItem, leftIndex, 0),
+        });
       }
     });
 
@@ -112,6 +121,7 @@ export const mergeNode: NodeType = {
       right.forEach((rightItem, rightIndex) => {
         if (!usedRight.has(rightIndex)) {
           output.push({
+            ...rightItem,
             json: { ...rightItem.json } as JsonObject,
             pairedItem: pairing(rightItem, rightIndex, 1),
           });
@@ -122,6 +132,14 @@ export const mergeNode: NodeType = {
     return output;
   },
 };
+
+function mergeBinary(
+  left: Item['binary'],
+  right: Item['binary'],
+): Item['binary'] {
+  if (left === undefined && right === undefined) return undefined;
+  return { ...left, ...right };
+}
 
 function combinePairings(
   left: ReturnType<typeof pairing>,

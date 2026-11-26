@@ -134,6 +134,12 @@ describe('ExpressionEngine', () => {
       tokyo.resolve('={{ DateTime.fromISO("2026-01-15T00:00:00Z").hour }}', tokyoContext),
     ).toBe(9);
     expect(tokyo.resolve('={{ "2026-01-15T00:00:00Z".toDateTime().hour }}', tokyoContext)).toBe(9);
+    expect(
+      tokyo.resolve('={{ DateTime.fromISO("2026-01-15T00:00:00").toISO() }}', tokyoContext),
+    ).toBe('2026-01-15T00:00:00.000+09:00');
+    expect(
+      tokyo.resolve('={{ DateTime.fromISO("2026-01-15T00:00:00Z").toISO() }}', tokyoContext),
+    ).toBe('2026-01-15T09:00:00.000+09:00');
   });
 
   it('counts member and call chains against the evaluation budget', () => {

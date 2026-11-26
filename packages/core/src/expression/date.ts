@@ -63,11 +63,36 @@ export class DraflowDateTime {
   }
 
   static fromISO(value: string, timeZone = 'UTC'): DraflowDateTime {
-    const millis = Date.parse(value);
-    if (!Number.isFinite(millis)) {
+    const trimmed = value.trim();
+    const hasOffset = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(trimmed);
+
+    if (hasOffset) {
+      const millis = Date.parse(trimmed);
+      if (!Number.isFinite(millis)) {
+        throw new Error(`Invalid ISO date "${value}"`);
+      }
+      return new DraflowDateTime(millis, timeZone);
+    }
+
+    const match =
+      /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?)?$/.exec(
+        trimmed,
+      );
+    if (match === null) {
       throw new Error(`Invalid ISO date "${value}"`);
     }
-    return new DraflowDateTime(millis, timeZone);
+
+    const parts: DateTimeParts = {
+      year: Number(match[1]),
+      month: Number(match[2]),
+      day: Number(match[3]),
+      hour: Number(match[4] ?? 0),
+      minute: Number(match[5] ?? 0),
+      second: Number(match[6] ?? 0),
+      millisecond: Number((match[7] ?? '0').padEnd(3, '0').slice(0, 3)),
+      weekday: 1,
+    };
+    return new DraflowDateTime(zonedTimeToUtc(parts, timeZone), timeZone);
   }
 
   toMillis(): number {

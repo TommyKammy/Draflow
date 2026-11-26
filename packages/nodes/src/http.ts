@@ -94,7 +94,10 @@ export const httpRequestNode: NodeType = {
           init.body = bodyValue;
         } else {
           init.body = JSON.stringify(bodyValue);
-          if (headers['content-type'] === undefined && headers['Content-Type'] === undefined) {
+          const hasContentType = Object.keys(headers).some(
+            (key) => key.toLowerCase() === 'content-type',
+          );
+          if (!hasContentType) {
             headers['content-type'] = 'application/json';
           }
         }
