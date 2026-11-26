@@ -19,10 +19,13 @@ export async function embed(host: HTMLElement, workflow: Workflow): Promise<RunR
   }
 }
 
-export function component(workflow: Workflow, finish: (result: RunResult) => void) {
+export function component(workflow: Workflow, finish: (result: RunResult) => void, onCopy?: (documentId: string) => void) {
   const editor = document.createElement('draflow-editor');
   editor.nodeTypes = standardNodes;
   editor.workflow = workflow;
+  editor.addEventListener('draflow-change', ({ detail }) => {
+    if (detail.source === 'replay-copy') onCopy?.(detail.workflow.id);
+  });
   editor.addEventListener('draflow-run-finish', e => finish(e.detail.result));
   return editor;
 }

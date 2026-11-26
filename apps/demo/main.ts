@@ -32,7 +32,28 @@ async function loadExample() {
   editor.ports = { storage, executions: new MemoryExecutionStore(), ...(id === 'mock-http' && {
     fetch: async (url: string) => url === mockUrl ? Response.json({ amount: 42 }) : new Response(null, { status: 404 }),
   }) };
-  editor.workflow = await storage.load(id) ?? await initialWorkflow();
+  let original = await storage.load(id) ?? await initialWorkflow();
+  const back = document.querySelector<HTMLButtonElement>('#return-original')!;
+  const url = new URL(location.href);
+  const copyId = url.searchParams.get('copy');
+  const copy = copyId?.startsWith('workflow_') ? await storage.load(copyId) : null;
+  function route(activeId?: string) {
+    if (activeId) url.searchParams.set('copy', activeId);
+    else url.searchParams.delete('copy');
+    history.replaceState(null, '', url);
+    back.hidden = !activeId;
+  }
+  editor.workflow = copy ?? original;
+  route(copy?.id);
+  editor.addEventListener('draflow-change', ({ detail }) => {
+    if (detail.source === 'replay-copy') route(detail.workflow.id);
+    else if (detail.workflow.id === original.id) original = detail.workflow;
+  });
+  back.onclick = () => {
+    editor.workflow = original;
+    route();
+    editor.focusNode(original.nodes[0]?.id ?? '');
+  };
   editor.hidden = false;
 }
 

@@ -78,6 +78,10 @@ export const styles = `
   .expression-suggestions [role=option] {padding:.35rem .6rem;cursor:pointer;overflow-wrap:anywhere}
   .expression-suggestions [aria-selected=true] {background:Highlight;color:HighlightText}
   .execution-history {box-sizing:border-box;width:min(42rem,94vw);max-height:90dvh;overflow:auto;background:Canvas;color:CanvasText;border:1px solid GrayText;border-radius:8px}
+  .execution-history .replay-graph {height:12rem}
+  .replay-data {display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,15rem),1fr));gap:.75rem}
+  .replay-data>div {min-width:0}
+  .replay-data input,.replay-data select {max-width:100%;box-sizing:border-box}
   .execution-history li {margin-block:.5rem;overflow-wrap:anywhere}
   header+p:empty {display:none}
   .command-palette {box-sizing:border-box;width:min(26rem,94vw);max-height:90dvh;overflow:auto;background:Canvas;color:CanvasText;border:1px solid GrayText;border-radius:8px}
