@@ -9,7 +9,8 @@
   },
   "dependencies": {
     "@draflow/element": "workspace:*",
-    "@draflow/nodes": "workspace:*"
+    "@draflow/nodes": "workspace:*",
+    "@draflow/storage": "workspace:*"
   },
   "devDependencies": {
     "vite": "7.3.8"

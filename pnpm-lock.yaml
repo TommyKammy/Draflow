@@ -29,6 +29,9 @@ importers:
       '@draflow/nodes':
         specifier: workspace:*
         version: link:../../packages/nodes
+      '@draflow/storage':
+        specifier: workspace:*
+        version: link:../../packages/storage
     devDependencies:
       vite:
         specifier: 7.3.8
@@ -45,6 +48,9 @@ importers:
       '@draflow/core':
         specifier: workspace:*
         version: link:../core
+      '@draflow/storage':
+        specifier: workspace:*
+        version: link:../storage
 
   packages/nodes:
     dependencies:

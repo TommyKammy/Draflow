@@ -1,4 +1,5 @@
 import type { NodeRegistry, Workflow } from '@draflow/core';
+import { bindEditing, type EditActions } from './editing.js';
 import { CanvasScene, cardHeight, cardWidth, type Point } from './scene.js';
 
 const labels = {
@@ -6,7 +7,7 @@ const labels = {
   ja: ['ワークフローキャンバス', '縮小', '拡大', '全体表示'],
 } as const;
 
-export function createCanvas(host: HTMLElement, registry: NodeRegistry) {
+export function createCanvas(host: HTMLElement, registry: NodeRegistry, actions: EditActions) {
   const scene = new CanvasScene();
   const panel = document.createElement('section');
   panel.className = 'canvas-panel';
@@ -53,6 +54,7 @@ export function createCanvas(host: HTMLElement, registry: NodeRegistry) {
   function schedule() { if (!frame) frame = requestAnimationFrame(paint); }
 
   function fitView() {
+    editing.cancel();
     fitting = true;
     const { clientWidth: w, clientHeight: h } = surface;
     const b = scene.bounds;
@@ -72,6 +74,7 @@ export function createCanvas(host: HTMLElement, registry: NodeRegistry) {
   }
 
   function zoomAt(factor: number, point = { x: surface.clientWidth / 2, y: surface.clientHeight / 2 }) {
+    editing.cancel();
     const next = Math.min(3, Math.max(minScale, scale * factor));
     x = point.x - (point.x - x) * next / scale;
     y = point.y - (point.y - y) * next / scale;
@@ -104,6 +107,11 @@ export function createCanvas(host: HTMLElement, registry: NodeRegistry) {
     surface.classList.remove('panning');
   }
 
+  const editing = bindEditing(surface, scene, actions, () => selected, select, event => {
+    const p = point(event);
+    return { x: (p.x - x) / scale, y: (p.y - y) / scale };
+  }, listeners.signal);
+
   surface.addEventListener('click', event => {
     const id = cardAt(event)?.dataset.nodeId;
     if (id === undefined) return;
@@ -116,6 +124,7 @@ export function createCanvas(host: HTMLElement, registry: NodeRegistry) {
   surface.addEventListener('pointerdown', event => {
     if (gesture || (event.button !== 0 && event.button !== 1)) return;
     const pan = event.button === 1 || space || (event.pointerType === 'touch' && !cardAt(event));
+    if (!pan && editing.pointerdown(event)) return;
     if (!pan && cardAt(event)) return;
     event.preventDefault();
     surface.focus({ preventScroll: true });
@@ -219,7 +228,30 @@ export function createCanvas(host: HTMLElement, registry: NodeRegistry) {
   observer.observe(surface);
   return {
     panel, scene, fitView,
+    remove: editing.remove,
+    cancelEdit: editing.cancel,
+    centerPoint() {
+      const p = {
+        x: Math.round(((surface.clientWidth / 2 - x) / scale - cardWidth / 2) / 16) * 16,
+        y: Math.round(((surface.clientHeight / 2 - y) / scale - cardHeight / 2) / 16) * 16,
+      };
+      while ([...scene.cards.values()].some(({ node }) =>
+        Math.abs(node.position.x - p.x) < cardWidth + 16 && Math.abs(node.position.y - p.y) < cardHeight + 16)) {
+        p.y += 96;
+      }
+      return p;
+    },
+    applyWorkflow(workflow: Workflow, newIds?: Set<string>) {
+      editing.cancel();
+      editing.clearEdge();
+      scene.setWorkflow(workflow, registry);
+      const ids = newIds ?? new Set([...selected].filter(id => scene.cards.has(id)));
+      select(ids);
+      for (const id of ids) scene.cards.get(id)?.element.setAttribute('aria-pressed', 'true');
+    },
     setWorkflow(workflow: Workflow) {
+      editing.cancel();
+      editing.clearEdge();
       endGesture();
       select(new Set());
       scene.setWorkflow(workflow, registry);
@@ -241,6 +273,7 @@ export function createCanvas(host: HTMLElement, registry: NodeRegistry) {
       card.element.focus({ preventScroll: true });
     },
     destroy() {
+      editing.cancel();
       listeners.abort();
       observer.disconnect();
       endGesture();

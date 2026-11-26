@@ -4,6 +4,9 @@ import { createWorkflowEditor, type EditorOptions, type WorkflowEditor } from '.
 export interface DraflowEditorElement extends HTMLElement {
   workflow: Workflow | undefined;
   nodeTypes: readonly NodeType[];
+  ports: NonNullable<EditorOptions['ports']>;
+  undo(): void;
+  redo(): void;
   run: WorkflowEditor['run'];
   fitView(): void;
   focusNode(id: string): void;
@@ -24,6 +27,16 @@ export function defineDraflowEditor(): void {
     static observedAttributes = ['locale', 'theme', 'readonly'];
     #workflow: Workflow | undefined;
     #types: readonly NodeType[] = [];
+    #ports: NonNullable<EditorOptions['ports']> = {};
+    get ports() { return { ...this.#ports }; }
+    set ports(value: NonNullable<EditorOptions['ports']>) {
+      this.#ports = { ...value };
+      if (this.#editor) this.#remount();
+    }
+    #remount() {
+      this.#workflow = this.#editor?.getWorkflow();
+      this.#mount();
+    }
     #editor: WorkflowEditor | undefined;
 
     get workflow() { return this.#editor?.getWorkflow() ?? structuredClone(this.#workflow); }
@@ -36,12 +49,12 @@ export function defineDraflowEditor(): void {
     get nodeTypes() { return [...this.#types]; }
     set nodeTypes(types: readonly NodeType[]) {
       this.#types = [...types];
-      if (this.#editor) this.#mount();
+      if (this.#editor) this.#remount();
     }
 
     connectedCallback() {
       // Replay properties assigned while the element was awaiting registration.
-      for (const key of ['workflow', 'nodeTypes'] as const) {
+      for (const key of ['workflow', 'nodeTypes', 'ports'] as const) {
         if (Object.hasOwn(this, key)) {
           const value = Reflect.get(this, key);
           Reflect.deleteProperty(this, key);
@@ -69,7 +82,7 @@ export function defineDraflowEditor(): void {
 
     #mount() {
       this.#editor?.destroy();
-      const options: EditorOptions = { ...this.#presentation(), nodeTypes: this.#types };
+      const options: EditorOptions = { ...this.#presentation(), nodeTypes: this.#types, ports: this.#ports };
       if (this.#workflow) options.workflow = this.#workflow;
       this.#editor = createWorkflowEditor(this, options);
     }
@@ -78,10 +91,13 @@ export function defineDraflowEditor(): void {
       if (!this.#editor) throw new Error('Editor is not mounted');
       return this.#editor.run(options);
     }
+    undo() { this.#editor?.undo(); }
+    redo() { this.#editor?.redo(); }
     fitView() { this.#editor?.fitView(); }
     focusNode(id: string) { this.#editor?.focusNode(id); }
     stop() { this.#editor?.stop(); }
     destroy() {
+      if (this.#editor) this.#workflow = this.#editor.getWorkflow();
       this.#editor?.destroy();
       this.#editor = undefined;
     }
