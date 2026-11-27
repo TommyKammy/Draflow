@@ -18,6 +18,9 @@ import type {
   NodeHelpers,
   NodeType,
   ItemContext,
+  JournalItem,
+  WaitRequest,
+  WaitResult,
   PortDef,
 } from './node.js';
 import { NodeRegistry, resolveNodeSettings } from './registry.js';
@@ -68,7 +71,32 @@ export interface ExecutionLimits {
   executionTimeout: number;
 }
 
+export interface Checkpoint {
+  version: 1;
+  runId: string;
+  startedAt: number;
+  elapsed: number;
+  stack: ExecEntry[];
+  waiting: ExecEntry[];
+  nextIndices: [string, number][];
+  currentIndices: [string, number][];
+  sources: [string, ItemSources][];
+  runData: RunData;
+  executions: number;
+}
+
+export interface ExecutionPersistence {
+  checkpoint?: Checkpoint;
+  resume?: WaitResult;
+  beginJournal?(state: Checkpoint, mode: 'keyed' | 'manual'): JournalItem;
+  /** Drop the replay point immediately before entering an untracked node. */
+  leaveCheckpoint?(): void;
+  endJournal?(): 'complete' | 'review';
+  suspend(state: Checkpoint, request: WaitRequest): void;
+}
+
 export interface ExecutionEngineOptions {
+  persistence?: ExecutionPersistence;
   registry: NodeRegistry;
   expression?: ExpressionEngine;
   /** Keep expression contexts available while the editor retains a task. */
@@ -148,6 +176,7 @@ export class ExecutionEngine {
   readonly expression: ExpressionEngine;
   readonly #fetch: FetchLike;
   readonly #clock: Clock;
+  readonly #persistence: ExecutionPersistence | undefined;
   readonly #random: () => number;
   readonly #uuid: () => string;
   readonly #credentialFetch: CredentialFetch | undefined;
@@ -174,6 +203,7 @@ export class ExecutionEngine {
 
   constructor(options: ExecutionEngineOptions) {
     if (options.preview) this.#previews = new WeakMap();
+    this.#persistence = options.persistence;
     this.registry = options.registry;
     this.expression = options.expression ?? new ExpressionEngine();
     this.#fetch =
@@ -202,7 +232,9 @@ export class ExecutionEngine {
     assertValidWorkflow(workflow, this.registry);
     const graph = buildGraph(workflow);
     const runId = options.runId ?? this.#uuid();
-    const startedAt = this.#clock.now();
+    const saved = this.#persistence?.checkpoint;
+    if (saved && (saved.version !== 1 || saved.runId !== runId)) throw new Error('Invalid execution checkpoint');
+    const startedAt = saved?.startedAt ?? this.#clock.now();
     const bus = new EventBus();
     const controller = new AbortController();
     const mode: ExecutionMode = options.mode ?? 'manual';
@@ -264,7 +296,11 @@ export class ExecutionEngine {
       workflow.settings.executionTimeout ?? this.#limits.executionTimeout;
     const maxItems = workflow.settings.maxItemsPerNode ?? this.#limits.maxItemsPerNode;
     const pinData = options.pinData ?? workflow.pinData ?? {};
-    const runData: RunData = Object.create(null);
+    const persistence = this.#persistence;
+    const saved = persistence?.checkpoint;
+    const segmentStart = this.#clock.now();
+    const elapsed = () => (saved?.elapsed ?? 0) + this.#clock.now() - segmentStart;
+    const runData: RunData = Object.assign(Object.create(null), saved?.runData);
     const dirty = computeDirtySet(graph, options);
     const destination = options.destinationNodeId;
     const allowed =
@@ -278,13 +314,22 @@ export class ExecutionEngine {
       throw new NodeNotFoundError(destination);
     }
 
-    const stack = buildStartStack(workflow, graph, options, allowed, this.registry);
+    const stack = saved?.stack.slice() ?? buildStartStack(workflow, graph, options, allowed, this.registry);
     const waiting = new Map<string, ExecEntry>();
     const queued = new Set<ExecEntry>();
-    const nextRunIndices = new Map<string, number>();
-    const currentRunIndices = new Map<string, number>();
-    const runItemSources = new Map<string, ItemSources>();
-    for (const entry of stack) nextRunIndices.set(entry.nodeId, 1);
+    // JSON loses shared identity between the ready queue and the pending fan-in.
+    const pendingByKey = new Map(saved && stack.map(entry => [JSON.stringify([entry.nodeId, entry.runIndex]), entry]));
+    for (const entry of saved?.waiting ?? []) {
+      const ready = pendingByKey.get(JSON.stringify([entry.nodeId, entry.runIndex]));
+      waiting.set(entry.nodeId, ready ?? entry);
+      if (ready) queued.add(ready);
+    }
+    const nextRunIndices = new Map(saved?.nextIndices);
+    const currentRunIndices = new Map(saved?.currentIndices);
+    const runItemSources = new Map(saved?.sources);
+    if (!saved) for (const entry of stack) nextRunIndices.set(entry.nodeId, 1);
+    let resume = persistence?.resume;
+    let replayable = Boolean(saved);
     const rememberPreview = (task: TaskData, node: WorkflowNode, entry: ExecEntry) => {
       this.#previews?.set(task, (index, port, slot) => this.#expressionContext({
         node, entry, workflow, graph, runData, currentRunIndices, itemSourcesByRun: runItemSources,
@@ -306,7 +351,7 @@ export class ExecutionEngine {
     if (timeout > 0 && Number.isFinite(timeout)) {
       timeoutTimer = setTimeout(() => {
         run.controller.abort(new ExecutionTimeoutError(timeout));
-      }, timeout);
+      }, Math.max(0, timeout - elapsed()));
     }
 
     try {
@@ -319,7 +364,7 @@ export class ExecutionEngine {
         runData[nodeId] = deepClone(tasks);
       }
       let executionIndex = nextExecutionIndex(runData);
-      let executions = 0;
+      let executions = saved?.executions ?? 0;
 
       while (true) {
         if (run.controller.signal.aborted) {
@@ -328,7 +373,7 @@ export class ExecutionEngine {
           break;
         }
 
-        if (this.#clock.now() - run.startedAt > timeout) {
+        if (elapsed() > timeout) {
           run.controller.abort(new ExecutionTimeoutError(timeout));
           status = 'canceled';
           error = serializeError(new ExecutionTimeoutError(timeout));
@@ -436,7 +481,7 @@ export class ExecutionEngine {
           break;
         }
 
-        const task = await this.#runNode({
+        const nodeInput = {
           workflow,
           graph,
           node,
@@ -452,7 +497,42 @@ export class ExecutionEngine {
           executionIndex,
           currentRunIndices,
           itemSourcesByRun: runItemSources,
+        };
+        const activeNode = !node.disabled && !(settings.executeOnce && entry.runIndex > 0);
+        const snapshot = (): Checkpoint => ({
+          version: 1, runId: run.runId, startedAt: run.startedAt, elapsed: elapsed(),
+          stack: [entry, ...stack], waiting: [...waiting.values()], runData,
+          nextIndices: [...nextRunIndices], currentIndices: [...currentRunIndices],
+          sources: [...runItemSources], executions: executions - 1,
         });
+        const prepareWait = activeNode && !resume && !Object.hasOwn(pinData, node.id) ? nodeType.wait : undefined;
+        if (prepareWait && !persistence) throw new Error('This node requires a durable host');
+        if (resume?.reason === 'canceled') {
+          status = 'canceled';
+          break;
+        }
+        const journalMode = !prepareWait && activeNode && !Object.hasOwn(pinData, node.id) ? nodeType.journalMode?.(node) : undefined;
+        if (journalMode && (!persistence?.beginJournal || !persistence.endJournal))
+          throw new Error('Recorded HTTP delivery requires a durable host');
+        const journalItem = journalMode && persistence!.beginJournal!(snapshot(), journalMode);
+        if (journalItem) replayable = true;
+        else if (replayable && !prepareWait) {
+          // Beyond this boundary arbitrary node code may already have produced an external effect.
+          persistence?.leaveCheckpoint?.();
+          replayable = false;
+        }
+        const task = await this.#runNode({ ...nodeInput, prepareWait, ...(resume && { resume }), ...(journalItem && { journalItem }) });
+        if ('dueAt' in task) {
+          // Commit only a validated request. Storage failures remain execution-level errors.
+          persistence!.suspend(snapshot(), task);
+          status = 'waiting';
+          break;
+        }
+        if (journalItem && persistence!.endJournal!() === 'review') {
+          status = 'waiting';
+          break;
+        }
+        resume = undefined;
         const limitError = outputLimitError(node.name, task.output, maxItems);
         if (limitError !== undefined) {
           delete task.output;
@@ -532,6 +612,9 @@ export class ExecutionEngine {
   }
 
   async #runNode(input: {
+    prepareWait: NodeType['wait'];
+    resume?: WaitResult;
+    journalItem?: JournalItem;
     workflow: Workflow;
     graph: WorkflowGraph;
     node: WorkflowNode;
@@ -547,7 +630,7 @@ export class ExecutionEngine {
     executionIndex: number;
     currentRunIndices: Map<string, number>;
     itemSourcesByRun: Map<string, ItemSources>;
-  }): Promise<TaskData> {
+  }): Promise<TaskData | WaitRequest> {
     const { node, nodeType, entry, runData, pinData, graph, workflow } = input;
     const settings = resolveNodeSettings(node);
     const startTime = this.#clock.now();
@@ -619,8 +702,10 @@ export class ExecutionEngine {
       itemSourcesByRun: input.itemSourcesByRun,
     });
 
+    if (input.journalItem) context.journalItem = input.journalItem;
+    if (input.resume) context.resume = input.resume;
     const execute = nodeType.execute;
-    if (execute === undefined) {
+    if (!input.prepareWait && execute === undefined) {
       return {
         nodeId: node.id,
         runIndex: entry.runIndex,
@@ -652,10 +737,12 @@ export class ExecutionEngine {
       }
 
       try {
+        if (input.signal.aborted) throw abortReason(input.signal);
+        if (input.prepareWait) return input.prepareWait.call(nodeType, context);
         const result = await raceWithAbort(
           Promise.resolve().then(() => {
             if (input.signal.aborted) throw abortReason(input.signal);
-            return execute.call(nodeType, context);
+            return execute!.call(nodeType, context);
           }),
           input.signal,
         );

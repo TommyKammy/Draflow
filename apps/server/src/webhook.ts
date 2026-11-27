@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import type { JsonValue } from '@draflow/core';
+import { isPlainObject, type JsonObject, type JsonValue } from '@draflow/core';
 import { NodeHost, WebhookGone } from './host.js';
 
 interface WebhookOptions {
@@ -40,6 +40,25 @@ export function createWebhookServer(host: NodeHost, options: WebhookOptions) {
   async function deliver(request: IncomingMessage) {
     if (request.method !== 'POST') throw new Rejected(405);
     const path = request.url ?? '';
+    const resume = /^\/resume\/([a-f0-9-]{36})$/.exec(path);
+    if (resume) {
+      const id = resume[1]!;
+      const token = singleHeader(request, 'authorization')?.match(/^Bearer ([a-f0-9-]{36})$/)?.[1];
+      if (!token) throw new Rejected(401);
+      const expected = host.waitInfo(id)?.token;
+      if (typeof expected !== 'string' || !timingSafeEqual(Buffer.from(token), Buffer.from(expected)))
+        throw new Rejected(404);
+      const bytes = await bodyBytes(request, Math.min(limit, 64 * 1024));
+      let payload: unknown;
+      try {
+        payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+      } catch {
+        throw new Rejected(400);
+      }
+      if (!isPlainObject(payload)) throw new Rejected(400);
+      if (!host.resolveWait(id, token, 'event', payload as JsonObject)) throw new Rejected(409);
+      return id;
+    }
     const target = host.webhook(path);
     if (!target) throw new Rejected(404);
     const signature = singleHeader(request, 'x-draflow-signature');

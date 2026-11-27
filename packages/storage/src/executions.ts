@@ -13,11 +13,14 @@ export interface ExecutionSummary {
   status: RunStatus;
   /** Host stopped before task counts could be recovered. */
   interrupted?: boolean;
+  waitingFor?: string;
+  dueAt?: number;
   executed: number;
   reused: number;
 }
 
 export interface ExecutionDetail {
+  transitions?: { nodeId: string; at: number; reason: string }[];
   workflow: Workflow;
   /** In visitation order, including cached tasks that participated in this run. */
   tasks: {

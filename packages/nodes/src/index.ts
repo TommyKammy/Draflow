@@ -1,4 +1,5 @@
 import type { NodeType } from '@draflow/core';
+import { waitNode } from './wait.js';
 import { aggregateNode } from './aggregate.js';
 import { splitOutNode } from './split-out.js';
 import { scheduleNode } from './schedule.js';
@@ -24,7 +25,10 @@ export { noOpNode } from './noop.js';
 export { setNode } from './set.js';
 export * from './helpers.js';
 
+export { waitNode } from './wait.js';
+
 export const standardNodes: NodeType[] = [
+  waitNode,
   manualTriggerNode,
   webhookNode,
   scheduleNode,
