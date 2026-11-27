@@ -191,8 +191,12 @@ export class PostgresDatabase {
           'CREATE TABLE IF NOT EXISTS leases(id text PRIMARY KEY REFERENCES runs("runId"), owner text NOT NULL, generation bigint NOT NULL, expires bigint NOT NULL)',
         );
       }
-      if (this.raw('SELECT version FROM ledger_version').rows[0]?.version !== 1)
-        throw Error('Unsupported shared ledger version');
+      const version = this.raw('SELECT version FROM ledger_version').rows[0]?.version;
+      if (version === 1) {
+        // The default also supplies identities when importing Phase 6 active rows.
+        this.raw(`ALTER TABLE active ADD COLUMN registration text NOT NULL DEFAULT gen_random_uuid()::text;
+          UPDATE ledger_version SET version=2`);
+      } else if (version !== 2) throw Error('Unsupported shared ledger version');
       this.raw(identifiers(temporaryWebhookTable.replaceAll('INTEGER', 'BIGINT')));
       this.commit();
     } catch (error) {

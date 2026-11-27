@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { NodeRegistry } from '@draflow/core';
 import { standardNodes } from '@draflow/nodes';
-import { NodeHost } from '../dist/host.js';
+import { NodeHost, WebhookGone } from '../dist/host.js';
 import { migrateLedger } from '../dist/migrate.js';
 import { until } from './fixture.mjs';
 const url = process.env.DRAFLOW_TEST_POSTGRES;
@@ -480,5 +480,37 @@ test(
     assert.equal(new Set(ids).size, 3);
     assert.equal(h.byEvent(flow.id, 'schedule', 'same').runId, ids[2]);
     assert.equal(h.byEvent(flow.id, 'schedule', 'same', 'webhook').runId, ids[1]);
+  },
+);
+
+test(
+  'a shared intake rejects an upload crossing same-revision reactivation on another intake',
+  { skip: !url },
+  (t) => {
+    const shared = { organization: dir(t), connectionString: url, role: 'intake' };
+    const a = new NodeHost('', { registry, shared });
+    const b = new NodeHost('', { registry, shared });
+    t.after(() => a.close());
+    t.after(() => b.close());
+    const flow = {
+      ...example,
+      nodes: [{ ...example.nodes[0], type: 'draflow.webhook', parameters: { path: 'orders' } }],
+      connections: [],
+    };
+    const rev = a.publish(flow);
+    a.activate(flow.id, rev);
+    const path = '/webhook/orders';
+    const uploading = a.webhook(path);
+    b.activate(flow.id, rev);
+    assert.equal(a.webhook(path).registration, uploading.registration);
+    b.deactivate(flow.id);
+    b.activate(flow.id, rev);
+    const event = { key: 'delivery', items: [{ json: {} }] };
+    assert.throws(() => a.acceptWebhook(path, uploading, event), WebhookGone);
+    assert.equal(a.byEvent(flow.id, uploading.triggerNodeId, event.key), undefined);
+    assert.equal(a.stats().queued, 0);
+    const current = b.webhook(path);
+    assert.equal(current.registration, a.webhook(path).registration);
+    assert.ok(a.acceptWebhook(path, current, event));
   },
 );

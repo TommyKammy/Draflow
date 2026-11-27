@@ -46,7 +46,6 @@ export class NodeHost {
   readonly #ledger: ExecutionLedger;
   readonly #engine: ExecutionEngineOptions;
   // Only in-flight uploads need to distinguish successive activations of the same revision.
-  readonly #webhookActivations = new Map<string, { revision: number; token: symbol }>();
   readonly #capacity: number;
   readonly #ttl: number;
   readonly #scheduleClock: NonNullable<HostOptions['scheduleClock']>;
@@ -300,7 +299,6 @@ export class NodeHost {
         return { triggerNodeId: node.id, spec, nextAt: nextTime(spec, now) };
       });
     this.#updateRegistration((prepare) => this.#ledger.activate(id, revision, routes, schedules, prepare));
-    if (this.#webhookActivations.get(id)?.revision !== revision) this.#webhookActivations.delete(id);
   }
 
   listenTest(workflow: Workflow, triggerNodeId: string, ttlMs = 60_000) {
@@ -323,16 +321,7 @@ export class NodeHost {
 
   webhook(path: string) {
     this.#ready();
-    const route = this.#ledger.webhook(path);
-    if (!route) return undefined;
-    // A test URL already has a unique, non-reusable session ID.
-    if (path.startsWith('/webhook-test/')) return { ...route, registration: route.workflowId };
-    let activation = this.#webhookActivations.get(route.workflowId);
-    if (!activation) {
-      activation = { revision: route.revision, token: Symbol() };
-      this.#webhookActivations.set(route.workflowId, activation);
-    }
-    return { ...route, registration: activation.token };
+    return this.#ledger.webhook(path);
   }
 
   acceptWebhook(path: string, target: NonNullable<ReturnType<NodeHost['webhook']>>, event: TriggerEvent) {
@@ -364,7 +353,6 @@ export class NodeHost {
   deactivate(id: string) {
     this.#ready();
     this.#updateRegistration((prepare) => this.#ledger.deactivate(id, prepare));
-    this.#webhookActivations.delete(id);
   }
 
   accept(id: string, trigger: string, event: Omit<TriggerEvent, 'runId'>): string {

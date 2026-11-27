@@ -91,6 +91,11 @@ export class ExecutionLedger {
         BEGIN EXCLUSIVE;
         ${ledgerTables}
         ${sqliteTriggers}`);
+        if (!this.#prepare("SELECT 1 FROM pragma_table_info('active') WHERE name='registration'").get()) {
+          this.#db.exec(
+            "ALTER TABLE active ADD COLUMN registration TEXT NOT NULL DEFAULT ''; UPDATE active SET registration=lower(hex(randomblob(16)))",
+          );
+        }
         if (!this.#prepare("SELECT 1 FROM pragma_table_info('pageRuns') WHERE name='skipped'").get()) {
           this.#db.exec('ALTER TABLE pageRuns ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0');
         }
@@ -894,8 +899,8 @@ export class ExecutionLedger {
         return false;
       this.#prepare('DELETE FROM webhookRoutes WHERE workflowId=?').run(id);
       this.#prepare(
-        'INSERT INTO active VALUES(?,?) ON CONFLICT(workflowId) DO UPDATE SET revision=excluded.revision',
-      ).run(id, revision);
+        'INSERT INTO active(workflowId,revision,registration) VALUES(?,?,?) ON CONFLICT(workflowId) DO UPDATE SET revision=excluded.revision,registration=excluded.registration',
+      ).run(id, revision, randomUUID());
       this.#prepare('DELETE FROM schedules WHERE workflowId=?').run(id);
       for (const schedule of schedules) {
         this.#prepare('INSERT INTO schedules VALUES(?,?,?,?)').run(
@@ -994,11 +999,12 @@ export class ExecutionLedger {
 
   webhook(path: string) {
     const row = this.#prepare(
-      `SELECT workflowId,revision,triggerNodeId FROM webhookRoutes JOIN active USING(workflowId) WHERE path=?
-      UNION ALL SELECT workflowId,revision,triggerNodeId FROM testWebhooks WHERE path=? AND expiresAt>?`,
+      `SELECT workflowId,revision,triggerNodeId,registration FROM webhookRoutes JOIN active USING(workflowId) WHERE path=?
+      UNION ALL SELECT workflowId,revision,triggerNodeId,workflowId FROM testWebhooks WHERE path=? AND expiresAt>?`,
     ).get(path, path, this.#now());
     return (
       row && {
+        registration: String(row.registration),
         workflowId: String(row.workflowId),
         revision: Number(row.revision),
         triggerNodeId: String(row.triggerNodeId),
