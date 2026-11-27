@@ -3,7 +3,7 @@ import type { Translate } from '../locale.js';
 import type { Box } from './group-box.js';
 import type { Point } from './scene.js';
 
-export function groupLayer(actions: {
+export function groupLayer(actions?: {
   toggle(id: string): void; edit(id: string): void; enabled(): boolean; scale(): number;
   preview(id: string): (offset: Point) => void; move(id: string, offset: Point): void;
 }) {
@@ -19,7 +19,7 @@ export function groupLayer(actions: {
     if (old.button.hasPointerCapture(old.pointer)) old.button.releasePointerCapture(old.pointer);
   }
   function updatePointer(event: PointerEvent) {
-    if (!drag || event.pointerId !== drag.pointer) return;
+    if (!actions || !drag || event.pointerId !== drag.pointer) return;
     const offset = { x: 16 * Math.round((event.clientX - drag.start.x) / actions.scale() / 16),
       y: 16 * Math.round((event.clientY - drag.start.y) / actions.scale() / 16) };
     drag.offset = offset;
@@ -32,6 +32,11 @@ export function groupLayer(actions: {
     const bar = document.createElement('div');
     const toggle = document.createElement('button'), label = document.createElement('button');
     toggle.type = label.type = 'button';
+    bar.append(toggle, label);
+    frame.append(bar);
+    layer.append(frame);
+    elements.set(id, frame);
+    if (!actions) return frame;
     toggle.onclick = () => actions.toggle(id);
     let moved = false;
     label.onclick = e => { if (actions.enabled() && (!moved || !e.detail)) actions.edit(id); moved = false; };
@@ -64,10 +69,6 @@ export function groupLayer(actions: {
       const step = steps[e.key];
       if (e.target === label && actions.enabled() && step) { e.preventDefault(); actions.move(id, step); }
     };
-    bar.append(toggle, label);
-    frame.append(bar);
-    layer.append(frame);
-    elements.set(id, frame);
     return frame;
   }
   function position(id: string, box: Box) {
@@ -84,7 +85,7 @@ export function groupLayer(actions: {
       toggle!.setAttribute('aria-expanded', String(!collapsed.has(g.id)));
       toggle!.setAttribute('aria-label', t(collapsed.has(g.id) ? 'Expand' : 'Collapse') + ' · ' + g.label);
       label!.textContent = g.label;
-      label!.disabled = !actions.enabled();
+      label!.disabled = !actions?.enabled();
       el.setAttribute('aria-label', g.label);
     }
   }

@@ -112,8 +112,10 @@ export function complete(source: string, cursor: number, data: CompletionData): 
     }
     const query = (partial[1] ?? partial[3] ?? '').toLowerCase();
     const from = cursor - partial[0].length;
-    const end = cursor + (partial[1] !== undefined ? /^[\w$]*/.exec(after)![0].length :
-      quotedEnd(after, partial[2]!, ']'));
+    let end = cursor;
+    if (partial[1] !== undefined) end += /^[\w$]*/.exec(after)![0].length;
+    else if (partial[2]) end += quotedEnd(after, partial[2], ']');
+    else end += /^\d*(?:\s*\])?/.exec(after)![0].length;
     if (value !== null && typeof value === 'object') {
       for (const key in value) {
         if (!Object.hasOwn(value, key) || ['constructor','prototype','__proto__'].includes(key) || !key.toLowerCase().startsWith(query)) continue;

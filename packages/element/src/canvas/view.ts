@@ -41,7 +41,8 @@ export function createCanvas(host: HTMLElement, registry: NodeRegistry, actions:
   panel.append(surface, controls);
 
   let scale = 1, x = 0, y = 0;
-  const sticky = noteLayer(actions.enabled, () => scale, actions.openNote, value => actions.commit({ type: 'note', id: value.id, value }));
+  const sticky = noteLayer({ enabled: actions.enabled, scale: () => scale, open: actions.openNote,
+    move: value => actions.commit({ type: 'note', id: value.id, value }) });
   scene.world.prepend(sticky.layer);
   let language: keyof typeof labels = 'en';
   const overrides = new Map<string, boolean>();

@@ -19,10 +19,12 @@ export function executionHistory(store: ExecutionStore, current: () => Workflow,
   message.setAttribute('aria-live', 'polite');
   const warning = document.createElement('p');
   warning.setAttribute('aria-live', 'polite');
-  let request = 0, selection = 0, inspecting = false;
+  let request = 0, selection = 0;
+  let inspecting: string | undefined;
+  let deletedDuringList = new Set<string>();
   let replay: ReturnType<typeof executionReplay> | undefined;
   function clearReplay() {
-    selection++; inspecting = false;
+    selection++; inspecting = undefined;
     replay?.destroy();
     replay = undefined;
   }
@@ -40,14 +42,17 @@ export function executionHistory(store: ExecutionStore, current: () => Workflow,
     clearReplay();
     const generation = ++request, workflowId = current().id;
     const valid = () => dialog.open && generation === request && current().id === workflowId;
+    deletedDuringList = new Set();
     list.replaceChildren();
     message.textContent = t('Loading history');
     try {
-      const rows = await store.list(workflowId, (filter.value || undefined) as RunStatus | undefined);
+      const result = await store.list(workflowId, (filter.value || undefined) as RunStatus | undefined);
       if (!valid()) return;
+      const rows = result.filter(row => !deletedDuringList.has(row.id));
       message.textContent = rows.length ? '' : t('No executions');
       for (const row of rows) {
         const li = document.createElement('li');
+        li.dataset.runId = row.id;
         const scope = [row.startNodeId && t('From node'), row.startNodeId, row.destinationNodeId && t(row.destinationMode === 'exclusive' ? 'Before node' : 'Through node'),
           row.destinationNodeId].filter(Boolean).join(' ');
         li.textContent = [new Date(row.startedAt).toLocaleString(dialog.closest('[lang]')?.getAttribute('lang') || undefined), row.id, t(row.status),
@@ -59,7 +64,7 @@ export function executionHistory(store: ExecutionStore, current: () => Workflow,
           open.onclick = async () => {
             if (!valid()) return;
             clearReplay();
-            inspecting = true;
+            inspecting = row.id;
             const ticket = selection;
             const selected = () => valid() && ticket === selection;
             message.textContent = t('Loading history');
@@ -82,10 +87,17 @@ export function executionHistory(store: ExecutionStore, current: () => Workflow,
           remove.type = 'button'; remove.textContent = t('Delete');
           remove.onclick = async () => {
             if (!valid() || !canDelete()) return;
+            if (remove.matches(':focus')) filter.focus();
             remove.disabled = true;
             try {
               await store.delete(workflowId, row.id);
-              if (dialog.open && current().id === workflowId) { filter.focus(); await refresh(); }
+              if (!dialog.open || current().id !== workflowId) return;
+              deletedDuringList.add(row.id);
+              const removed = [...list.children].find(el => (el as HTMLElement).dataset.runId === row.id);
+              if (removed?.matches(':focus-within') || (inspecting === row.id && replay?.root.matches(':focus-within'))) filter.focus();
+              removed?.remove();
+              if (inspecting === row.id) { clearReplay(); message.textContent = ''; }
+              if (!list.childElementCount) message.textContent = t('No executions');
             } catch (error) { if (valid()) { message.textContent = String(error); remove.disabled = false; } }
           };
           li.append(' ', remove);
@@ -104,7 +116,7 @@ export function executionHistory(store: ExecutionStore, current: () => Workflow,
     request++; clearReplay();
     dialog.close(); filter.value = ''; list.replaceChildren(); warning.textContent = '';
   }
-  return { button, dialog, warning, setLocale, refresh: () => { if (!inspecting) void refresh(); }, reset,
+  return { button, dialog, warning, setLocale, refresh: () => { if (inspecting === undefined) void refresh(); }, reset,
     updateCopy: () => replay?.updateCopy(canCopy()),
     failed(error: unknown) { warning.textContent = t('History unavailable') + ' · ' + String(error); },
   };

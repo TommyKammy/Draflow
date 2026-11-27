@@ -22,3 +22,9 @@ it('keeps missing inputs, unresolved lineage, comments and ordinary template tex
   expect(choices("={{ $('A').item.json.| }}", { ...data, json: () => undefined })).toEqual([]);
   expect(choices('={{ $json.| }}', { ...data, json: () => undefined })).toEqual([]);
 });
+
+it('replaces the whole numeric subscript at the caret and preserves the surrounding expression', () => {
+  const context = { ...data, json: () => ({ rows: Array.from({ length: 13 }, (_, value) => ({ value })) }) };
+  expect(choices('=x {{ $json.rows[1|2].value + 1 }} y', context))
+    .toContainEqual(['10', '=x {{ $json.rows[10].value + 1 }} y']);
+});

@@ -4,7 +4,9 @@ import { CanvasScene } from './canvas/scene.js';
 import { dataPanel } from './details/data.js';
 import { button } from './details/fields.js';
 import type { Locale, Translate } from './locale.js';
-import { groupsOf } from './store/groups.js';
+import { groupLayer } from './canvas/groups.js';
+import { noteLayer } from './canvas/notes.js';
+import { notesOf } from './store/notes.js';
 
 export function executionReplay(detail: ExecutionDetail, summary: ExecutionSummary, registry: NodeRegistry,
   locale: Locale, t: Translate, copy: ((workflow: Workflow) => void) | undefined) {
@@ -16,7 +18,16 @@ export function executionReplay(detail: ExecutionDetail, summary: ExecutionSumma
   title.tabIndex = -1;
   const names = new Map(workflow.nodes.map(n => [n.id, n.name]));
   const scene = new CanvasScene();
-  scene.setWorkflow(workflow, registry, new Map(groupsOf(workflow)?.map(group => [group.id, false])));
+  scene.setWorkflow(workflow, registry, new Map());
+  const groups = groupLayer(), sticky = noteLayer();
+  groups.render(scene.groups ?? [], scene.boxes, scene.collapsed, t);
+  const notes = notesOf(workflow) ?? [];
+  sticky.render(notes, t);
+  for (const note of notes) {
+    scene.include(note.x, note.y);
+    scene.include(note.x + note.width, note.y + note.height);
+  }
+  scene.world.prepend(groups.layer, sticky.layer);
   scene.setLocale(locale);
   const graph = document.createElement('div');
   graph.className = 'canvas replay-graph';
