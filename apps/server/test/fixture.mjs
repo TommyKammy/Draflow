@@ -50,8 +50,8 @@ export function workflow(label = 'first') {
 }
 
 export const event = { items: [{ json: { order: 42 } }], key: 'delivery' };
-export async function until(check) {
-  const end = Date.now() + 5000;
+export async function until(check, timeoutMs = 5000) {
+  const end = Date.now() + timeoutMs;
   while (!check()) {
     if (Date.now() > end) throw new Error('Worker did not reach expected state');
     await new Promise((resolve) => setTimeout(resolve, 5));

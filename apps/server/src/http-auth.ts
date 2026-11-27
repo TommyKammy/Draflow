@@ -9,6 +9,7 @@ export type HttpGrant = {
 } & ({ kind: 'bearer' } | { kind: 'apiKey'; header: string });
 
 export interface HttpAuth {
+  organization?: string;
   grants: readonly HttpGrant[];
   resolve(id: string): Promise<string | undefined> | string | undefined;
 }
@@ -19,6 +20,7 @@ export const recordedTransport = new AsyncLocalStorage<{
 }>();
 
 export interface RateGate {
+  reserve?(target: string): { delay: number; release?: () => void };
   remaining(target: string): number;
   wait(ms: number, signal?: AbortSignal | null): Promise<void>;
   hold(target: string, header: string | null): void;
@@ -173,33 +175,46 @@ export function serverHttp(
     const publisher = sharedRateLimit.getStore();
     const gate = publisher ?? activeGate?.();
     const target = gate ? JSON.stringify([new URL(url).origin, binding.id ?? null]) : '';
-    if (gate) {
-      let remaining;
-      while ((remaining = gate.remaining(target)) > 0) {
-        if (binding.type === 'draflow.pages') throw new ReadDeferred(remaining);
-        recordedTransport.getStore()?.defer();
-        await gate.wait(remaining, init?.signal);
-      }
-    }
-    init?.signal?.throwIfAborted();
-    recordedTransport.getStore()?.dispatch();
+    let release: (() => void) | undefined;
     try {
-      init?.signal?.throwIfAborted();
-      response = await fetchFn(url, init);
-      if (response.status === 429 || response.status === 503)
-        publisher?.hold(target, response.headers.get('retry-after'));
-      if (binding.type === 'draflow.pages' && (response.status === 429 || response.status === 503)) {
-        void response.body?.cancel().catch(() => {});
-        throw new ReadThrottled(response.status, response.headers.get('retry-after'));
+      if (gate) {
+        for (;;) {
+          const permit = gate.reserve?.(target);
+          const remaining = permit?.delay ?? gate.remaining(target);
+          if (remaining <= 0) {
+            release = permit?.release;
+            break;
+          }
+          if (binding.type === 'draflow.pages') throw new ReadDeferred(remaining);
+          recordedTransport.getStore()?.defer();
+          await gate.wait(remaining, init?.signal);
+        }
       }
-      if (binding.type === 'draflow.pages' && response.status === 410) {
-        void response.body?.cancel().catch(() => {});
-        bytes = null;
-      } else bytes = await readBounded(response, limit, init?.signal);
-    } catch (error) {
-      if (error instanceof ResponseLimit || error instanceof ReadThrottled) throw error;
-      // Provider, transport and stream errors can contain request headers.
-      throw new Error('HTTP request failed');
+      init?.signal?.throwIfAborted();
+      recordedTransport.getStore()?.dispatch();
+      try {
+        init?.signal?.throwIfAborted();
+        response = await fetchFn(url, init);
+        if (response.status === 429 || response.status === 503)
+          (publisher ?? (gate?.reserve ? gate : undefined))?.hold(
+            target,
+            response.headers.get('retry-after'),
+          );
+        if (binding.type === 'draflow.pages' && (response.status === 429 || response.status === 503)) {
+          void response.body?.cancel().catch(() => {});
+          throw new ReadThrottled(response.status, response.headers.get('retry-after'));
+        }
+        if (binding.type === 'draflow.pages' && response.status === 410) {
+          void response.body?.cancel().catch(() => {});
+          bytes = null;
+        } else bytes = await readBounded(response, limit, init?.signal);
+      } catch (error) {
+        if (error instanceof ResponseLimit || error instanceof ReadThrottled) throw error;
+        // Provider, transport and stream errors can contain request headers.
+        throw new Error('HTTP request failed');
+      }
+    } finally {
+      release?.();
     }
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     if (secret && bytes && reflectsSecret(bytes, secret))

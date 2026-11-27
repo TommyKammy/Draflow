@@ -8,7 +8,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { NodeRegistry } from '@draflow/core';
 import { standardNodes } from '@draflow/nodes';
 import { NodeHost } from '../dist/host.js';
+const sharedUrl = process.env.DRAFLOW_BENCH_POSTGRES;
 if (!process.argv[2]) {
+  if (sharedUrl) throw Error('Specify batch concurrency for the PostgreSQL benchmark');
   const samples = [];
   for (let trial = 0; trial < 5; trial++) {
     for (const concurrency of [1, 4]) {
@@ -39,6 +41,7 @@ const c = Number(process.argv[2] ?? 1),
   db = join(dir, 'bench.db');
 const rows = new Map();
 const h = new NodeHost(db, {
+  ...(sharedUrl && { shared: { connectionString: sharedUrl, organization: dir } }),
   registry: new NodeRegistry().registerAll(standardNodes),
   fetch: async (url, init) => {
     if (init.method === 'POST') {
@@ -100,7 +103,7 @@ try {
       concurrency: c,
       ms,
       rssKiB: process.resourceUsage().maxRSS,
-      dbBytes: statSync(db).size,
+      ...(sharedUrl ? { backend: 'postgres' } : { dbBytes: statSync(db).size }),
       admissionP95: admission.sort((a, b) => a - b)[23],
       queueP95: queue.sort((a, b) => a - b)[23],
     }),

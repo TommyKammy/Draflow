@@ -1,3 +1,4 @@
+import { type SharedOptions, OwnershipLost } from './postgres.js';
 import { randomUUID } from 'node:crypto';
 import { setImmediate as yieldToHost } from 'node:timers/promises';
 import { isPlainObject, type ExecutionEngineOptions, type JsonObject, type Workflow } from '@draflow/core';
@@ -17,7 +18,7 @@ import { latestDue, nextTime, scheduleFor } from './schedule.js';
 import {
   executionTasks,
   QueueFull,
-  SqliteLedger,
+  ExecutionLedger,
   type DeliverySource,
   type Reconciliation,
 } from './sqlite.js';
@@ -27,6 +28,8 @@ interface HostOptions extends Omit<ExecutionEngineOptions, 'credentialFetch'> {
     now(): number;
     arm(callback: () => void, delayMs: number): () => void;
   };
+  shared?: SharedOptions;
+  organization?: string;
   httpAuth?: HttpAuth;
   maxHttpResponseBytes?: number;
   maxCallDepth?: number;
@@ -40,7 +43,7 @@ interface HostOptions extends Omit<ExecutionEngineOptions, 'credentialFetch'> {
 export class WebhookGone extends Error {}
 
 export class NodeHost {
-  readonly #ledger: SqliteLedger;
+  readonly #ledger: ExecutionLedger;
   readonly #engine: ExecutionEngineOptions;
   // Only in-flight uploads need to distinguish successive activations of the same revision.
   readonly #webhookActivations = new Map<string, { revision: number; token: symbol }>();
@@ -54,6 +57,7 @@ export class NodeHost {
   readonly #parallel = new Set<Promise<void>>();
   readonly #parallelLimit: number;
   #latestCooldown = 0;
+  #poll?: ReturnType<typeof setInterval>;
   #worker: Promise<void> | undefined;
   #fault: Error | undefined;
 
@@ -62,7 +66,7 @@ export class NodeHost {
     private readonly options: HostOptions,
   ) {
     this.#scheduleClock = options.scheduleClock ?? {
-      now: Date.now,
+      now: () => this.#ledger?.shared?.now() ?? Date.now(),
       arm(callback, delay) {
         const timer = setTimeout(callback, delay);
         return () => clearTimeout(timer);
@@ -77,25 +81,72 @@ export class NodeHost {
     for (const n of [this.#capacity, this.#ttl, budget, options.maxCallDepth ?? 8]) {
       if (!Number.isSafeInteger(n) || n < 0) throw new RangeError('Invalid host limit');
     }
+    if (options.organization && options.shared && options.organization !== options.shared.organization)
+      throw Error('Ledger organization mismatch');
+    const organization = options.shared?.organization ?? options.organization;
+    if (organization && options.httpAuth && options.httpAuth.organization !== organization)
+      throw Error('HTTP credentials belong to a different organization');
+    const fetchFn = options.fetch ?? fetch;
+    const transport: typeof fetchFn = (url, init) => {
+      if (this.#ledger.shared) {
+        this.#ledger.shared.checkDispatch();
+        const token = this.#ledger.shared.lease.getStore();
+        if (token && this.#ledger.canceled(token.id)) throw Error('Run canceled');
+      }
+      return fetchFn(url, init);
+    };
     this.#engine = {
       ...options,
+      fetch: transport,
       credentialFetch: serverHttp(
-        options.fetch ?? fetch,
+        transport,
         options.maxHttpResponseBytes ?? 1024 * 1024,
         options.httpAuth,
-        () => (this.#latestCooldown > this.#scheduleClock.now() ? this.#rateGate() : undefined),
+        () =>
+          this.options.shared || this.#latestCooldown > this.#scheduleClock.now()
+            ? this.#rateGate()
+            : undefined,
       ),
     };
-    this.#ledger = new SqliteLedger(path, budget, options.maxCallDepth ?? 8);
+    this.#ledger = new ExecutionLedger(
+      path,
+      budget,
+      options.maxCallDepth ?? 8,
+      options.shared,
+      options.organization,
+    );
+    if (this.#ledger.shared)
+      this.#ledger.shared.onDisconnect = () =>
+        this.#workerFailed(new Error('PostgreSQL session disconnected'));
     try {
       this.#latestCooldown = this.#ledger.latestCooldown();
-      this.#ledger.recover();
+      if (this.#executes()) this.#ledger.recover();
       const checked = new Set<string>();
       for (const row of this.#ledger.requiredPublications()) {
         this.#checkPublication(
           this.#ledger.publication(String(row.workflowId), Number(row.revision)),
           checked,
         );
+      }
+      if (options.shared && options.shared.role !== 'intake') {
+        const shared = this.#ledger.shared!;
+        const every = Math.min(options.shared.pollMs ?? 250, Math.floor(shared.leaseMs / 3));
+        this.#poll = setInterval(() => {
+          if (this.#stopping || this.#fault) return;
+          try {
+            if (this.#executes()) {
+              shared.heartbeat();
+              this.#ledger.recover();
+              for (const [id, controller] of this.#active) {
+                if (this.#ledger.canceled(id) || !shared.ownsLiveRun(id)) controller.abort();
+              }
+              this.#wake();
+            }
+            if (this.#schedules()) this.#tickSchedules();
+          } catch (error) {
+            this.#workerFailed(error);
+          }
+        }, every);
       }
       this.#armSchedules();
       this.#wake();
@@ -265,7 +316,7 @@ export class NodeHost {
     if (!snapshot.nodes.some((n) => n.id === triggerNodeId && n.type === 'draflow.webhook' && !n.disabled)) {
       throw new Error('Expected an enabled Webhook node');
     }
-    const expiresAt = Date.now() + ttlMs;
+    const expiresAt = (this.#ledger.shared?.now() ?? Date.now()) + ttlMs;
     this.#ledger.registerTestWebhook(path, snapshot, triggerNodeId, expiresAt);
     return { path, workflowId, expiresAt };
   }
@@ -363,6 +414,7 @@ export class NodeHost {
   }
 
   #prepareScheduleTimer(minDelay = 0) {
+    if (this.options.shared) return;
     const next = this.#ledger.nextScheduleTime();
     if (next === undefined) return;
     // Recheck long waits periodically in case the wall clock moves.
@@ -370,7 +422,14 @@ export class NodeHost {
     return this.#scheduleClock.arm(() => this.#tickSchedules(), delay);
   }
 
+  #executes() {
+    return !['intake', 'scheduler'].includes(this.options.shared?.role ?? 'all');
+  }
+  #schedules() {
+    return !['intake', 'worker'].includes(this.options.shared?.role ?? 'all');
+  }
   #armSchedules(minDelay = 0) {
+    if (this.options.shared) return; // Every scheduler polls the durable due times.
     const cancel = this.#prepareScheduleTimer(minDelay);
     this.#cancelSchedule?.();
     this.#cancelSchedule = cancel;
@@ -379,7 +438,7 @@ export class NodeHost {
   #tickSchedules() {
     if (this.#stopping || this.#fault) return;
     try {
-      const now = this.#scheduleClock.now();
+      const now = this.#ledger.shared?.now() ?? this.#scheduleClock.now();
       if (this.#ledger.wakeRetries(now)) this.#wake();
       for (const row of this.#ledger.dueWaits(now)) {
         this.#ledger.resolveWait(String(row.runId), String(row.token), 'timer', {}, now);
@@ -393,6 +452,7 @@ export class NodeHost {
           due,
           nextTime(row.spec, due),
           this.#capacity,
+          row,
         );
         this.#wake();
       }
@@ -411,7 +471,7 @@ export class NodeHost {
   }
 
   #wake() {
-    if (this.#worker) return;
+    if (this.#worker || !this.#executes()) return;
     this.#worker = this.#drain().catch((error) => {
       // A failed completion commit leaves the durable claim intact for recovery.
       this.#workerFailed(error);
@@ -420,10 +480,22 @@ export class NodeHost {
 
   #rateGate(): RateGate {
     const clock = this.#scheduleClock;
+    const shared = this.#ledger.shared;
     return {
+      ...(shared && {
+        reserve: (target: string) => {
+          const localHold =
+            this.#latestCooldown > clock.now() ? this.#ledger.rateLimit(target) - clock.now() : 0;
+          return localHold > 0 ? { delay: localHold } : shared.reserveTarget(target);
+        },
+      }),
       remaining: (target) => this.#ledger.rateLimit(target) - clock.now(),
       hold: (target, header) => {
-        const until = Math.min(Number.MAX_SAFE_INTEGER, retryTime(header, clock.now(), 1));
+        const until = Math.min(Number.MAX_SAFE_INTEGER, retryTime(header, shared?.now() ?? clock.now(), 1));
+        if (shared) {
+          shared.holdTarget(target, until);
+          return;
+        }
         this.#ledger.holdRate(target, until);
         this.#latestCooldown = Math.max(this.#latestCooldown, until);
       },
@@ -454,7 +526,7 @@ export class NodeHost {
     while (true) {
       await yieldToHost();
       if (this.#stopping || this.#fault) return;
-      const job = this.#ledger.claim(this.#parallel.size < this.#parallelLimit);
+      const job = this.#ledger.claim(this.#parallel.size < this.#parallelLimit, this.#parallelLimit);
       if (!job) {
         this.#worker = undefined;
         return;
@@ -464,7 +536,16 @@ export class NodeHost {
       this.#active.set(id, controller);
       const parallel = this.#ledger.parallelChild(id);
       const run = () => this.#runJob(job, controller);
-      const task = (parallel ? this.#withRateLimit(run) : run()).finally(() => this.#active.delete(id));
+      const invoke = () => (parallel ? this.#withRateLimit(run) : run());
+      const shared = this.#ledger.shared;
+      const executing = shared ? shared.lease.run({ id, generation: job.generation! }, invoke) : invoke();
+      const task = executing
+        .catch((error) => {
+          if (!(error instanceof OwnershipLost)) throw error;
+        })
+        .finally(() => {
+          if (this.#active.get(id) === controller) this.#active.delete(id);
+        });
       if (parallel) {
         const pending = task
           .catch((error) => this.#workerFailed(error))
@@ -477,7 +558,7 @@ export class NodeHost {
     }
   }
 
-  async #runJob(job: NonNullable<ReturnType<SqliteLedger['claim']>>, controller: AbortController) {
+  async #runJob(job: NonNullable<ReturnType<ExecutionLedger['claim']>>, controller: AbortController) {
     const { receipt: r, items } = job;
     if (this.#ledger.canceled(r.runId)) {
       this.#ledger.finishCanceled(r);
@@ -618,6 +699,7 @@ export class NodeHost {
   async close(deadlineMs = 5000) {
     if (this.#closed) return;
     this.#stopping = true;
+    clearInterval(this.#poll);
     this.#cancelSchedule?.();
     let timer: NodeJS.Timeout | undefined;
     try {

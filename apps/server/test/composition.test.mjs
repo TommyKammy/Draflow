@@ -42,8 +42,14 @@ const fixture = (t, options = {}) => {
   const dir = mkdtempSync(join(tmpdir(), 'draflow-composition-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const db = join(dir, 'host.db');
-  const open = () => {
-    const h = new NodeHost(db, { registry: new NodeRegistry().registerAll(standardNodes), ...options });
+  const open = (role = 'all') => {
+    const h = new NodeHost(db, {
+      registry: new NodeRegistry().registerAll(standardNodes),
+      ...options,
+      ...(process.env.DRAFLOW_TEST_SHARED && { shared: {
+        connectionString: process.env.DRAFLOW_TEST_SHARED, organization: db, role, pollMs: 75,
+      } }),
+    });
     t.after(() => h.close());
     return h;
   };
@@ -366,12 +372,13 @@ for (const order of ['before', 'after']) {
     doc.connections.push({ id: 'next', from: { node: 'call', port: 'main', index: 0 }, to: { node: 'post', port: 'main', index: 0 } });
     h.activate('parent', h.publish(doc));
     const original = SqliteLedger.prototype.finish;
+    const operator = process.env.DRAFLOW_TEST_SHARED ? fx.open('intake') : h;
     const id = start(h);
     t.mock.method(SqliteLedger.prototype, 'finish', function (receipt, ...args) {
       const child = receipt.mode === 'subworkflow';
-      if (child && order === 'before') assert.ok(h.cancel(id));
+      if (child && order === 'before') assert.ok(operator.cancel(id));
       original.call(this, receipt, ...args);
-      if (child && order === 'after') assert.ok(h.cancel(id));
+      if (child && order === 'after') assert.ok(operator.cancel(id));
     });
     await done(h, id);
     await h.close();

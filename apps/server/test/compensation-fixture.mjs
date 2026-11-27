@@ -8,11 +8,21 @@ const child = example('process-order-batch');
 const source = example('order-import');
 const names = ['reserve', 'charge', 'ship'];
 const undo = ['release', 'refund', 'void'];
-export function open(db, fetch, resolve) {
+export function open(db, fetch, resolve, role = 'all') {
   return new NodeHost(db, {
+    ...(process.env.DRAFLOW_TEST_SHARED && {
+      shared: {
+        connectionString: process.env.DRAFLOW_TEST_SHARED,
+        organization: db,
+        role,
+        leaseMs: 1500,
+        pollMs: 75,
+      },
+    }),
     registry: new NodeRegistry().registerAll(standardNodes),
     fetch,
     httpAuth: {
+      organization: db,
       resolve,
       grants: [
         ['order-import', 'ship'],

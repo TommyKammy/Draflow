@@ -136,9 +136,13 @@ test('accepted redrive excludes concurrent compensation', async (t) => {
   await until(() => h.receipt(root).state === 'finished');
   enabled = true;
   const [point] = h.recoveryInfo(root);
+  const operator = process.env.DRAFLOW_TEST_SHARED
+    ? open(join(dir, 'host.db'), fetch, () => undefined, 'intake')
+    : h;
+  if (operator !== h) t.after(() => operator.close());
   const attempt = h.redrive(root, point.failure);
-  assert.throws(() => h.compensate(root), /settled/);
-  assert.equal(h.redrive(root, point.failure), attempt);
+  assert.throws(() => operator.compensate(root), /settled/);
+  assert.equal(operator.redrive(root, point.failure), attempt);
   await until(() => h.receipt(root).state === 'finished');
   assert.deepEqual(writes, ['reserve', 'charge', 'ship']);
 });

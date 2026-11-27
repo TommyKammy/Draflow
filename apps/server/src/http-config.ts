@@ -26,6 +26,7 @@ export function loadHttpAuth(path: string): HttpAuth {
       throw new Error();
     });
     return {
+      ...(typeof data.organization === 'string' && { organization: data.organization }),
       grants,
       resolve(id) {
         const name = variables.get(id);

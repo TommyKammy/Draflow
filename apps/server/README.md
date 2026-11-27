@@ -217,3 +217,93 @@ Publish the target child first. It must authorize the original workflow in its c
 An explicit request on a settled run returns the durable compensation ID. Repeating it returns the same ID. If a confirmed matching step has `onFailure: true`, a terminal error starts compensation automatically. An interrupted original run can have an unknown outcome for an unrecorded operation. Check its receipt and the external system before deciding how to resolve it. Automatic compensation requires a confirmed terminal error. Ordinary cancellation preserves the original recorded effects. In-flight original operations require reconciliation before an explicit reversal. Once compensation has started, the original run cannot start another redrive.
 
 The original receipt keeps its outcome. `compensationInfo` returns that outcome, the compensation ID, state (`idle`, `compensating`, `review`, `manual`, or `compensated`), and ordered step records. For `review`, inspect the child’s effect and reconcile its key using the existing CLI. Keyed crash recovery requires the receiver to preserve the key across the recovery interval. Use manual delivery when it cannot. A failed, unsent compensation can be retried by its failure ID; repeated requests return the original retry ID. A completed reversal is never invoked by a later step's retry.
+
+## Shared PostgreSQL ledger and worker roles
+
+The SQLite CLI still takes a database path and runs one exclusive host. Setting
+`DRAFLOW_ORGANIZATION` binds that file to the organization on its next open.
+Subsequent opens must supply the same ID. Existing unbound files can continue
+using the original command.
+
+For shared execution, build the server with its optional `pg` dependency. Point
+`DRAFLOW_POSTGRES_URL` at a writable PostgreSQL endpoint and supply a nonempty
+`DRAFLOW_ORGANIZATION`. Run the CLI without a filesystem argument.
+
+```sh
+pnpm --filter @draflow/server build
+DRAFLOW_ROLE=intake node apps/server/dist/cli.js
+```
+
+Start additional processes with the same database and organization. Keep CLI
+stdin open when supervising the JSON-lines service. Use roles as follows.
+
+| Role | Responsibility |
+| --- | --- |
+| `intake` | Accept commands and events, query receipts, serve configured webhooks |
+| `scheduler` | Advance due schedules, timed waits and retry deadlines |
+| `worker` | Claim runs, execute children, renew leases and recover expired owners |
+| `all` (default) | Run all three responsibilities in one process |
+
+Use at least two scheduler-capable hosts for timer availability. Supply the
+same node registry and organization-bound HTTP grants to replicas. Include
+`organization` in the JSON loaded by `DRAFLOW_HTTP_AUTH_FILE`. Each host binds
+its ledger session to a single organization schema. Schema creation requires
+a trusted database service credential. The CLI and its role setting are
+trusted deployment interfaces. End-user authentication and role authorization
+are planned for 7.3. Route webhook traffic and signing keys by organization.
+Temporary test-webhook listeners are local to the registering session.
+
+| Setting | Default | Meaning |
+| --- | ---: | --- |
+| `DRAFLOW_LEASE_MS` | 15000 | DB-clock run lease in milliseconds, minimum 500 |
+| `DRAFLOW_POLL_MS` | 250 | Worker/scheduler poll interval in milliseconds, capped at one third of the lease |
+| `DRAFLOW_ORG_ACTIVE_RUNS` | 32 | Active runs per organization |
+| `DRAFLOW_MAX_PARALLEL_BATCHES` | 4 | Concurrent parallel batch children per organization |
+| `DRAFLOW_TARGET_CONCURRENCY` | 4 | Concurrent transport permits per destination account |
+| `DRAFLOW_RATE_ACCOUNTS` | `{}` | JSON mapping of local credential IDs to shared upstream account names |
+
+Configure the same limits on replicas. Anonymous HTTP requests share a limit
+per origin. Credentials are scoped by origin and organization unless mapped to
+the same upstream account, for example `{"orders-key":"warehouse-production"}`.
+Use that mapping in every organization sharing the account. A 429 or 503
+publishes its cooldown for other workers. A permit expires with a lost owner.
+An upstream request already in flight can outlive that lease. Choose a lease
+that accommodates normal application and database stalls.
+
+### Move a Phase 6 SQLite ledger
+
+1. Stop the original host and pause new admissions. Keep a backup of the closed
+   SQLite file. Configure the target organization, PostgreSQL URL, and account
+   mapping and concurrency as for the eventual workers. Keep target hosts off.
+2. Run `node apps/server/dist/migrate.js /absolute/path/to/ledger.db`. The tool
+   reads a consistent snapshot and writes one destination transaction. Keep the
+   returned table counts and fingerprint. A retry of the identical source
+   returns the same fingerprint. A nonempty destination or changed source
+   prevents a fresh import.
+3. Verify counts, pinned revisions and in-flight receipts using the intake
+   role. Before accepting new work on PostgreSQL, rollback consists of opening
+   the original SQLite file. After admitting work there, switching back
+   requires reconciliation of the two histories.
+4. Switch intake traffic, then enable workers and schedulers. Keep receiver
+   idempotency records through the cutover and recovery window.
+
+### Failover and restore
+
+Use synchronous replication for acknowledged-write durability, a single writable
+endpoint and a supervisor for the CLI. On primary loss, fence the old primary,
+promote a synchronized replica, switch the writer endpoint and restart failed
+hosts. Rebuild or rewind the old primary as needed before rejoining it as a
+read-only standby. Restore synchronous redundancy before relying on protection
+from a further failure. Retrying the same event key recovers an admission whose
+commit response was lost. Worker ownership uses database time and a generation
+checked on ledger writes. Stable delivery keys protect recorded sends where
+the receiver honors them. Reconcile unknown manual sends or expired keys
+against the upstream receipt before authorizing another attempt.
+
+Restore backups into an isolated database. Inspect receipts with an intake
+process before connecting live traffic or starting any execution roles.
+Compare downstream receipts since the backup with the restored ledger,
+especially irreversible deliveries and compensations. The physical failover
+and isolated backup drill can be run with `node apps/server/test/postgres-ha.mjs`
+on a Docker host. The contract and worker process tests use a disposable
+database identified by `DRAFLOW_TEST_POSTGRES`.
