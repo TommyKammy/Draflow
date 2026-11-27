@@ -1,3 +1,4 @@
+import { operatorSchema, postgresReviewClock, seedReviewClock } from './operator-schema.js';
 import { createRequire } from 'node:module';
 import { createHash, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -196,7 +197,11 @@ export class PostgresDatabase {
         // The default also supplies identities when importing Phase 6 active rows.
         this.raw(`ALTER TABLE active ADD COLUMN registration text NOT NULL DEFAULT gen_random_uuid()::text;
           UPDATE ledger_version SET version=2`);
-      } else if (version !== 2) throw Error('Unsupported shared ledger version');
+      } else if (version !== 2 && version !== 3) throw Error('Unsupported shared ledger version');
+      if (version !== 3) {
+        this.raw(identifiers(operatorSchema + postgresReviewClock + seedReviewClock));
+        this.raw('UPDATE ledger_version SET version=3');
+      }
       this.raw(identifiers(temporaryWebhookTable.replaceAll('INTEGER', 'BIGINT')));
       this.commit();
     } catch (error) {
@@ -383,6 +388,12 @@ export class PostgresDatabase {
   }
   heartbeat() {
     this.atomic(() => {
+      this.raw(
+        'INSERT INTO worker_health VALUES($1,' +
+          nowMs +
+          ') ON CONFLICT(worker) DO UPDATE SET stamp=excluded.stamp',
+        [this.owner],
+      );
       this.raw(
         'UPDATE draflow_coord.permits SET expires=' +
           nowMs +

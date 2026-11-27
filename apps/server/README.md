@@ -307,3 +307,48 @@ especially irreversible deliveries and compensations. The physical failover
 and isolated backup drill can be run with `node apps/server/test/postgres-ha.mjs`
 on a Docker host. The contract and worker process tests use a disposable
 database identified by `DRAFLOW_TEST_POSTGRES`.
+
+## Operator API and console
+
+Set `DRAFLOW_OPERATOR_PORT`, `DRAFLOW_ORGANIZATION` and `DRAFLOW_OPERATOR_ACCOUNTS` on the CLI serving operators. Open `/operator/` on that port. The listener defaults to `127.0.0.1`; terminate HTTPS at the reverse proxy for remote operators. SQLite uses one organization-bound host. A PostgreSQL intake can serve the console while separate worker and scheduler processes run the workflows. The first upgraded PostgreSQL process upgrades its organization's schema to version 3. Coordinate the binary rollout per organization: version-2 binaries reject version 3 on startup. The editor, local JSON-lines CLI, and worker protocol keep their existing entry points. The local CLI and direct host API are trusted deployment interfaces; expose only the authenticated HTTP listener to operators.
+
+The account file is a JSON array. For each person and organization, provision a separate high-entropy bearer token (e.g. 32 random bytes encoded as base64url). Store its lowercase SHA-256 hex digest in the file and deliver the token to the operator privately. Each request authenticates against the current file and then checks the organization's ledger policy inside the same transaction as the operation. Removing the token revokes access on the next request. Browser tokens are held in memory until logout or reload.
+
+```json
+[
+  {"organization":"orders","actor":"oncall","role":"operator","grants":["reconcile"],"sha256":"<64 hex characters>"},
+  {"organization":"orders","actor":"release-manager","role":"publisher","sha256":"<different digest>"}
+]
+```
+
+| Role | Allowed operations within the authenticated organization |
+| --- | --- |
+| viewer | Session permissions, filtered runs, safe execution details, history summaries, metrics, audit |
+| operator | Viewer operations plus starting an active trigger, resuming, canceling and redriving |
+| publisher | Viewer operations plus publishing and activating revisions |
+| admin | All operations, including membership changes |
+| disabled | Access revoked |
+
+An operator can additionally receive `reconcile`, `compensate` (including retry), and `credentials` independently. `membership` sets the policy for an actor in the local ledger and takes precedence over the account's initial policy. Credentials continue to use the host's workflow/node/origin grants. The `credentials` operation enables/disables a granted ID or selects a preconfigured version. To rotate a secret, provision the version on every worker first. The optional `versions` object in `DRAFLOW_HTTP_AUTH_FILE` maps credential IDs to version names to environment variable names, for example `{"orders-key":{"rotation-2":"ORDERS_KEY_V2"}}`. Send `credentialVersion:"rotation-2"` with `enabled:true` to select it, or `credentialVersion:null` to restore the default. The worker rechecks the active credential version and destination grant after lookup and rate-limit waits, just before dispatch. An already dispatched request cannot be recalled. The same ID can resolve to different values in different organizations. Configure separate webhook signing keys for each organization's listener.
+
+### Requests and recovery
+
+Use `Authorization: Bearer <token>` on `/operator/<encoded-organization>/api`. Read via GET query parameters. Supported read operations are `session`, `list`, `detail` (id), `history` (workflow), `audit`, and `metrics`. The list accepts exact workflow/run IDs, revision, status and inclusive `from`/`to` epoch milliseconds. It returns up to 50 rows ordered by admission time and run ID. Supply the last row's `acceptedAt` as `before` and its run ID as `afterId` for the next page. History and execution details expose metadata; request bodies, upstream results, secret values and wait tokens are omitted. External operation keys are visible for looking up upstream receipts.
+
+Use POST with `Content-Type: application/json` for mutations. Supply a unique `request` (a UUID is suitable), `target`, and a structured `reason` chosen from `receiver-confirmed`, `receiver-absent`, `incident-recovery`, `release`, `access-change`, or `operator-request`. Recovery commands require the `version` returned by a fresh detail read. A repeated identical request from the same authorized actor returns its committed result. A stale or conflicting decision returns HTTP 409; reload detail and inspect the current state. The console does this automatically. An accepted mutation and its organization, actor, reason, target, timestamp and result commit together. Audit rows survive execution-history deletion. Query audit by optional exact `target`. The latest 100 entries are returned. For older entries pass the final row's `stamp` as `before` and its `request` as `afterRequest`. Rejected authenticated ledger mutations record an error status separately from accepted requests. Unknown targets in rejected requests are hashed.
+
+| Operation | Target and additional fields |
+| --- | --- |
+| publish / activate | Workflow ID and `workflow` / `revision` |
+| start | Workflow ID and `trigger`; calls pinned children through the published flow |
+| resume / cancel / compensate | Run ID |
+| redrive / retryCompensation | Run ID and `failure` from detail |
+| reconcile | Run ID, operation `key`, `decision` and optional JSON-object `result` for the upstream receipt |
+| membership | Actor ID and `policy`, e.g. `{"role":"operator","grants":["reconcile"]}` |
+| credentials | Local credential ID, `enabled` and optional `credentialVersion` |
+
+### Monitoring
+
+The console shows the oldest queued and review ages, the last worker heartbeat, and failed compensation steps. `DRAFLOW_MONITOR_MS` sets the age threshold (default 30 seconds, minimum 1 second). The CLI samples at one quarter of the threshold, capped at one second, emits JSON monitor transitions on stderr, and records the latest active/cleared event per alert kind in the organization ledger. The screen links active and recently cleared alerts to their runs. A missing first heartbeat indicates that worker availability has yet to be observed. An existing review migrated from an older ledger uses its start/admission time until the next review transition. A separate intake process should host monitoring when it must remain available during a worker outage. Service-level monitoring of that intake and the database belongs to the deployment.
+
+Run `node --test apps/server/test/operator.test.mjs` for the SQLite contract; set `DRAFLOW_TEST_POSTGRES` to a disposable PostgreSQL database for the shared contract and worker-loss drill. Run `node apps/server/test/operator-bench.mjs` with the same optional environment variable for the 100,000-history authenticated first-page benchmark. The browser regression is `pnpm exec playwright test operator.spec.mjs`.

@@ -1,3 +1,4 @@
+import type { Identity } from './operator-store.js';
 import { type SharedOptions, OwnershipLost } from './postgres.js';
 import { randomUUID } from 'node:crypto';
 import { setImmediate as yieldToHost } from 'node:timers/promises';
@@ -45,7 +46,7 @@ export class WebhookGone extends Error {}
 export class NodeHost {
   readonly #ledger: ExecutionLedger;
   readonly #engine: ExecutionEngineOptions;
-  // Only in-flight uploads need to distinguish successive activations of the same revision.
+  #operatorEffects: { commit: (() => void)[]; rollback: (() => void)[] } | undefined;
   readonly #capacity: number;
   readonly #ttl: number;
   readonly #scheduleClock: NonNullable<HostOptions['scheduleClock']>;
@@ -100,7 +101,21 @@ export class NodeHost {
       credentialFetch: serverHttp(
         transport,
         options.maxHttpResponseBytes ?? 1024 * 1024,
-        options.httpAuth,
+        organization && options.httpAuth
+          ? {
+              get grants() {
+                return options.httpAuth!.grants;
+              },
+              currentVersion: (id) => {
+                const access = this.#ledger.operators.credentialAccess(id);
+                if (access?.enabled === 0) return null;
+                if (access?.version != null && !this.credentialVersions(id).includes(String(access.version)))
+                  return null;
+                return access?.version == null ? undefined : String(access.version);
+              },
+              resolve: (id, version) => options.httpAuth!.resolve(id, version),
+            }
+          : options.httpAuth,
         () =>
           this.options.shared || this.#latestCooldown > this.#scheduleClock.now()
             ? this.#rateGate()
@@ -147,6 +162,12 @@ export class NodeHost {
           }
         }, every);
       }
+      if (organization && !options.shared) {
+        const beat = () => this.#ledger.operators.heartbeat('sqlite');
+        beat();
+        this.#poll = setInterval(beat, 1000);
+        this.#poll.unref();
+      }
       this.#armSchedules();
       this.#wake();
     } catch (error) {
@@ -155,6 +176,41 @@ export class NodeHost {
     }
   }
 
+  get organization() {
+    return this.options.shared?.organization ?? this.options.organization;
+  }
+  recordOperatorAlerts(
+    evaluate: (metrics: ReturnType<NodeHost['operatorMetrics']>) => { kind: string; run: string | null }[],
+  ) {
+    if (!this.organization) throw Error('Organization required');
+    return this.#ledger.operators.recordAlerts(this.organization, evaluate);
+  }
+  operatorMetrics() {
+    return this.#ledger.operators.metrics();
+  }
+  credentialVersions(id: string) {
+    const profiles = this.options.httpAuth?.versions;
+    return profiles && Object.hasOwn(profiles, id) ? (profiles[id] ?? []) : [];
+  }
+  get credentialIds() {
+    return (this.options.httpAuth?.grants ?? []).map((g) => g.id);
+  }
+  operate(identity: Identity, command: Record<string, unknown>) {
+    this.#ready();
+    const effects: { commit: (() => void)[]; rollback: (() => void)[] } = { commit: [], rollback: [] };
+    this.#operatorEffects = effects;
+    let result: unknown;
+    try {
+      result = this.#ledger.operators.execute(this, identity, command);
+    } catch (error) {
+      for (const undo of effects.rollback) undo();
+      throw error;
+    } finally {
+      this.#operatorEffects = undefined;
+    }
+    for (const apply of effects.commit) apply();
+    return result;
+  }
   get history() {
     return this.#ledger.history;
   }
@@ -164,7 +220,11 @@ export class NodeHost {
   cancel(runId: string) {
     this.#ready();
     const ids = this.#ledger.cancelTree(runId);
-    for (const id of ids) this.#active.get(id)?.abort();
+    const abort = () => {
+      for (const id of ids) this.#active.get(id)?.abort();
+    };
+    if (this.#operatorEffects) this.#operatorEffects.commit.push(abort);
+    else abort();
     if (ids.length) this.#wake();
     return ids.length > 0;
   }
@@ -397,8 +457,14 @@ export class NodeHost {
       cancelPrepared?.();
       throw error;
     }
-    this.#cancelSchedule?.();
-    this.#cancelSchedule = cancelPrepared;
+    const install = () => {
+      this.#cancelSchedule?.();
+      this.#cancelSchedule = cancelPrepared;
+    };
+    if (this.#operatorEffects) {
+      this.#operatorEffects.commit.push(install);
+      if (cancelPrepared) this.#operatorEffects.rollback.push(cancelPrepared);
+    } else install();
   }
 
   #prepareScheduleTimer(minDelay = 0) {

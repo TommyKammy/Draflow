@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { createOperatorServer } from './operator-http.js';
 // Trusted local JSON-lines interface. Each input receives one JSON response.
 import { createInterface } from 'node:readline';
 import { NodeRegistry } from '@draflow/core';
@@ -56,8 +58,24 @@ const webhooks =
 if (webhooks) {
   webhooks.listen(Number(webhookPort), process.env.DRAFLOW_WEBHOOK_HOST ?? '127.0.0.1');
 }
+const operatorPort = process.env.DRAFLOW_OPERATOR_PORT;
+const operator =
+  operatorPort === undefined
+    ? undefined
+    : createOperatorServer(
+        [host],
+        () => {
+          const file = process.env.DRAFLOW_OPERATOR_ACCOUNTS;
+          if (!file) throw Error('Missing operator account configuration');
+          return JSON.parse(readFileSync(file, 'utf8'));
+        },
+        Number(process.env.DRAFLOW_MONITOR_MS ?? 30000),
+        (event) => console.error(JSON.stringify({ monitor: event })),
+      );
+operator?.listen(Number(operatorPort), process.env.DRAFLOW_OPERATOR_HOST ?? '127.0.0.1');
 const input = createInterface({ input: process.stdin });
 async function stop(code: number) {
+  operator?.close();
   webhooks?.close();
   input.close();
   try {
@@ -168,6 +186,7 @@ try {
     }
   }
 } finally {
+  operator?.close();
   webhooks?.close();
   try {
     await host.close();

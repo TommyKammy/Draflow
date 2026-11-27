@@ -11,7 +11,10 @@ export type HttpGrant = {
 export interface HttpAuth {
   organization?: string;
   grants: readonly HttpGrant[];
-  resolve(id: string): Promise<string | undefined> | string | undefined;
+  versions?: Readonly<Record<string, readonly string[]>>;
+  /** Null disables the credential. Rechecked after asynchronous resolution and rate waits. */
+  currentVersion?(id: string): string | null | undefined;
+  resolve(id: string, version?: string): Promise<string | undefined> | string | undefined;
 }
 
 export const recordedTransport = new AsyncLocalStorage<{
@@ -156,10 +159,22 @@ export function serverHttp(
   if (!Number.isSafeInteger(limit) || limit < 0) throw new RangeError('Invalid HTTP response byte limit');
   return async (binding, url, init) => {
     let secret: string | undefined;
+    let validateCredential: (() => void) | undefined;
     if (binding.id !== undefined) {
       const grant = grantFor(binding, url, auth);
       try {
-        secret = await auth!.resolve(grant.id);
+        const version = auth!.currentVersion?.(grant.id);
+        if (version === null) throw new Error();
+        validateCredential = () => {
+          const current = grantFor(binding, url, auth);
+          if (
+            current.kind !== grant.kind ||
+            (current.kind === 'apiKey' && grant.kind === 'apiKey' && current.header !== grant.header) ||
+            auth!.currentVersion?.(grant.id) !== version
+          )
+            throw new UnsentCredentialError('HTTP credential authorization changed');
+        };
+        secret = await auth!.resolve(grant.id, version);
         if (!secret || secret !== secret.trim()) throw new Error();
         const headers = new Headers(init?.headers);
         const header = grant.kind === 'bearer' ? 'Authorization' : grant.header;
@@ -191,6 +206,7 @@ export function serverHttp(
         }
       }
       init?.signal?.throwIfAborted();
+      validateCredential?.();
       recordedTransport.getStore()?.dispatch();
       try {
         init?.signal?.throwIfAborted();

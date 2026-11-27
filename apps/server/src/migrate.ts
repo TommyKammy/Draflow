@@ -6,6 +6,14 @@ import { ledgerTables } from './ledger-schema.js';
 import { PostgresDatabase, type SharedOptions } from './postgres.js';
 
 const tables = [...ledgerTables.matchAll(/CREATE TABLE IF NOT EXISTS (\w+)/g)].map((m) => m[1]!);
+// Optional on source ledgers created before the operator API or without an organization.
+const operatorTables = new Set([
+  'memberships',
+  'credential_access',
+  'operator_audit',
+  'review_clock',
+  'operator_alerts',
+]);
 function identifier(name: string) {
   return '"' + name.replaceAll('"', '""') + '"';
 }
@@ -30,7 +38,7 @@ export function migrateLedger(path: string, options: SharedOptions) {
       const previous = pg.raw('SELECT fingerprint FROM migration').rows[0];
       const hash = createHash('sha256');
       const counts: Record<string, number> = {};
-      for (const table of tables) {
+      for (const table of [...tables, ...operatorTables]) {
         const t = identifier(table);
         if (!previous && pg.raw('SELECT 1 FROM ' + t + ' LIMIT 1').rows.length)
           throw Error('Destination must be empty');
@@ -38,6 +46,7 @@ export function migrateLedger(path: string, options: SharedOptions) {
           .prepare('PRAGMA table_info(' + t + ')')
           .all()
           .map((c) => String((c as { name: string }).name));
+        if (!columns.length && operatorTables.has(table)) continue;
         if (!columns.length) throw Error('Missing Phase 6 table: ' + table);
         const ordered =
           pg.raw(
@@ -56,7 +65,10 @@ export function migrateLedger(path: string, options: SharedOptions) {
           ')';
         hash.update(JSON.stringify([table, columns]));
         let count = 0;
-        for (const row of source.prepare('SELECT ' + names + ' FROM ' + t + ' ORDER BY rowid').iterate()) {
+        const statement = source.prepare('SELECT ' + names + ' FROM ' + t + ' ORDER BY rowid');
+        // Node 22.13's native iterator does not keep its StatementSync alive across GC.
+        const rows = Object.assign(statement.iterate(), { sourceStatement: statement });
+        for (const row of rows) {
           const values = columns.map((c) => (row as Record<string, string | number | null>)[c]!);
           hash.update(JSON.stringify(values));
           if (!previous) pg.raw(insert, values);
@@ -70,6 +82,9 @@ export function migrateLedger(path: string, options: SharedOptions) {
       if (previous && previous.fingerprint !== fingerprint)
         throw Error('Different source snapshot already imported');
       if (!previous) {
+        pg.raw(
+          `INSERT INTO review_clock SELECT "runId",COALESCE("startedAt","acceptedAt") FROM runs WHERE state='review' ON CONFLICT DO NOTHING`,
+        );
         for (const row of pg.raw('SELECT target,"untilMs" FROM "rateLimits" WHERE "untilMs">$1', [pg.now()])
           .rows)
           pg.holdTarget(String(row.target), Number(row.untilMs));

@@ -75,7 +75,32 @@ test('migrate interrupted compensation and replay duplicate request on PostgreSQ
     });
   assert.equal(run('kill', { DRAFLOW_TEST_SHARED: '' }).signal, 'SIGKILL');
   const shared = { connectionString: url, organization: db };
-  const first = migrateLedger(db, shared);
+  // Collect after reading a row, before the native SQLite iterator advances again.
+  const preload = `import { StatementSync } from 'node:sqlite';
+    const iterate = StatementSync.prototype.iterate;
+    StatementSync.prototype.iterate = function (...args) {
+      const rows = iterate.apply(this, args);
+      return (function* () {
+        let collected = false;
+        for (const row of rows) {
+          yield row;
+          if (!collected) { global.gc(); collected = true; }
+        }
+      })();
+    };`;
+  const imported = spawnSync(
+    process.execPath,
+    [
+      '--expose-gc',
+      '--import',
+      'data:text/javascript,' + encodeURIComponent(preload),
+      fileURLToPath(new URL('../dist/migrate.js', import.meta.url)),
+      db,
+    ],
+    { encoding: 'utf8', env: { ...process.env, DRAFLOW_POSTGRES_URL: url, DRAFLOW_ORGANIZATION: db } },
+  );
+  assert.equal(imported.status, 0, imported.stderr);
+  const first = JSON.parse(imported.stdout);
   assert.ok(first.counts.compensationSteps > 0);
   assert.deepEqual(migrateLedger(db, shared), first);
   const next = run('resume', { DRAFLOW_TEST_SHARED: url });

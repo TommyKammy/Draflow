@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
@@ -868,7 +869,11 @@ test('cancellation during rate-limit wait leaves only the dispatched write for r
       sent.push(JSON.parse(init.body).id);
       return new Response(null, { status: 429, headers: { 'retry-after': '30' } });
     },
-    (child, parent) => Object.assign(parent.nodes[1].parameters, { concurrency: 2, batchSize: 1 }),
+    (child, parent) => {
+      // Anonymous cooldowns outlive a run and are shared by all organizations at this origin.
+      child.nodes[1].parameters.url = 'https://' + randomUUID() + '.sink.example.test/orders';
+      Object.assign(parent.nodes[1].parameters, { concurrency: 2, batchSize: 1 });
+    },
   );
   const root = start(h, 'cancel-before-dispatch');
   await until(
