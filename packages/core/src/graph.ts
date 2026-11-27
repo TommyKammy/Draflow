@@ -188,7 +188,7 @@ export function upstreamOf(
   const result = new Set<string>();
   const visit = (id: string): void => {
     for (const edge of graph.incoming.get(id) ?? []) {
-      if (result.has(edge.from.node)) continue;
+      if (edge.from.node === nodeId || result.has(edge.from.node)) continue;
       result.add(edge.from.node);
       visit(edge.from.node);
     }
@@ -206,7 +206,7 @@ export function downstreamOf(
   const result = new Set<string>();
   const visit = (id: string): void => {
     for (const edge of graph.outgoing.get(id) ?? []) {
-      if (result.has(edge.to.node)) continue;
+      if (edge.to.node === nodeId || result.has(edge.to.node)) continue;
       result.add(edge.to.node);
       visit(edge.to.node);
     }

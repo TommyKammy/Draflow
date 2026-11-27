@@ -676,6 +676,16 @@ describe('standard nodes', () => {
     expect(sentHeaders['content-type']).toBeUndefined();
   });
 
+  it('preserves whitespace in a text response', async () => {
+    const wf = workflow([
+      node('h', 'draflow.httpRequest', 'HTTP', 0, { url: 'https://example.com', responseFormat: 'text' }),
+    ], []);
+    const text = ' \n';
+    const result = await run(wf, seed({}), async () => new Response(text));
+    expect(result.status).toBe('success');
+    expect(result.runData.h?.[0]?.output?.main?.[0]?.[0]?.json).toEqual({ data: text });
+  });
+
   it('reports HTTP failures as node errors', async () => {
     const fetchImpl = async (): Promise<Response> =>
       new Response('nope', { status: 500, statusText: 'Server Error' });
