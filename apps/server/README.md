@@ -12,12 +12,14 @@ The trusted local CLI accepts one JSON object per line on stdin and returns one 
 {"op":"history","workflowId":"orders"}
 ```
 
+For `byEvent`, pass `source` (`trigger`, `webhook`, or `schedule`) to look up a specific intake. Omitting it returns the most recently accepted matching delivery.
+
 Use `receipt` with a run ID, `detail` with workflow and run IDs, and `deactivate` with a workflow ID. The CLI loads the standard nodes. An embedding Node application can construct `NodeHost(path, { registry, ...engineOptions })` to use its own node implementations or injected services. The host's `history` implements the P6 ExecutionStore interface used by P7.
 
 ## Delivery and recovery
 
 - A successful accept returns the run ID after the SQLite commit. A queued receipt contains its own work item, payload and publication revision. Switching or deactivating the publication affects subsequent intake. Active and queued publications must have their exact node versions installed on restart.
-- Defaults are 100 waiting jobs plus one running job, a 24-hour deduplication window from acceptance, and 4 MiB per history detail. Configure these with `capacity`, `dedupMs`, and `maxDetailBytes`. A matching workflow, trigger and key returns the existing ID even at capacity. Queued and running work retains its key through completion. Interrupted work keeps its key beyond expiry so that redelivery returns the original receipt while its external effects need reconciliation. Identical keyless events get separate IDs.
+- Defaults are 100 waiting jobs plus one running job, a 24-hour deduplication window from acceptance, and 4 MiB per history detail. Configure these with `capacity`, `dedupMs`, and `maxDetailBytes`. A matching workflow, trigger node, delivery source and key returns the existing ID even at capacity. Queued and running work retains its key through completion. Interrupted work keeps its key beyond expiry so that redelivery returns the original receipt while its external effects need reconciliation. Identical keyless events get separate IDs.
 - A restarted worker processes queued rows. A durable running claim becomes `interrupted` and requires reconciliation with the external destination. The error history identifies the interruption and the absence of recovered task data. Completed runs retain their outcome. Deleting browsing history leaves the receipt intact.
 - Completion and history are committed together. If that transaction fails, the worker closes intake, reports the fault and leaves the claim for recovery. On EOF, SIGTERM or SIGINT, the CLI closes intake, leaves queued jobs for restart, and waits up to five seconds for the current job before exiting. Programmatic callers can set a deadline with `close(ms)`.
 - Receipts retain the acceptance, claim and completion timestamps. Stats expose waiting count, oldest wait, failed and interrupted counts. This first release retains receipt and publication metadata on disk. Detail size and the deduplication window can be tuned independently.
@@ -54,6 +56,8 @@ Add a `draflow.webhook` v1 trigger with a literal `parameters.path` such as `ord
 Enable the CLI listener by setting `DRAFLOW_WEBHOOK_PORT` and `DRAFLOW_WEBHOOK_SECRET` before starting the host. The listener binds to loopback by default; `DRAFLOW_WEBHOOK_HOST` changes the bind address. The CLI uses one signing key for its senders. Embedders can call `createWebhookServer(host, { signingKey, maxBodyBytes })` with a key or a function that selects a key by exact request path. The listener resolves the signing key after the bounded body has arrived, so a rotation applies to deliveries still uploading. Management operations remain on the trusted CLI or host API.
 
 For a test delivery, send the CLI operation `listenTest` with the draft `workflow`, its `triggerNodeId` and optionally `ttlMs` (default 60 seconds, maximum one day). The returned `path` is a unique `/webhook-test/<token>`. Its `workflowId` identifies the isolated test snapshot for history and credential grants. Arming a test does not activate the draft or inherit production grants. Test URLs expire on timeout or restart. Already accepted test jobs retain their snapshot for recovery.
+
+To authorize an authenticated HTTP node during a CLI test, add a grant for the returned `workflowId`, the HTTP node ID, credential ID and API origin to the configured `DRAFLOW_HTTP_AUTH_FILE`. Keep the environment variable holding the secret in the CLI process environment. Send `{"op":"reloadHttpAuth"}` on stdin, then deliver to the same test URL. This operation replaces the grants and environment-variable mappings for subsequent HTTP requests. An invalid configuration leaves the previous configuration active. Remove the test grant and reload to revoke it.
 
 Sign the exact raw UTF-8 JSON bytes. With Node's `createHmac` from `node:crypto`, a sender can use:
 

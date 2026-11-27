@@ -8,8 +8,10 @@ import { NodeHost } from './host.js';
 
 const path = process.argv[2];
 if (!path) throw new Error('Usage: node dist/cli.js DATABASE');
+const authPath = process.env.DRAFLOW_HTTP_AUTH_FILE;
+const httpAuth = authPath ? loadHttpAuth(authPath) : undefined;
 const host = new NodeHost(path, {
-  ...(process.env.DRAFLOW_HTTP_AUTH_FILE && { httpAuth: loadHttpAuth(process.env.DRAFLOW_HTTP_AUTH_FILE) }),
+  ...(httpAuth && { httpAuth }),
   ...(process.env.DRAFLOW_HTTP_MAX_RESPONSE_BYTES !== undefined &&
     { maxHttpResponseBytes: Number(process.env.DRAFLOW_HTTP_MAX_RESPONSE_BYTES) }),
   registry: new NodeRegistry().registerAll(standardNodes),
@@ -56,6 +58,10 @@ try {
         case 'deactivate':
           host.deactivate(q.workflowId);
           break;
+        case 'reloadHttpAuth':
+          if (!authPath || !httpAuth) throw new Error('DRAFLOW_HTTP_AUTH_FILE is not configured');
+          Object.assign(httpAuth, loadHttpAuth(authPath));
+          break;
         case 'listenTest':
           result = host.listenTest(q.workflow, q.triggerNodeId, q.ttlMs);
           break;
@@ -66,7 +72,7 @@ try {
           result = host.receipt(q.runId);
           break;
         case 'byEvent':
-          result = host.byEvent(q.workflowId, q.triggerNodeId, q.key);
+          result = host.byEvent(q.workflowId, q.triggerNodeId, q.key, q.source);
           break;
         case 'stats':
           result = host.stats();
