@@ -65,7 +65,10 @@ export function migrateLedger(path: string, options: SharedOptions) {
           ')';
         hash.update(JSON.stringify([table, columns]));
         let count = 0;
-        for (const row of source.prepare('SELECT ' + names + ' FROM ' + t + ' ORDER BY rowid').iterate()) {
+        const statement = source.prepare('SELECT ' + names + ' FROM ' + t + ' ORDER BY rowid');
+        // Node 22.13's native iterator does not keep its StatementSync alive across GC.
+        const rows = Object.assign(statement.iterate(), { sourceStatement: statement });
+        for (const row of rows) {
           const values = columns.map((c) => (row as Record<string, string | number | null>)[c]!);
           hash.update(JSON.stringify(values));
           if (!previous) pg.raw(insert, values);
