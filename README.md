@@ -73,6 +73,27 @@ Embedded hosts can supply their own `ports.storage` or listen for `draflow-chang
 After building, run `pnpm bench:canvas` to measure rendering, panning, zooming and node dragging
 in the production embed. [M1 baseline and measurement conditions](docs/implementation.md#m1-canvas-baseline).
 
+## Synchronize order lines
+
+The [order synchronization workflow](examples/order-sync.json) runs from a signed
+Webhook or a one-minute schedule on the Node host. Both triggers read the same
+orders API. Split Out emits one item per element of the top-level `data` array,
+replacing that field with the element and retaining its siblings. An empty array
+emits zero items. Filter keeps the approved lines. Aggregate collects their rows in
+`items` and computes their `count` and the numeric `total` of `data.amount`.
+The final HTTP node posts that object to the totals API. The sum field is optional and, when set, requires a finite number
+in every row. To use your own API, configure the two URLs and the host's
+`orders-read` and `orders-send` credential grants before publishing.
+
+Aggregate preserves one `pairedItem` link per contributing row in input order.
+After aggregation, use `$json.items` for the rows that passed the filter.
+The existing `$("Split lines").item` lookup follows the first matching lineage
+when several lines contributed. If no lineage matches, `.item` falls back to
+the named node's first output item. Use `$("Split lines").itemFrom("main", 0, 0)`
+to follow the current node’s first input row and leave a missing ancestor
+undefined. To choose a specific output of Split Out,
+use `$("Split lines").itemMatching(index)` with its zero-based output index.
+
 ## Documents
 
 | Document | Contents |

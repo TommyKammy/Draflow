@@ -1,4 +1,6 @@
 import type { NodeType } from '@draflow/core';
+import { aggregateNode } from './aggregate.js';
+import { splitOutNode } from './split-out.js';
 import { scheduleNode } from './schedule.js';
 import { webhookNode } from './webhook.js';
 import { filterNode } from './filter.js';
@@ -9,6 +11,8 @@ import { mergeNode } from './merge.js';
 import { noOpNode } from './noop.js';
 import { setNode } from './set.js';
 
+export { aggregateNode } from './aggregate.js';
+export { splitOutNode } from './split-out.js';
 export { scheduleNode } from './schedule.js';
 export { webhookNode } from './webhook.js';
 export { filterNode } from './filter.js';
@@ -28,6 +32,8 @@ export const standardNodes: NodeType[] = [
   setNode,
   ifNode,
   filterNode,
+  aggregateNode,
+  splitOutNode,
   mergeNode,
   httpRequestNode,
   httpRequestNodeV2,

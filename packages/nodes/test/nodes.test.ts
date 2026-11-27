@@ -749,3 +749,70 @@ describe('standard nodes', () => {
     expect(result.runData.handler?.[0]?.output?.main?.[0]?.[0]?.json.error).toMatch(/HTTP 500/);
   });
 });
+
+describe('Split Out and Aggregate', () => {
+  const start = node('start', 'draflow.manualTrigger', 'Start', 0);
+  const split = node('split', 'draflow.splitOut', 'Split', 1);
+  const aggregate = node('agg', 'draflow.aggregate', 'Aggregate', 2);
+
+  it('preserves parent fields, element types, order and immediate input links', async () => {
+    const wf = workflow([start, split, aggregate], [connect('start', 'split'), connect('split', 'agg')]);
+    const result = await run(wf, seed({ id: 'empty', data: [] }, { id: 'parent', data: [{ id: 'child' }, null] },
+      { id: 'second', data: [3, '3'] }));
+    expect(result.status).toBe('success');
+    const rows = [{ id: 'parent', data: { id: 'child' } }, { id: 'parent', data: null },
+      { id: 'second', data: 3 }, { id: 'second', data: '3' }];
+    const output = result.runData.split?.[0]?.output?.main?.[0];
+    expect(output?.map((item) => item.json)).toEqual(rows);
+    expect(output?.map((item) => item.pairedItem)).toEqual([1, 1, 2, 2].map(item => ({ item, input: 0 })));
+    expect(result.runData.agg?.[0]?.output?.main?.[0]).toEqual([{
+      json: { items: rows, count: 4 }, pairedItem: rows.map((_, item) => ({ item, input: 0 })),
+    }]);
+  });
+
+  it('supports an explicit ancestor selection after collecting multiple rows', async () => {
+    const choose = node('choose', 'draflow.set', 'Choose', 3, { assignments: [
+      { name: 'firstOrigin', value: '={{ $("Start").item.json.id }}' },
+      { name: 'secondLine', value: '={{ $("Split").itemMatching(1).json.data }}' },
+    ] });
+    const wf = workflow([start, split, aggregate, choose],
+      [connect('start', 'split'), connect('split', 'agg'), connect('agg', 'choose')]);
+    const result = await run(wf, seed({ id: 'empty', data: [] }, { id: 'a', data: [5] }, { id: 'b', data: [9] }));
+    expect(result.runData.choose?.[0]?.output?.main?.[0]?.[0]?.json).toMatchObject({ firstOrigin: 'a', secondLine: 9 });
+  });
+
+  it('follows the contributing branch through a shared input slot after aggregation', async () => {
+    const tag = (id: string) => node(id, 'draflow.set', id, 1, {
+      assignments: [{ name: 'branch', value: id }],
+    });
+    const filter = node('filter', 'draflow.filter', 'Filter', 2, {
+      conditions: { conditions: [{ left: '={{ $json.branch }}', operator: 'equals', right: 'Left' }] },
+    });
+    const choose = node('choose', 'draflow.set', 'Choose', 4, { assignments: [
+      { name: 'origin', value: '={{ $("Left").item.json.id }}' },
+      { name: 'other', value: '={{ $("Right").itemFrom("main", 0, 0) ?? "absent" }}' },
+    ] });
+    const wf = workflow([start, tag('Left'), tag('Right'), filter, aggregate, choose],
+      [connect('start', 'Left'), connect('start', 'Right'), connect('Left', 'filter'),
+        connect('Right', 'filter'), connect('filter', 'agg'), connect('agg', 'choose')]);
+    const result = await run(wf, seed({ id: 'first' }, { id: 'second' }));
+    const output = result.runData.choose?.[0]?.output?.main?.[0]?.[0]?.json;
+    expect(output?.items).toEqual([{ id: 'first', branch: 'Left' }, { id: 'second', branch: 'Left' }]);
+    expect(output?.origin).toBe('first');
+    expect(output?.other).toBe('absent');
+  });
+
+  it('emits no rows for an empty array and rejects a non-array', async () => {
+    const wf = workflow([start, split, aggregate], [connect('start', 'split'), connect('split', 'agg')]);
+    const empty = await run(wf, seed({ data: [] }));
+    expect(empty.status).toBe('success');
+    expect(empty.runData.split?.[0]?.output?.main?.[0]).toEqual([]);
+    expect(empty.runData.agg).toBeUndefined();
+    expect((await run(wf, seed({ data: 3 }))).status).toBe('error');
+  });
+
+  it.each([{}, { amount: '4' }, { amount: null }])('rejects a missing or non-numeric sum field', async (row) => {
+    const sum = node('agg', 'draflow.aggregate', 'Aggregate', 1, { sumField: 'amount' });
+    expect((await run(workflow([start, sum], [connect('start', 'agg')]), seed({ amount: 2 }, row))).status).toBe('error');
+  });
+});

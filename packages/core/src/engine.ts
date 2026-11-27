@@ -1402,6 +1402,9 @@ function followLineage(
         );
         if (found !== undefined) return found;
       }
+      // A shared slot can receive several producers. Its slot-level source
+      // cannot identify an ancestor of this row when the recorded path ends.
+      continue;
     }
 
     const inputItems = task.input?.main?.[inputIndex] ?? [];

@@ -1,0 +1,198 @@
+{
+  "schema": "draflow/v1",
+  "id": "order-sync",
+  "name": "Order synchronization",
+  "settings": {},
+  "nodes": [
+    {
+      "id": "hook",
+      "name": "Order webhook",
+      "type": "draflow.webhook",
+      "typeVersion": 1,
+      "position": {
+        "x": 0,
+        "y": 0
+      },
+      "parameters": {
+        "path": "orders"
+      }
+    },
+    {
+      "id": "timer",
+      "name": "Every minute",
+      "type": "draflow.schedule",
+      "typeVersion": 1,
+      "position": {
+        "x": 0,
+        "y": 160
+      },
+      "parameters": {
+        "mode": "interval",
+        "intervalSeconds": 60
+      }
+    },
+    {
+      "id": "read",
+      "name": "Read orders",
+      "type": "draflow.httpRequest",
+      "typeVersion": 2,
+      "position": {
+        "x": 220,
+        "y": 0
+      },
+      "parameters": {
+        "url": "https://orders.example.test/orders",
+        "authentication": "credential"
+      },
+      "credentials": {
+        "httpAuth": "orders-read"
+      }
+    },
+    {
+      "id": "split",
+      "name": "Split lines",
+      "type": "draflow.splitOut",
+      "typeVersion": 1,
+      "position": {
+        "x": 440,
+        "y": 0
+      },
+      "parameters": {
+        "field": "data"
+      }
+    },
+    {
+      "id": "keep",
+      "name": "Keep approved lines",
+      "type": "draflow.filter",
+      "typeVersion": 1,
+      "position": {
+        "x": 660,
+        "y": 0
+      },
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "left": "={{ $json.data.approved }}",
+              "operator": "isTrue"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "aggregate",
+      "name": "Order totals",
+      "type": "draflow.aggregate",
+      "typeVersion": 1,
+      "position": {
+        "x": 880,
+        "y": 0
+      },
+      "parameters": {
+        "sumField": "data.amount"
+      }
+    },
+    {
+      "id": "send",
+      "name": "Send totals",
+      "type": "draflow.httpRequest",
+      "typeVersion": 2,
+      "position": {
+        "x": 1100,
+        "y": 0
+      },
+      "parameters": {
+        "url": "https://orders.example.test/totals",
+        "method": "POST",
+        "body": "={{ $json }}",
+        "authentication": "credential"
+      },
+      "credentials": {
+        "httpAuth": "orders-send"
+      }
+    }
+  ],
+  "connections": [
+    {
+      "id": "hook-read",
+      "from": {
+        "node": "hook",
+        "port": "main",
+        "index": 0
+      },
+      "to": {
+        "node": "read",
+        "port": "main",
+        "index": 0
+      }
+    },
+    {
+      "id": "timer-read",
+      "from": {
+        "node": "timer",
+        "port": "main",
+        "index": 0
+      },
+      "to": {
+        "node": "read",
+        "port": "main",
+        "index": 0
+      }
+    },
+    {
+      "id": "read-split",
+      "from": {
+        "node": "read",
+        "port": "main",
+        "index": 0
+      },
+      "to": {
+        "node": "split",
+        "port": "main",
+        "index": 0
+      }
+    },
+    {
+      "id": "split-keep",
+      "from": {
+        "node": "split",
+        "port": "main",
+        "index": 0
+      },
+      "to": {
+        "node": "keep",
+        "port": "main",
+        "index": 0
+      }
+    },
+    {
+      "id": "keep-aggregate",
+      "from": {
+        "node": "keep",
+        "port": "main",
+        "index": 0
+      },
+      "to": {
+        "node": "aggregate",
+        "port": "main",
+        "index": 0
+      }
+    },
+    {
+      "id": "aggregate-send",
+      "from": {
+        "node": "aggregate",
+        "port": "main",
+        "index": 0
+      },
+      "to": {
+        "node": "send",
+        "port": "main",
+        "index": 0
+      }
+    }
+  ]
+}
