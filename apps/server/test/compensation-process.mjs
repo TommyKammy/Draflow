@@ -22,6 +22,17 @@ if (phase === 'interrupt-shipment') {
     const ship = workflow.nodes.at(-1);
     ship.parameters = { method: 'POST', url: ship.parameters.url };
     delete ship.credentials;
+    if (mode === 'nested') {
+      const child = JSON.parse(
+        readFileSync(new URL('../../../examples/process-order-batch.json', import.meta.url)),
+      );
+      child.id = 'shipment-service';
+      child.nodes[1].parameters = ship.parameters;
+      h.publish(child);
+      ship.type = 'draflow.call';
+      ship.typeVersion = 1;
+      ship.parameters = { workflowId: child.id, revision: 1 };
+    }
   });
   writeFileSync(db + '.id', accept(h));
 } else if (phase === 'kill') {

@@ -1692,6 +1692,24 @@ export class SqliteLedger {
       // Leave the claim and journal intact so startup can reconcile the external outcome.
       if (this.#prepare("SELECT 1 FROM effects WHERE runId=? AND state='unknown'").get(receipt.runId))
         throw new Error('Cannot finish a run with an uncertain external outcome');
+      // A call reports its child's interruption to the engine as a node failure.
+      // The durable receipts retain whether any external result is still uncertain.
+      if (
+        !interrupted &&
+        receipt.mode !== 'subworkflow' &&
+        detail.workflow.nodes.some((n) => compensationSpec(n))
+      ) {
+        const uncertainChild = this.#prepare(
+          `WITH RECURSIVE descendants(id) AS (
+          SELECT child FROM calls WHERE parent=?
+          UNION ALL SELECT c.child FROM calls c JOIN descendants d ON c.parent=d.id
+        ) SELECT 1 FROM descendants d JOIN runs r ON r.runId=d.id WHERE r.state='interrupted' LIMIT 1`,
+        ).get(receipt.runId);
+        if (uncertainChild) {
+          interrupted = true;
+          summary.interrupted = true;
+        }
+      }
       const undo = this.#prepare('SELECT root FROM compensationSteps WHERE child=?').get(receipt.runId);
       if (undo) {
         if (summary.status === 'success') {

@@ -206,23 +206,34 @@ test('publication rejects ambiguous reversal order, branches and an unavailable 
   );
 });
 
-test('an interrupted unrecorded shipment does not automatically reverse confirmed charges', async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), 'undo-interrupted-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const db = join(dir, 'host.db');
-  const child = spawnSync(
-    process.execPath,
-    [fileURLToPath(new URL('./compensation-process.mjs', import.meta.url)), db, 'interrupt-shipment'],
-    { encoding: 'utf8', timeout: 10000 },
+for (const mode of ['direct', 'nested'])
+  test(
+    'an interrupted unrecorded shipment does not automatically reverse confirmed charges: ' + mode,
+    async (t) => {
+      const dir = mkdtempSync(join(tmpdir(), 'undo-interrupted-'));
+      t.after(() => rmSync(dir, { recursive: true, force: true }));
+      const db = join(dir, 'host.db');
+      const child = spawnSync(
+        process.execPath,
+        [
+          fileURLToPath(new URL('./compensation-process.mjs', import.meta.url)),
+          db,
+          'interrupt-shipment',
+          mode,
+        ],
+        { encoding: 'utf8', timeout: 10000 },
+      );
+      assert.equal(child.signal, 'SIGKILL', child.stderr);
+      const root = readFileSync(db + '.id', 'utf8');
+      const h = open(
+        db,
+        async () => Response.json({}),
+        () => 'secret',
+      );
+      t.after(() => h.close());
+      await until(() => ['finished', 'interrupted'].includes(h.receipt(root).state));
+      assert.equal(h.receipt(root).state, 'interrupted');
+      assert.equal(h.compensationInfo(root).id, null);
+      assert.throws(() => h.compensate(root), /settled/);
+    },
   );
-  assert.equal(child.signal, 'SIGKILL', child.stderr);
-  const root = readFileSync(db + '.id', 'utf8');
-  const h = open(
-    db,
-    async () => Response.json({}),
-    () => 'secret',
-  );
-  t.after(() => h.close());
-  assert.equal(h.receipt(root).state, 'interrupted');
-  assert.equal(h.compensationInfo(root).id, null);
-});
