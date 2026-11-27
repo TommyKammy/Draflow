@@ -45,3 +45,22 @@ it('serializes the last pending snapshot before writes from a reconnected editor
   await vi.waitFor(() => expect(second.pending).toBe(false));
   expect(log).toEqual(['In flight', 'At disconnect', 'After reconnect']);
 });
+
+it('receives the outcome of a save that was pending at reconnect without enqueueing it twice', async () => {
+  const original = createWorkflow();
+  let finish!: () => void;
+  const save = vi.fn(() => new Promise<void>(resolve => { finish = resolve; }));
+  const firstNotify = vi.fn(), nextNotify = vi.fn();
+  const saves = new Autosave({ load: async () => null, save }, firstNotify);
+  saves.open(original);
+  const edited = { ...original, name: 'Edited' };
+  saves.changed(edited);
+  saves.disconnect();
+  saves.reconnect(structuredClone(edited), nextNotify, vi.fn());
+  expect(saves.activePending).toBe(true);
+  finish();
+  await vi.waitFor(() => expect(saves.activePending).toBe(false));
+  expect(save).toHaveBeenCalledTimes(1);
+  expect(nextNotify).toHaveBeenCalled();
+  expect(firstNotify).not.toHaveBeenCalled();
+});

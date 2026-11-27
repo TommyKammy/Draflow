@@ -17,6 +17,8 @@ interface Actions {
   canEdit(): boolean;
   commit(node: WorkflowNode, control?: HTMLElement): void;
   duplicate(id: string): void;
+  nameTaken(id: string, name: string): boolean;
+  rename(id: string, name: string): void;
   execute(id: string): void;
   previous(id: string): void;
   running(): boolean;
@@ -61,11 +63,52 @@ export function nodeDetails(actions: Actions, t: Translate) {
     close();
     actions.duplicate(id);
   });
+  const renameDialog = document.createElement('dialog');
+  renameDialog.setAttribute('aria-label', t('Rename node'));
+  const renameForm = document.createElement('form');
+  const nameLabel = document.createElement('label');
+  const nameInput = document.createElement('input');
+  nameInput.autofocus = nameInput.required = true;
+  nameLabel.append(t('Node name'), nameInput);
+  const saveName = document.createElement('button');
+  saveName.type = 'submit';
+  saveName.textContent = t('Save');
+  renameForm.append(nameLabel, saveName, button(t('Cancel'), () => renameDialog.close()));
+  renameDialog.append(renameForm);
+  nameInput.oninput = () => nameInput.setCustomValidity('');
+  renameForm.onsubmit = event => {
+    event.preventDefault();
+    if (!draft || !actions.canEdit()) return;
+    const name = nameInput.value.trim();
+    if (!name || actions.nameTaken(draft.id, name)) {
+      nameInput.setCustomValidity(t(name ? 'Node name already exists' : 'Enter a node name'));
+      nameInput.reportValidity();
+      return;
+    }
+    const id = draft.id;
+    actions.rename(id, name);
+    if (draft?.id !== id) return; // A host change listener may have opened another document.
+    draft = structuredClone(actions.get(id)!);
+    title.textContent = draft.name;
+    ancestor = '';
+    mappingTask = undefined;
+    clearMapping();
+    modes.clear();
+    refresh();
+    renameDialog.close();
+  };
+  const rename = button(t('Rename node'), () => {
+    if (!draft || !actions.canEdit() || !flush(true)) return;
+    nameInput.setCustomValidity('');
+    nameInput.value = draft.name;
+    renameDialog.showModal();
+    nameInput.select();
+  });
   const discard = button(t('Discard invalid input'), close);
   discard.hidden = true;
   const dismiss = button(t('Close'), () => { if (flush(true)) close(); });
   dismiss.autofocus = true;
-  header.append(title, version, previous, step, stop, duplicate, dismiss, discard);
+  header.append(title, version, previous, step, stop, duplicate, rename, dismiss, discard);
   const panes = document.createElement('div');
   panes.className = 'details-panes';
   const tabs = document.createElement('nav');
@@ -96,7 +139,7 @@ export function nodeDetails(actions: Actions, t: Translate) {
     renderForm();
   }));
   sections[1]!.append(mode, form, feedback);
-  dialog.append(header, tabs, panes);
+  dialog.append(header, tabs, panes, renameDialog);
   let draft: WorkflowNode | undefined;
   const previews: (() => void)[] = [];
   let runIndex = -1;
@@ -209,6 +252,7 @@ export function nodeDetails(actions: Actions, t: Translate) {
     flush();
   }
   function close() {
+    renameDialog.close();
     editingControl = undefined;
     pending = false;
     draft = undefined;
@@ -292,7 +336,7 @@ export function nodeDetails(actions: Actions, t: Translate) {
     if (!draft) return;
     const id = draft.id;
     stop.hidden = !actions.running();
-    previous.disabled = step.disabled = duplicate.disabled = !actions.canEdit();
+    previous.disabled = step.disabled = rename.disabled = duplicate.disabled = !actions.canEdit();
     const tasks = actions.tasks(id).filter(Boolean);
     if (!tasks.some(t => t.runIndex === runIndex)) runIndex = tasks.at(-1)?.runIndex ?? -1;
     runChoice.replaceChildren();

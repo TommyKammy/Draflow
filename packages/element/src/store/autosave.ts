@@ -34,6 +34,16 @@ export class Autosave {
   constructor(private store: WorkflowStore | undefined, private notify: () => void,
     private onError?: (workflowId: string, message: string) => void) {}
 
+  reconnect(w: Workflow, notify: () => void, onError: (id: string, message: string) => void) {
+    this.notify = notify;
+    this.onError = onError;
+    if (this.#active?.current.id !== w.id || this.#active.content !== JSON.stringify(w)) this.open(w);
+  }
+  disconnect() {
+    this.notify = () => {};
+    this.onError = undefined;
+    this.flush();
+  }
   open(w: Workflow, fresh = false) {
     const old = this.#active;
     this.flush();

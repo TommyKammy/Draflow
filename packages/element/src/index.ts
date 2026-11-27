@@ -46,6 +46,9 @@ const messages = {
   ja: { run: '実行', running: '実行中…', output: '出力', empty: '実行すると結果が表示されます。', count: (n: number) => n + '件' },
 };
 
+// A remount on the same host and storage can outlive an in-flight or failed write.
+const detachedSaves = new WeakMap<HTMLElement, WeakMap<WorkflowStore, Autosave>>();
+
 export function createWorkflowEditor(host: HTMLElement, options: EditorOptions = {}) {
   const root = host.shadowRoot ?? host.attachShadow({ mode: 'open' });
   if (root.childNodes.length) throw new Error('Editor host is already in use');
@@ -79,12 +82,19 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
   header.append(title, button, stopButton);
   const log = executionLog(clearExecution, translator(options.locale ?? 'en'));
   let history = new History();
-  const saves = new Autosave(options.ports?.storage, () => { if (!disposed) refreshEditing(); }, (workflowId, message) => {
+  const storage = options.ports?.storage;
+  const notifySave = () => { if (!disposed) refreshEditing(); };
+  const saveError = (workflowId: string, message: string) => {
     if (!disposed) host.dispatchEvent(new CustomEvent('draflow-toast', {
       detail: { workflowId, message }, bubbles: true, composed: true,
     }));
-  });
-  saves.open(workflow);
+  };
+  const resumed = storage && detachedSaves.get(host)?.get(storage);
+  const saves = resumed ?? new Autosave(storage, notifySave, saveError);
+  if (resumed && storage) {
+    detachedSaves.get(host)?.delete(storage);
+    saves.reconnect(workflow, notifySave, saveError);
+  } else saves.open(workflow);
   const canEdit = () => !disposed && !readonly && !active;
   const catalog = registry.types().map(id => registry.require(id));
   const creator = createNodeCreator(catalog, (nodeType, placement) => {
@@ -105,6 +115,8 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
   const previewInputs = new Map<string, TaskData[]>();
   const makeDetails = () => nodeDetails({ registry, engine, canEdit,
     get: id => workflow.nodes.find(n => n.id === id),
+    rename: (id, name) => commit({ type: 'rename', id, name }),
+    nameTaken: (id, name) => workflow.nodes.some(node => node.id !== id && node.name === name),
     tasks: id => previewInputs.get(id) ?? [],
     hasOutput: id => displayed.has(id),
     ancestors: id => {
@@ -366,10 +378,12 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
   }
 
   function publish(event: EditorRunEvent) {
+    // Public listeners may annotate the payload while the engine is still routing the task.
+    const external = structuredClone(event);
     host.dispatchEvent(new CustomEvent('draflow-' + event.type.replace(':', '-'), {
-      detail: event.detail, bubbles: true, composed: true,
+      detail: external.detail, bubbles: true, composed: true,
     }));
-    options.onRun?.(event);
+    options.onRun?.(external);
   }
 
   function showResult(result: RunResult) {
@@ -414,7 +428,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
   function run(runOptions: RunOptions = {}): RunHandle {
     if (disposed || readonly || active) throw new Error('Editor cannot start a run');
     if (!details.flush(true)) throw new Error('Invalid node parameters');
-    const snapshot = workflow; // Edits replace the document. The host receives clones.
+    const snapshot = structuredClone(workflow);
     let handle: RunHandle;
     try {
       handle = engine.run(snapshot, runOptions);
@@ -486,7 +500,8 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
         publish({ type: 'run:finish', detail });
       }),
     ];
-    void handle.done.catch((error: unknown) => {
+    const done = handle.done.then(result => structuredClone(result));
+    void done.catch((error: unknown) => {
       if (active !== handle) return;
       detach();
       failure = String(error);
@@ -495,7 +510,10 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
       details.refresh();
       refresh();
     });
-    return handle;
+    return {
+      id: handle.id, cancel: handle.cancel, done,
+      on: (event, listener) => handle.on(event, payload => listener(structuredClone(payload))),
+    };
   }
 
   function openDocument(next: Workflow, fresh = false) {
@@ -570,7 +588,12 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
       disposed = true;
       archive?.reset();
       lifetime.abort();
-      saves.flush();
+      saves.disconnect();
+      if (storage && saves.pending) {
+        const sessions = detachedSaves.get(host) ?? new WeakMap<WorkflowStore, Autosave>();
+        sessions.set(storage, saves);
+        detachedSaves.set(host, sessions);
+      }
       abandon();
       button.onclick = null;
       canvas.destroy();

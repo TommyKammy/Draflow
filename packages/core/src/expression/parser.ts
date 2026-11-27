@@ -248,10 +248,12 @@ class Parser {
     let expression = this.#parsePrimary();
 
     while (true) {
+      const accessStart = this.#peek().start;
       if (this.#match('.')) {
         const property = this.#expectIdentifier();
         expression = {
           type: 'Member',
+          accessStart,
           object: expression,
           property: identifierNode(property),
           computed: false,
@@ -281,6 +283,7 @@ class Parser {
           const close = this.#expect(']');
           expression = {
             type: 'Member',
+            accessStart,
             object: expression,
             property,
             computed: true,
@@ -293,6 +296,7 @@ class Parser {
         const property = this.#expectIdentifier();
         expression = {
           type: 'Member',
+          accessStart,
           object: expression,
           property: identifierNode(property),
           computed: false,
@@ -308,6 +312,7 @@ class Parser {
         const close = this.#expect(']');
         expression = {
           type: 'Member',
+          accessStart,
           object: expression,
           property,
           computed: true,

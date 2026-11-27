@@ -16,6 +16,8 @@ const japanese: Record<string, string> = {
   'Connect nodes': 'ノードを接続', 'Output port': '出力ポート', 'Input port': '入力ポート',
   Connect: '接続', Cancel: 'キャンセル', 'No compatible input': '接続可能な入力がありません',
   'Execute previous nodes': '上流ノードを実行', 'Execute step': 'このノードを実行', Stop: '停止',
+  'Rename node': 'ノード名を変更', 'Node name': 'ノード名', 'Enter a node name': 'ノード名を入力してください',
+  'Node name already exists': 'このノード名はすでに使われています',
   Duplicate: '複製', Close: '閉じる', 'Discard invalid input': '無効な入力を破棄',
   Input: '入力', Node: 'ノード', Output: '出力', Parameters: 'パラメーター', Settings: '設定',
   'Map from': 'マッピング元', 'Current input': '現在の入力', 'Mapping insertion': '挿入方法',
