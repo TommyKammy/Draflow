@@ -15,7 +15,8 @@ import type {
   WaitResult,
 } from '@draflow/core';
 import { buildGraph, hasPath } from '@draflow/core';
-import { beforeRecordedSend, UnsentCredentialError } from './http-auth.js';
+import { recordedTransport, UnsentCredentialError } from './http-auth.js';
+import { compensationSpec, validateCompensations, type CompensationSpec } from './compensation.js';
 import { retryTime, pageConfig, type readPage } from './pages.js';
 import type { Schedule } from './schedule.js';
 
@@ -54,9 +55,10 @@ const fields =
   'runId, workflowId, revision, triggerNodeId, eventKey, mode, state, acceptedAt, startedAt, stoppedAt, outcome';
 
 export function executionTasks(runData: RunData): ExecutionDetail['tasks'] {
-  return Object.values(runData).flat()
+  return Object.values(runData)
+    .flat()
     .sort((a, b) => a.executionIndex - b.executionIndex)
-    .map(task => ({ nodeId: task.nodeId, runIndex: task.runIndex, reused: false, task }));
+    .map((task) => ({ nodeId: task.nodeId, runIndex: task.runIndex, reused: false, task }));
 }
 
 function encodeCheckpoint(state: Checkpoint) {
@@ -121,6 +123,17 @@ export class SqliteLedger {
           fingerprint TEXT NOT NULL, mode TEXT NOT NULL, state TEXT NOT NULL, result TEXT,
           PRIMARY KEY(runId,nodeId,visit,item)
         );
+        CREATE TABLE IF NOT EXISTS compensationSteps (
+          source TEXT PRIMARY KEY REFERENCES effects(key), root TEXT NOT NULL, priority INTEGER NOT NULL,
+          workflow TEXT NOT NULL, revision INTEGER NOT NULL, auto INTEGER NOT NULL, input TEXT NOT NULL, result TEXT,
+          child TEXT UNIQUE, status TEXT NOT NULL DEFAULT 'pending', failure TEXT, reason TEXT);
+        CREATE INDEX IF NOT EXISTS compensationRoot ON compensationSteps(root, priority);
+        CREATE TABLE IF NOT EXISTS compensations(root TEXT PRIMARY KEY, id TEXT UNIQUE NOT NULL, state TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS compensationRetries(failure TEXT PRIMARY KEY, root TEXT NOT NULL, attempt TEXT NOT NULL);
+        CREATE TRIGGER IF NOT EXISTS compensationApplied AFTER UPDATE OF state ON effects WHEN NEW.state='success'
+        BEGIN
+          UPDATE compensationSteps SET result=NEW.result WHERE source=NEW.key;
+        END;
         CREATE TABLE IF NOT EXISTS calls (
           child TEXT PRIMARY KEY REFERENCES runs(runId), parent TEXT NOT NULL REFERENCES runs(runId),
           node TEXT NOT NULL, visit INTEGER NOT NULL, batch INTEGER NOT NULL,
@@ -134,6 +147,12 @@ export class SqliteLedger {
           error TEXT, created INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, retryAt INTEGER,
           PRIMARY KEY(runId,node,visit)
         );
+        CREATE TABLE IF NOT EXISTS parallelWork (
+          child TEXT PRIMARY KEY REFERENCES runs(runId), parent TEXT NOT NULL REFERENCES runs(runId),
+          start INTEGER NOT NULL, length INTEGER NOT NULL, baseTotal REAL NOT NULL,
+          status TEXT NOT NULL, failure TEXT, retryData TEXT);
+        CREATE INDEX IF NOT EXISTS parallelParent ON parallelWork(parent,start);
+        CREATE TABLE IF NOT EXISTS rateLimits (target TEXT PRIMARY KEY, untilMs INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS recoveryPoints (
           failure TEXT PRIMARY KEY, runId TEXT NOT NULL REFERENCES runs(runId), node TEXT NOT NULL,
           visit INTEGER NOT NULL, child TEXT, reason TEXT NOT NULL, expires INTEGER NOT NULL,
@@ -160,6 +179,11 @@ export class SqliteLedger {
         WHEN OLD.data IS NOT NULL AND NEW.data IS NULL AND NEW.attempt IS NULL AND OLD.child IS NOT NULL
         BEGIN
           DELETE FROM syncWork WHERE child=OLD.child;
+        END;
+        CREATE TRIGGER IF NOT EXISTS releaseParallelSyncWork AFTER UPDATE OF data ON recoveryPoints
+        WHEN OLD.data IS NOT NULL AND NEW.data IS NULL AND NEW.attempt IS NULL
+        BEGIN
+          DELETE FROM syncWork WHERE child IN (SELECT json_extract(value,'$.child') FROM json_each(OLD.data,'$.wave'));
         END;
         CREATE TRIGGER IF NOT EXISTS syncApplied AFTER UPDATE OF state ON effects WHEN NEW.state='success'
         BEGIN
@@ -279,6 +303,7 @@ export class SqliteLedger {
   }
 
   private validateTargets(root: Workflow) {
+    validateCompensations(root, (id, rev) => this.publication(id, rev).workflow);
     const visit = (workflow: Workflow, ancestors: string[]) => {
       for (const node of workflow.nodes) {
         if (
@@ -307,7 +332,8 @@ export class SqliteLedger {
           child.nodes.some(
             (n) =>
               !n.disabled &&
-              ((n.type === 'draflow.httpRequest' && n.parameters.allowRedrive === true) ||
+              (compensationSpec(n) ||
+                (n.type === 'draflow.httpRequest' && n.parameters.allowRedrive === true) ||
                 (n.type === 'draflow.pages' && pageConfig(n).recoverable)),
           )
         )
@@ -376,9 +402,7 @@ export class SqliteLedger {
     ).all(id, id);
   }
 
-  #spawn(parent: Receipt, node: WorkflowNode, visit: number, batch: number, items: Item[]) {
-    const id = String(node.parameters.workflowId);
-    const revision = Number(node.parameters.revision);
+  #admitChild(id: string, revision: number, payload: string) {
     const entry = this.publication(id, revision).workflow.nodes.find(
       (n) => !n.disabled && n.type === 'draflow.childInput',
     )!;
@@ -386,7 +410,14 @@ export class SqliteLedger {
     this.#prepare(
       `INSERT INTO runs(runId,workflowId,revision,triggerNodeId,mode,payload,state,acceptedAt)
       VALUES(?,?,?,?,'subworkflow',?,'queued',?)`,
-    ).run(child, id, revision, entry.id, JSON.stringify(items), Date.now());
+    ).run(child, id, revision, entry.id, payload, Date.now());
+    return child;
+  }
+
+  #spawn(parent: Receipt, node: WorkflowNode, visit: number, batch: number, items: Item[]) {
+    const id = String(node.parameters.workflowId);
+    const revision = Number(node.parameters.revision);
+    const child = this.#admitChild(id, revision, JSON.stringify(items));
     if (node.type === 'draflow.pages' && pageConfig(node).scope) {
       const scope = this.syncScope(parent.runId)!;
       const insert = this.#prepare('INSERT INTO syncWork VALUES(?,?,?,?,?,?,NULL)');
@@ -404,6 +435,7 @@ export class SqliteLedger {
     this.#prepare('INSERT INTO calls VALUES(?,?,?,?,?)').run(child, parent.runId, node.id, visit, batch);
     this.#prepare("UPDATE runs SET state='waiting' WHERE runId=?").run(parent.runId);
     this.#recordPause(parent.runId);
+    return child;
   }
 
   pendingMode(id: string) {
@@ -482,12 +514,16 @@ export class SqliteLedger {
     const due = retryTime(header, now, attempt);
     if (attempt >= config.maxAttempts || due >= Number(state.created) + config.deadlineMs)
       return this.pageFailure(id, node.id, visit, 'HTTP ' + status + ' retry budget exhausted');
+    this.waitForPage(id, node.id, visit, attempt, due);
+  }
+
+  waitForPage(id: string, nodeId: string, visit: number, attempt: number, due: number) {
     this.#transaction(() => {
       this.#prepare('UPDATE pageRuns SET attempts=?,retryAt=? WHERE runId=? AND node=? AND visit=?').run(
         attempt,
         due,
         id,
-        node.id,
+        nodeId,
         visit,
       );
       this.#prepare("UPDATE runs SET state='waiting' WHERE runId=?").run(id);
@@ -558,9 +594,12 @@ export class SqliteLedger {
 
   #canRetryUnsent(id: string, nodeId: string) {
     const receipt = this.get(id)!;
-    if (receipt.mode === 'subworkflow') return Boolean(this.#recoverableParent(id));
+    if (receipt.mode === 'subworkflow')
+      return Boolean(
+        this.#recoverableParent(id) || this.#prepare('SELECT 1 FROM compensationSteps WHERE child=?').get(id),
+      );
     return this.publication(receipt.workflowId, receipt.revision).workflow.nodes.some(
-      (n) => n.id === nodeId && n.parameters.allowRedrive === true,
+      (n) => n.id === nodeId && (n.parameters.allowRedrive === true || Boolean(n.parameters.compensation)),
     );
   }
 
@@ -589,6 +628,7 @@ export class SqliteLedger {
         node.id,
         visit,
       ),
+      wave: this.#prepare('SELECT * FROM parallelWork WHERE parent=? ORDER BY start').all(id),
       payload: child && this.#prepare('SELECT payload FROM runs WHERE runId=?').get(child.runId)?.payload,
       effects:
         child &&
@@ -660,6 +700,8 @@ export class SqliteLedger {
       }
       if (point.attempt) return String(point.attempt);
       const r = this.get(id)!;
+      if (this.#prepare('SELECT 1 FROM compensations WHERE root=?').get(id))
+        throw new Error('Compensation has started');
       if (!point.data) throw new Error('Redrive data expired or invalidated');
       if (r.state !== 'finished' || r.outcome !== 'error' || this.canceled(id))
         throw new Error('Only an uncanceled, failed run can be redriven');
@@ -670,6 +712,14 @@ export class SqliteLedger {
         throw new Error('Sync scope was reset');
       const saved = JSON.parse(String(point.data)) as {
         point: string;
+        wave?: {
+          child: string;
+          start: number;
+          length: number;
+          baseTotal: number;
+          status: string;
+          retryData: string | null;
+        }[];
         page: { cursor: string | null; next: string | null; rows: string | null };
         cursors: { digest: string }[];
         payload?: string;
@@ -689,7 +739,28 @@ export class SqliteLedger {
       const reopen = this.#prepare(
         'UPDATE runs SET state=?,payload=?,startedAt=NULL,stoppedAt=NULL,outcome=NULL WHERE runId=?',
       );
-      reopen.run(child ? 'waiting' : 'queued', '[]', id);
+      const wave = saved.wave ?? [];
+      reopen.run(child || wave.length ? 'waiting' : 'queued', '[]', id);
+      for (const part of wave) {
+        const failed = part.status === 'failed';
+        this.#prepare('INSERT INTO parallelWork VALUES(?,?,?,?,?,?,NULL,NULL)').run(
+          part.child,
+          id,
+          part.start,
+          part.length,
+          part.baseTotal,
+          failed ? 'pending' : 'success',
+        );
+        if (failed) {
+          const retry = JSON.parse(part.retryData!) as {
+            payload: string;
+            effects: { key: string; result: string }[];
+          };
+          for (const e of retry.effects)
+            this.#prepare('UPDATE effects SET result=? WHERE key=?').run(e.result, e.key);
+          reopen.run('queued', retry.payload, part.child);
+        }
+      }
       for (const effect of saved.effects ?? [])
         this.#prepare('UPDATE effects SET result=? WHERE key=?').run(effect.result, effect.key);
       if (child) {
@@ -757,9 +828,7 @@ export class SqliteLedger {
     }
     if (
       config.sumField &&
-      !Number.isFinite(
-        rows.reduce((sum, row) => sum + Number(row[config.sumField]), Number(state.total)),
-      )
+      !Number.isFinite(rows.reduce((sum, row) => sum + Number(row[config.sumField]), Number(state.total)))
     )
       return this.pageFailure(id, node.id, visit, 'Page total exceeds numeric range');
     this.#transaction(() => {
@@ -780,7 +849,30 @@ export class SqliteLedger {
     const offset = Number(state.offset);
     this.#transaction(() => {
       if (offset === rows.length) this.#advancePage(parent.runId, node, visit);
-      else
+      else if (pageConfig(node).concurrency > 1) {
+        const { concurrency, batchSize, orderKey } = pageConfig(node);
+        const keys = new Set<unknown>();
+        for (let i = 0; i < concurrency && offset + i * batchSize < rows.length; i++) {
+          const start = offset + i * batchSize;
+          const slice = rows.slice(start, start + batchSize);
+          if (orderKey && slice.some((row) => keys.has(row[orderKey]))) break;
+          if (orderKey) for (const row of slice) keys.add(row[orderKey]);
+          const child = this.#spawn(
+            parent,
+            node,
+            visit,
+            Number(state.batches) + i,
+            slice.map((json) => ({ json })),
+          );
+          this.#prepare("INSERT INTO parallelWork VALUES(?,?,?,?,?,'pending',NULL,NULL)").run(
+            child,
+            parent.runId,
+            start,
+            slice.length,
+            Number(state.total),
+          );
+        }
+      } else
         this.#spawn(
           parent,
           node,
@@ -1077,12 +1169,35 @@ export class SqliteLedger {
     this.#prepare('INSERT INTO webhookTestDocuments VALUES(?)').run(id);
   }
 
-  claim() {
+  parallelChild(id: string) {
+    return !!this.#prepare('SELECT 1 FROM parallelWork WHERE child=?').get(id);
+  }
+
+  latestCooldown() {
+    return Number(this.#prepare('SELECT MAX(untilMs) AS latest FROM rateLimits').get()?.latest ?? 0);
+  }
+
+  rateLimit(target: string) {
+    return Number(this.#prepare('SELECT untilMs FROM rateLimits WHERE target=?').get(target)?.untilMs ?? 0);
+  }
+
+  holdRate(target: string, until: number) {
+    this.#prepare(
+      'INSERT INTO rateLimits VALUES(?,?) ON CONFLICT(target) DO UPDATE SET untilMs=max(untilMs,excluded.untilMs)',
+    ).run(target, until);
+  }
+
+  claim(allowParallel = true) {
     return this.#transaction(() => {
       const next = this.#prepare(
         `SELECT r.runId,r.payload FROM runs r LEFT JOIN readyAfter y ON r.runId=y.runId
-         WHERE r.state='queued' ORDER BY COALESCE(y.cutoff,r.rowid),y.cutoff IS NOT NULL,r.rowid LIMIT 1`,
-      ).get();
+         WHERE r.state='queued' AND (? OR NOT EXISTS(
+           SELECT 1 FROM calls c JOIN pageRuns p ON p.runId=c.parent AND p.node=c.node AND p.visit=c.visit
+           WHERE c.child=r.runId))
+         AND NOT EXISTS(SELECT 1 FROM parallelWork w JOIN runs k ON k.runId=w.child
+           WHERE w.parent=r.runId AND w.status='pending' AND k.state IN ('running','queued'))
+         ORDER BY COALESCE(y.cutoff,r.rowid),y.cutoff IS NOT NULL,r.rowid LIMIT 1`,
+      ).get(Number(allowParallel));
       if (!next) return;
       const id = String(next.runId);
       this.#prepare('DELETE FROM readyAfter WHERE runId=?').run(id);
@@ -1108,7 +1223,7 @@ export class SqliteLedger {
     };
   }
 
-  beginJournal(state: Checkpoint, mode: 'keyed' | 'manual'): JournalItem {
+  beginJournal(state: Checkpoint, mode: 'keyed' | 'manual', spec?: CompensationSpec): JournalItem {
     const json = encodeCheckpoint(state);
     const { runId } = state;
     const { nodeId, runIndex, input } = state.stack[0]!;
@@ -1118,6 +1233,23 @@ export class SqliteLedger {
       const count = input.main?.[0]?.length ?? 0;
       for (let index = 0; index < count; index++) {
         reserve.run(runId, nodeId, runIndex, index, randomUUID(), mode);
+        const item = input.main![0]![index]!.json;
+        if (spec && (!spec.when || item[spec.when.field] === spec.when.equals)) {
+          this.#prepare(
+            `INSERT OR IGNORE INTO compensationSteps(source,root,priority,workflow,revision,auto,input)
+            SELECT key,runId,?,?,?,?,? FROM effects WHERE runId=? AND nodeId=? AND visit=? AND item=?`,
+          ).run(
+            spec.order,
+            spec.workflowId,
+            spec.revision,
+            Number(spec.onFailure === true),
+            JSON.stringify(item),
+            runId,
+            nodeId,
+            runIndex,
+            index,
+          );
+        }
       }
     });
     return async (index, request, send) => {
@@ -1137,17 +1269,38 @@ export class SqliteLedger {
       );
       let result: JsonObject;
       try {
-        if (change) {
-          // Credential lookup can suspend. Check the receiver's window at transport dispatch.
-          const guard = () => {
-            const now = Date.now();
-            if (change.firstSend != null && now >= Number(change.firstSend) + Number(change.lifetime))
-              throw new Error('Receiver key expired; reconcile before retry');
-            if (change.firstSend == null)
-              this.#prepare('UPDATE syncWork SET firstSend=? WHERE child=? AND item=?').run(now, runId, index);
-          };
-          result = await beforeRecordedSend.run(guard, () => send(key));
-        } else result = await send(key);
+        let deferred = false;
+        let dispatched = false;
+        result = await recordedTransport.run(
+          {
+            defer: () => {
+              // A previous uncertain attempt must remain available for reconciliation.
+              if (operation.state !== 'unsent' || deferred || dispatched) return;
+              this.#prepare("UPDATE effects SET state='unsent' WHERE key=?").run(key);
+              deferred = true;
+            },
+            dispatch: () => {
+              const recordDispatch = () => {
+                if (change) {
+                  const now = Date.now();
+                  if (change.firstSend != null && now >= Number(change.firstSend) + Number(change.lifetime))
+                    throw new Error('Receiver key expired; reconcile before retry');
+                  if (change.firstSend == null)
+                    this.#prepare('UPDATE syncWork SET firstSend=? WHERE child=? AND item=?').run(
+                      now,
+                      runId,
+                      index,
+                    );
+                }
+                if (deferred) this.#prepare("UPDATE effects SET state='unknown' WHERE key=?").run(key);
+              };
+              if (deferred && change) this.#transaction(recordDispatch);
+              else recordDispatch();
+              dispatched = true;
+            },
+          },
+          () => send(key),
+        );
       } catch (error) {
         // An earlier attempt may have reached the receiver even if this attempt never left the host.
         if (
@@ -1395,14 +1548,197 @@ export class SqliteLedger {
     );
   }
 
+  compensationInfo(root: string) {
+    const receipt = this.get(root);
+    if (!receipt) throw new Error('Unknown run');
+    const operation = this.#prepare('SELECT id,state FROM compensations WHERE root=?').get(root);
+    const steps = this.#prepare(
+      `SELECT s.source,s.priority,s.child,s.status,s.failure,s.reason,r.state AS childState
+      FROM compensationSteps s LEFT JOIN runs r ON r.runId=s.child WHERE root=? AND s.result IS NOT NULL ORDER BY priority,s.rowid`,
+    ).all(root);
+    return {
+      outcome: receipt.outcome,
+      id: operation?.id ?? null,
+      state: steps.some((s) => s.childState === 'review') ? 'review' : (operation?.state ?? 'idle'),
+      steps,
+    };
+  }
+
+  #compensationPayload(step: { input?: unknown; result?: unknown; source?: unknown }) {
+    return JSON.stringify([
+      {
+        json: {
+          input: JSON.parse(String(step.input)),
+          result: JSON.parse(String(step.result)),
+          sourceKey: step.source,
+        },
+      },
+    ]);
+  }
+
+  #nextCompensation(root: string) {
+    const step = this.#prepare(
+      "SELECT * FROM compensationSteps WHERE root=? AND result IS NOT NULL AND status='pending' ORDER BY priority,rowid LIMIT 1",
+    ).get(root);
+    if (!step) {
+      this.#prepare("UPDATE compensations SET state='compensated' WHERE root=?").run(root);
+      return;
+    }
+    const child = this.#admitChild(
+      String(step.workflow),
+      Number(step.revision),
+      this.#compensationPayload(step),
+    );
+    this.#prepare("UPDATE compensationSteps SET child=?,status='running' WHERE source=?").run(
+      child,
+      String(step.source),
+    );
+  }
+
+  #beginCompensation(root: string) {
+    const id = randomUUID();
+    this.#prepare("INSERT INTO compensations VALUES(?,?,'compensating')").run(root, id);
+    this.#nextCompensation(root);
+    return id;
+  }
+
+  compensate(root: string) {
+    return this.#transaction(() => {
+      const existing = this.#prepare('SELECT id FROM compensations WHERE root=?').get(root);
+      if (existing) return String(existing.id);
+      if (this.get(root)?.state !== 'finished' || this.inspect(root).uncertain.length)
+        throw new Error('Original execution must be settled before compensation');
+      if (!this.#prepare('SELECT 1 FROM compensationSteps WHERE root=? AND result IS NOT NULL').get(root))
+        throw new Error('No confirmed compensable operation');
+      return this.#beginCompensation(root);
+    });
+  }
+
+  retryCompensation(root: string, failure: string) {
+    return this.#transaction(() => {
+      const step = this.#prepare('SELECT * FROM compensationSteps WHERE root=? AND failure=?').get(
+        root,
+        failure,
+      );
+      const previous = this.#prepare(
+        'SELECT attempt FROM compensationRetries WHERE failure=? AND root=?',
+      ).get(failure, root);
+      if (previous) return String(previous.attempt);
+      if (!step || step.status !== 'failed') throw new Error('No retryable compensation for this failure');
+      const attempt = randomUUID();
+      const payload = this.#compensationPayload(step);
+      this.#prepare(
+        "UPDATE runs SET state='queued',startedAt=NULL,stoppedAt=NULL,outcome=NULL,payload=? WHERE runId=?",
+      ).run(payload, String(step.child));
+      this.#prepare("UPDATE compensationSteps SET status='running',reason=NULL WHERE source=?").run(
+        String(step.source),
+      );
+      this.#prepare("UPDATE compensations SET state='compensating' WHERE root=?").run(root);
+      this.#prepare('INSERT INTO compensationRetries VALUES(?,?,?)').run(failure, root, attempt);
+      return attempt;
+    });
+  }
+
+  #settleParallel(
+    parent: Receipt,
+    node: WorkflowNode,
+    visit: number,
+    child: string,
+    status: string,
+    error: string,
+  ) {
+    const id = parent.runId;
+    const parts = this.#prepare('SELECT * FROM parallelWork WHERE parent=? ORDER BY start').all(id);
+    const state = this.pageState(id, node.id, visit);
+    const rows = JSON.parse(String(state.rows)) as JsonObject[];
+    const { sumField } = pageConfig(node);
+    let total = Number(parts[0]!.baseTotal);
+    for (const part of parts) {
+      if (part.status === 'success' && sumField) {
+        for (const row of rows.slice(Number(part.start), Number(part.start) + Number(part.length)))
+          total += Number(row[sumField]);
+      }
+    }
+    const length = Number(parts.find((part) => part.child === child)!.length);
+    if (status === 'success')
+      this.#prepare(
+        'UPDATE pageRuns SET batches=batches+1,items=items+?,total=? WHERE runId=? AND node=? AND visit=?',
+      ).run(length, total, id, node.id, visit);
+    if (parts.some((part) => part.status === 'pending') || this.canceled(id)) return;
+    const failed = parts.find((part) => part.status === 'failed');
+    if (failed) {
+      const reason = String(failed.failure ?? error);
+      if (!parts.some((part) => this.canceled(String(part.child))))
+        this.#archivePage(parent, node, visit, reason);
+      this.#batchDone(id, node, visit, { reason: 'result', data: {}, failure: reason });
+    } else {
+      const last = parts[parts.length - 1]!;
+      const offset = Number(last.start) + Number(last.length);
+      this.#prepare('UPDATE pageRuns SET offset=? WHERE runId=? AND node=? AND visit=?').run(
+        offset,
+        id,
+        node.id,
+        visit,
+      );
+      if (offset === rows.length) this.#advancePage(id, node, visit);
+      else this.#yieldPage(id);
+    }
+    this.#prepare('DELETE FROM parallelWork WHERE parent=?').run(id);
+  }
+
   finish(receipt: Receipt, summary: ExecutionSummary, detail: ExecutionDetail, interrupted = false) {
     this.#transaction(() => {
       // An engine error can also mean that committing the review transition failed.
       // Leave the claim and journal intact so startup can reconcile the external outcome.
       if (this.#prepare("SELECT 1 FROM effects WHERE runId=? AND state='unknown'").get(receipt.runId))
         throw new Error('Cannot finish a run with an uncertain external outcome');
+      const undo = this.#prepare('SELECT root FROM compensationSteps WHERE child=?').get(receipt.runId);
+      if (undo) {
+        if (summary.status === 'success') {
+          this.#prepare("UPDATE compensationSteps SET status='done' WHERE child=?").run(receipt.runId);
+          this.#nextCompensation(String(undo.root));
+        } else {
+          const retryable =
+            summary.status === 'error' &&
+            !this.canceled(receipt.runId) &&
+            !this.#prepare("SELECT 1 FROM effects WHERE runId=? AND state!='unsent'").get(receipt.runId);
+          this.#prepare('UPDATE compensationSteps SET status=?,failure=?,reason=? WHERE child=?').run(
+            retryable ? 'failed' : 'manual',
+            randomUUID(),
+            detail.error?.message ?? summary.status,
+            receipt.runId,
+          );
+          this.#prepare("UPDATE compensations SET state='manual' WHERE root=?").run(String(undo.root));
+        }
+      } else if (
+        !interrupted &&
+        summary.status === 'error' &&
+        !this.canceled(receipt.runId) &&
+        this.#prepare('SELECT 1 FROM compensationSteps WHERE root=? AND result IS NOT NULL AND auto=1').get(
+          receipt.runId,
+        )
+      )
+        this.#beginCompensation(receipt.runId);
       if (summary.status === 'error') this.#archiveHttp(receipt, detail);
-      if (receipt.mode === 'subworkflow' && summary.status === 'error') {
+      const parallel = receipt.mode === 'subworkflow' && this.parallelChild(receipt.runId);
+      if (parallel) {
+        const ok = summary.status === 'success';
+        const retry = ok
+          ? null
+          : JSON.stringify({
+              payload: this.#prepare('SELECT payload FROM runs WHERE runId=?').get(receipt.runId)!.payload,
+              effects: this.#prepare("SELECT key,result FROM effects WHERE runId=? AND state='success'").all(
+                receipt.runId,
+              ),
+            });
+        this.#prepare('UPDATE parallelWork SET status=?,failure=?,retryData=? WHERE child=?').run(
+          ok ? 'success' : 'failed',
+          ok ? null : (detail.error?.message ?? 'Batch ' + summary.status),
+          retry,
+          receipt.runId,
+        );
+      }
+      if (!parallel && receipt.mode === 'subworkflow' && summary.status === 'error') {
         const target = this.#recoverableParent(receipt.runId);
         if (target?.parent.state === 'waiting')
           this.#archivePage(
@@ -1433,7 +1769,19 @@ export class SqliteLedger {
       const parent = link && this.get(String(link.parent));
       const settlingCanceledBatch =
         parent?.state === 'queued' && summary.status === 'success' && this.canceled(parent.runId);
-      if (parent && (parent.state === 'waiting' || settlingCanceledBatch)) {
+      if (parent && parallel && (parent.state === 'waiting' || parent.state === 'queued')) {
+        const node = this.publication(parent.workflowId, parent.revision).workflow.nodes.find(
+          (n) => n.id === link.node,
+        )!;
+        this.#settleParallel(
+          parent,
+          node,
+          Number(link.visit),
+          receipt.runId,
+          summary.status,
+          detail.error?.message ?? 'Batch failed',
+        );
+      } else if (parent && !parallel && (parent.state === 'waiting' || settlingCanceledBatch)) {
         const returnId = detail.workflow.nodes.find((n) => n.type === 'draflow.return' && !n.disabled)?.id;
         const returned = detail.tasks.filter((t) => t.nodeId === returnId);
         const items = returned.flatMap(({ task }) =>
@@ -1451,6 +1799,7 @@ export class SqliteLedger {
         if (node.type === 'draflow.pages') this.#batchDone(parent.runId, node, Number(link.visit), response);
         else if (!settlingCanceledBatch) this.#resume(parent.runId, response);
       }
+      this.#prepare('DELETE FROM parallelWork WHERE parent=?').run(receipt.runId);
       const policy = detail.workflow.settings.saveExecutionData;
       if (link && summary.status !== 'error')
         this.#prepare('DELETE FROM syncWork WHERE child=?').run(receipt.runId);
@@ -1473,6 +1822,14 @@ export class SqliteLedger {
         ).get(r.runId);
         this.#prepare('UPDATE runs SET state=? WHERE runId=?').run(manual ? 'review' : 'queued', r.runId);
         if (manual) this.#recordPause(r.runId);
+        continue;
+      }
+      // These validated direct children cannot send before creating their effect checkpoint.
+      if (
+        this.parallelChild(r.runId) ||
+        this.#prepare('SELECT 1 FROM compensationSteps WHERE child=?').get(r.runId)
+      ) {
+        this.#prepare("UPDATE runs SET state='queued' WHERE runId=?").run(r.runId);
         continue;
       }
       const { workflow } = this.publication(r.workflowId, r.revision);

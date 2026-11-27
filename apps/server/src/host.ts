@@ -3,10 +3,24 @@ import { setImmediate as yieldToHost } from 'node:timers/promises';
 import { isPlainObject, type ExecutionEngineOptions, type JsonObject, type Workflow } from '@draflow/core';
 import { MemoryRuntime, type PublishedWorkflow, type TriggerEvent } from '@draflow/runtime';
 import type { ExecutionSummary } from '@draflow/storage';
-import { ReadThrottled, serverHttp, type HttpAuth } from './http-auth.js';
-import { pageConfig, readPage } from './pages.js';
+import {
+  ReadDeferred,
+  ReadThrottled,
+  sharedRateLimit,
+  serverHttp,
+  type RateGate,
+  type HttpAuth,
+} from './http-auth.js';
+import { compensationSpec } from './compensation.js';
+import { pageConfig, readPage, retryTime } from './pages.js';
 import { latestDue, nextTime, scheduleFor } from './schedule.js';
-import { executionTasks, QueueFull, SqliteLedger, type DeliverySource, type Reconciliation } from './sqlite.js';
+import {
+  executionTasks,
+  QueueFull,
+  SqliteLedger,
+  type DeliverySource,
+  type Reconciliation,
+} from './sqlite.js';
 
 interface HostOptions extends Omit<ExecutionEngineOptions, 'credentialFetch'> {
   scheduleClock?: {
@@ -17,6 +31,7 @@ interface HostOptions extends Omit<ExecutionEngineOptions, 'credentialFetch'> {
   maxHttpResponseBytes?: number;
   maxCallDepth?: number;
   capacity?: number;
+  maxParallelBatches?: number;
   dedupMs?: number;
   maxDetailBytes?: number;
   onWorkerError?: (error: unknown) => void;
@@ -35,7 +50,10 @@ export class NodeHost {
   #cancelSchedule: (() => void) | undefined;
   #stopping = false;
   #closed = false;
-  #active: { id: string; controller: AbortController } | undefined;
+  readonly #active = new Map<string, AbortController>();
+  readonly #parallel = new Set<Promise<void>>();
+  readonly #parallelLimit: number;
+  #latestCooldown = 0;
   #worker: Promise<void> | undefined;
   #fault: Error | undefined;
 
@@ -50,6 +68,9 @@ export class NodeHost {
         return () => clearTimeout(timer);
       },
     };
+    this.#parallelLimit = options.maxParallelBatches ?? 4;
+    if (!Number.isSafeInteger(this.#parallelLimit) || this.#parallelLimit < 1 || this.#parallelLimit > 32)
+      throw new RangeError('Invalid host batch concurrency');
     this.#capacity = options.capacity ?? 100;
     this.#ttl = options.dedupMs ?? 86_400_000;
     const budget = options.maxDetailBytes ?? 4 * 1024 * 1024;
@@ -62,10 +83,12 @@ export class NodeHost {
         options.fetch ?? fetch,
         options.maxHttpResponseBytes ?? 1024 * 1024,
         options.httpAuth,
+        () => (this.#latestCooldown > this.#scheduleClock.now() ? this.#rateGate() : undefined),
       ),
     };
     this.#ledger = new SqliteLedger(path, budget, options.maxCallDepth ?? 8);
     try {
+      this.#latestCooldown = this.#ledger.latestCooldown();
       this.#ledger.recover();
       const checked = new Set<string>();
       for (const row of this.#ledger.requiredPublications()) {
@@ -91,7 +114,7 @@ export class NodeHost {
   cancel(runId: string) {
     this.#ready();
     const ids = this.#ledger.cancelTree(runId);
-    if (this.#active && ids.includes(this.#active.id)) this.#active.controller.abort();
+    for (const id of ids) this.#active.get(id)?.abort();
     if (ids.length) this.#wake();
     return ids.length > 0;
   }
@@ -117,6 +140,26 @@ export class NodeHost {
     const attempt = this.#ledger.redrive(runId, failureId, this.#scheduleClock.now());
     this.#wake();
     return attempt;
+  }
+
+  compensate(runId: string) {
+    this.#ready();
+    const receipt = this.#ledger.get(runId);
+    if (receipt) this.#checkPublication(this.#ledger.publication(receipt.workflowId, receipt.revision));
+    const id = this.#ledger.compensate(runId);
+    this.#wake();
+    return id;
+  }
+
+  compensationInfo(runId: string) {
+    return this.#ledger.compensationInfo(runId);
+  }
+
+  retryCompensation(runId: string, failureId: string) {
+    this.#ready();
+    const id = this.#ledger.retryCompensation(runId, failureId);
+    this.#wake();
+    return id;
   }
 
   recoveryInfo(runId: string) {
@@ -178,6 +221,8 @@ export class NodeHost {
     new MemoryRuntime(this.#engine).restore(publication);
     checked.add(key);
     for (const node of publication.workflow.nodes) {
+      const undo = !node.disabled && compensationSpec(node);
+      if (undo) this.#checkPublication(this.#ledger.publication(undo.workflowId, undo.revision), checked);
       if (node.disabled || (node.type !== 'draflow.call' && node.type !== 'draflow.pages')) continue;
       const { workflowId, revision } = node.parameters;
       this.#checkPublication(this.#ledger.publication(String(workflowId), Number(revision)), checked);
@@ -373,40 +418,88 @@ export class NodeHost {
     });
   }
 
+  #rateGate(): RateGate {
+    const clock = this.#scheduleClock;
+    return {
+      remaining: (target) => this.#ledger.rateLimit(target) - clock.now(),
+      hold: (target, header) => {
+        const until = Math.min(Number.MAX_SAFE_INTEGER, retryTime(header, clock.now(), 1));
+        this.#ledger.holdRate(target, until);
+        this.#latestCooldown = Math.max(this.#latestCooldown, until);
+      },
+      wait: (ms, signal) =>
+        new Promise<void>((resolve, reject) => {
+          signal?.throwIfAborted();
+          const cancel = clock.arm(
+            () => {
+              signal?.removeEventListener('abort', abort);
+              resolve();
+            },
+            Math.min(ms, 60000),
+          );
+          const abort = () => {
+            cancel();
+            reject(signal?.reason);
+          };
+          signal?.addEventListener('abort', abort, { once: true });
+        }),
+    };
+  }
+
+  #withRateLimit<T>(action: () => T) {
+    return sharedRateLimit.run(this.#rateGate(), action);
+  }
+
   async #drain() {
     while (true) {
-      this.#active = undefined;
       await yieldToHost();
       if (this.#stopping || this.#fault) return;
-      const job = this.#ledger.claim();
+      const job = this.#ledger.claim(this.#parallel.size < this.#parallelLimit);
       if (!job) {
         this.#worker = undefined;
         return;
       }
-      const { receipt: r, items } = job;
-      if (this.#ledger.canceled(r.runId)) {
-        this.#ledger.finishCanceled(r);
-        continue;
-      }
+      const id = job.receipt.runId;
       const controller = new AbortController();
-      this.#active = { id: r.runId, controller };
-      const publication = this.#ledger.publication(r.workflowId, r.revision);
-      const operation = this.#ledger.pendingMode(r.runId);
-      if (operation === 'pages') {
-        const entry = this.#ledger.continuation(r.runId)!.checkpoint.stack[0]!;
-        const node = publication.workflow.nodes.find((n) => n.id === entry.nodeId)!;
-        const state = this.#ledger.pageState(r.runId, node.id, entry.runIndex);
-        const now = this.#scheduleClock.now();
-        if (now >= Number(state.created) + pageConfig(node).deadlineMs) {
-          this.#ledger.pageFailure(r.runId, node.id, entry.runIndex, 'Page sync deadline exceeded');
-          continue;
-        }
-        if (state.rows === null) {
-          let page;
-          try {
-            if (Number(state.pages) >= pageConfig(node).maxPages)
-              throw new Error('Page count limit exceeded');
-            page = await readPage(
+      this.#active.set(id, controller);
+      const parallel = this.#ledger.parallelChild(id);
+      const run = () => this.#runJob(job, controller);
+      const task = (parallel ? this.#withRateLimit(run) : run()).finally(() => this.#active.delete(id));
+      if (parallel) {
+        const pending = task
+          .catch((error) => this.#workerFailed(error))
+          .finally(() => {
+            this.#parallel.delete(pending);
+            if (!this.#stopping && !this.#fault) this.#wake();
+          });
+        this.#parallel.add(pending);
+      } else await task;
+    }
+  }
+
+  async #runJob(job: NonNullable<ReturnType<SqliteLedger['claim']>>, controller: AbortController) {
+    const { receipt: r, items } = job;
+    if (this.#ledger.canceled(r.runId)) {
+      this.#ledger.finishCanceled(r);
+      return;
+    }
+    const publication = this.#ledger.publication(r.workflowId, r.revision);
+    const operation = this.#ledger.pendingMode(r.runId);
+    if (operation === 'pages') {
+      const entry = this.#ledger.continuation(r.runId)!.checkpoint.stack[0]!;
+      const node = publication.workflow.nodes.find((n) => n.id === entry.nodeId)!;
+      const state = this.#ledger.pageState(r.runId, node.id, entry.runIndex);
+      const now = this.#scheduleClock.now();
+      if (now >= Number(state.created) + pageConfig(node).deadlineMs) {
+        this.#ledger.pageFailure(r.runId, node.id, entry.runIndex, 'Page sync deadline exceeded');
+        return;
+      }
+      if (state.rows === null) {
+        let page;
+        try {
+          if (Number(state.pages) >= pageConfig(node).maxPages) throw new Error('Page count limit exceeded');
+          const read = () =>
+            readPage(
               this.#engine.credentialFetch!,
               r.workflowId,
               node,
@@ -421,92 +514,104 @@ export class NodeHost {
                 ? (this.#ledger.syncScope(r.runId)?.token as string | null)
                 : undefined,
             );
-            if (controller.signal.aborted) {
-              this.#ledger.finishCanceled(r);
-              continue;
-            }
-          } catch (err) {
-            if (controller.signal.aborted) {
-              this.#ledger.finishCanceled(r);
-              continue;
-            }
-            if (err instanceof ReadThrottled) {
-              this.#ledger.throttle(
-                r.runId,
-                node,
-                entry.runIndex,
-                err.status,
-                err.retryAfter,
-                this.#scheduleClock.now(),
-              );
-              this.#armSchedules();
-              continue;
-            }
-            this.#ledger.pageFailure(
-              r.runId,
-              node.id,
-              entry.runIndex,
-              err instanceof Error ? err.message : 'Page read failed',
-            );
-            continue;
+          page = await (pageConfig(node).concurrency > 1 ? this.#withRateLimit(read) : read());
+          if (controller.signal.aborted) {
+            this.#ledger.finishCanceled(r);
+            return;
           }
-          this.#ledger.savePage(r, node, entry.runIndex, page);
+        } catch (err) {
+          if (controller.signal.aborted) {
+            this.#ledger.finishCanceled(r);
+            return;
+          }
+          if (err instanceof ReadDeferred) {
+            const deadline = Number(state.created) + pageConfig(node).deadlineMs;
+            const due = Math.min(deadline, this.#scheduleClock.now() + err.delayMs);
+            this.#ledger.waitForPage(r.runId, node.id, entry.runIndex, Number(state.attempts), due);
+            this.#armSchedules();
+            return;
+          }
+          if (err instanceof ReadThrottled) {
+            this.#ledger.throttle(
+              r.runId,
+              node,
+              entry.runIndex,
+              err.status,
+              err.retryAfter,
+              this.#scheduleClock.now(),
+            );
+            this.#armSchedules();
+            return;
+          }
+          this.#ledger.pageFailure(
+            r.runId,
+            node.id,
+            entry.runIndex,
+            err instanceof Error ? err.message : 'Page read failed',
+          );
+          return;
         }
-        if (this.#ledger.pendingMode(r.runId) === 'pages') this.#ledger.batch(r, node, entry.runIndex);
-        continue;
+        this.#ledger.savePage(r, node, entry.runIndex, page);
       }
-      if (operation === 'child') {
-        const entry = this.#ledger.continuation(r.runId)!.checkpoint.stack[0]!;
-        this.#ledger.dispatchChild(r, publication.workflow.nodes.find((n) => n.id === entry.nodeId)!);
-        continue;
-      }
-      // Run the accepted revision even after a replacement or deactivation.
-      const runtime = new MemoryRuntime({
-        ...this.#engine,
-        persistence: {
-          ...this.#ledger.continuation(r.runId),
-          beginJournal: (state, mode) => this.#ledger.beginJournal(state, mode),
-          leaveCheckpoint: () => this.#ledger.leaveCheckpoint(r.runId),
-          endJournal: () => this.#ledger.endJournal(r.runId),
-          suspend: (state, request) => this.#ledger.suspend(state, request, this.#scheduleClock.now()),
-        },
-      });
-      runtime.restore(publication);
-      await runtime.activate(r.workflowId, r.revision);
-      const { result } = await runtime.fire(
-        r.workflowId,
-        r.triggerNodeId,
-        {
-          items,
-          runId: r.runId,
-          mode: r.mode,
-          ...(r.eventKey !== null && { key: r.eventKey }),
-        },
-        controller.signal,
-      );
-      if (result.status === 'waiting') {
-        this.#armSchedules();
-        continue;
-      }
-      const tasks = executionTasks(result.runData);
-      const summary: ExecutionSummary = {
-        id: result.id,
-        workflowId: r.workflowId,
-        workflowName: publication.workflow.name,
-        mode: r.mode,
-        startNodeId: r.triggerNodeId,
-        status: result.status,
-        startedAt: result.startedAt,
-        stoppedAt: result.stoppedAt,
-        executed: tasks.length,
-        reused: 0,
-      };
-      this.#ledger.finish(r, summary, {
-        workflow: publication.workflow,
-        tasks,
-        ...(result.error && { error: result.error }),
-      });
+      if (this.#ledger.pendingMode(r.runId) === 'pages') this.#ledger.batch(r, node, entry.runIndex);
+      return;
     }
+    if (operation === 'child') {
+      const entry = this.#ledger.continuation(r.runId)!.checkpoint.stack[0]!;
+      this.#ledger.dispatchChild(r, publication.workflow.nodes.find((n) => n.id === entry.nodeId)!);
+      return;
+    }
+    // Run the accepted revision even after a replacement or deactivation.
+    const runtime = new MemoryRuntime({
+      ...this.#engine,
+      persistence: {
+        ...this.#ledger.continuation(r.runId),
+        beginJournal: (state, mode) =>
+          this.#ledger.beginJournal(
+            state,
+            mode,
+            compensationSpec(publication.workflow.nodes.find((n) => n.id === state.stack[0]!.nodeId)!),
+          ),
+        leaveCheckpoint: () => this.#ledger.leaveCheckpoint(r.runId),
+        endJournal: () => this.#ledger.endJournal(r.runId),
+        suspend: (state, request) => this.#ledger.suspend(state, request, this.#scheduleClock.now()),
+      },
+    });
+    runtime.restore(publication);
+    await runtime.activate(r.workflowId, r.revision);
+    const { result } = await runtime.fire(
+      r.workflowId,
+      r.triggerNodeId,
+      {
+        items,
+        runId: r.runId,
+        mode: r.mode,
+        ...(r.eventKey !== null && { key: r.eventKey }),
+      },
+      controller.signal,
+    );
+    if (result.status === 'waiting') {
+      this.#armSchedules();
+      return;
+    }
+    const tasks = executionTasks(result.runData);
+    const summary: ExecutionSummary = {
+      id: result.id,
+      workflowId: r.workflowId,
+      workflowName: publication.workflow.name,
+      mode: r.mode,
+      startNodeId: r.triggerNodeId,
+      status: result.status,
+      startedAt: result.startedAt,
+      stoppedAt: result.stoppedAt,
+      executed: tasks.length,
+      reused: 0,
+    };
+    this.#ledger.finish(r, summary, {
+      workflow: publication.workflow,
+      tasks,
+      ...(result.error && { error: result.error }),
+    });
   }
 
   /** On timeout retain ownership until the process exits or close is called again. */
@@ -517,7 +622,7 @@ export class NodeHost {
     let timer: NodeJS.Timeout | undefined;
     try {
       await Promise.race([
-        this.#worker,
+        Promise.all([this.#worker, ...this.#parallel]),
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => reject(new Error('Worker shutdown deadline exceeded')), deadlineMs);
         }),

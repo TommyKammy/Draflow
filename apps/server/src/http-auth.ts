@@ -13,9 +13,25 @@ export interface HttpAuth {
   resolve(id: string): Promise<string | undefined> | string | undefined;
 }
 
-export const beforeRecordedSend = new AsyncLocalStorage<() => void>();
+export const recordedTransport = new AsyncLocalStorage<{
+  defer(): void;
+  dispatch(): void;
+}>();
+
+export interface RateGate {
+  remaining(target: string): number;
+  wait(ms: number, signal?: AbortSignal | null): Promise<void>;
+  hold(target: string, header: string | null): void;
+}
+export const sharedRateLimit = new AsyncLocalStorage<RateGate>();
 
 export class UnsentCredentialError extends Error {}
+
+export class ReadDeferred extends Error {
+  constructor(readonly delayMs: number) {
+    super('Page read deferred by shared cooldown');
+  }
+}
 
 export class ReadThrottled extends Error {
   constructor(
@@ -129,7 +145,12 @@ function grantFor(binding: CredentialBinding, url: string, auth?: HttpAuth) {
   return grant;
 }
 
-export function serverHttp(fetchFn: FetchLike, limit: number, auth?: HttpAuth): CredentialFetch {
+export function serverHttp(
+  fetchFn: FetchLike,
+  limit: number,
+  auth?: HttpAuth,
+  activeGate?: () => RateGate | undefined,
+): CredentialFetch {
   if (!Number.isSafeInteger(limit) || limit < 0) throw new RangeError('Invalid HTTP response byte limit');
   return async (binding, url, init) => {
     let secret: string | undefined;
@@ -149,10 +170,24 @@ export function serverHttp(fetchFn: FetchLike, limit: number, auth?: HttpAuth): 
     }
     let response: Response;
     let bytes: Uint8Array<ArrayBuffer> | null;
-    beforeRecordedSend.getStore()?.();
+    const publisher = sharedRateLimit.getStore();
+    const gate = publisher ?? activeGate?.();
+    const target = gate ? JSON.stringify([new URL(url).origin, binding.id ?? null]) : '';
+    if (gate) {
+      let remaining;
+      while ((remaining = gate.remaining(target)) > 0) {
+        if (binding.type === 'draflow.pages') throw new ReadDeferred(remaining);
+        recordedTransport.getStore()?.defer();
+        await gate.wait(remaining, init?.signal);
+      }
+    }
+    init?.signal?.throwIfAborted();
+    recordedTransport.getStore()?.dispatch();
     try {
       init?.signal?.throwIfAborted();
       response = await fetchFn(url, init);
+      if (response.status === 429 || response.status === 503)
+        publisher?.hold(target, response.headers.get('retry-after'));
       if (binding.type === 'draflow.pages' && (response.status === 429 || response.status === 503)) {
         void response.body?.cancel().catch(() => {});
         throw new ReadThrottled(response.status, response.headers.get('retry-after'));

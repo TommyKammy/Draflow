@@ -9,6 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 const [db, phase, shape, countText = '1003'] = process.argv.slice(2);
 const count = Number(countText),
   measuring = phase === 'measure';
+const incremental = shape === 'sync' || (shape === 'parallel' && !measuring);
 const load = (id) => JSON.parse(readFileSync(new URL('../../../examples/' + id + '.json', import.meta.url)));
 const registry = new NodeRegistry().registerAll(standardNodes);
 // The receiver persists accepted keys independently of the workflow checkpoint.
@@ -40,22 +41,23 @@ const options = {
   fetch: async (url, init) => {
     if (new URL(url).hostname === 'source.example.test') {
       const at = Number(new URL(url).searchParams.get('cursor') ?? 0);
-      if (shape === 'sync' && new URL(url).searchParams.get('since') === 'watermark') {
+      if (incremental && new URL(url).searchParams.get('since') === 'watermark') {
         appendFileSync(db + '.next-run', 'watermark');
         return Response.json({ items: [], nextCursor: null, syncToken: 'watermark' });
       }
       if (!measuring) appendFileSync(db + '.reads', at + '\n');
       return Response.json({
-        ...(shape === 'sync' && { syncToken: 'watermark' }),
+        ...(incremental && { syncToken: 'watermark' }),
         items: Array.from({ length: Math.min(100, count - at) }, (_, i) => ({
           id: at + i + 1,
           amount: 1,
-          ...(shape === 'sync' && { id: String(at + i + 1), version: 1, op: 'upsert' }),
-          ...(measuring && { padding: 'x'.repeat(8500) }),
+          ...(incremental && { id: String(at + i + 1), version: 1, op: 'upsert' }),
+          ...(measuring && { padding: 'x'.repeat(shape === 'parallel' ? 80 : 8500) }),
         })),
         nextCursor: at + 100 < count ? String(at + 100) : null,
       });
     }
+    if (measuring) return Response.json({});
     const { id } = JSON.parse(init.body);
     const key = new Headers(init.headers).get('idempotency-key');
     const record = JSON.stringify({ id, key }) + '\n';
@@ -95,6 +97,10 @@ if (measuring) {
   const sql = new DatabaseSync(db);
   sql.exec(`CREATE TABLE sizes(point INTEGER,page INTEGER);
     INSERT INTO sizes VALUES(0,0);
+    CREATE TABLE waveSizes(active INTEGER);
+    INSERT INTO waveSizes VALUES(0);
+    CREATE TRIGGER sampleWave AFTER INSERT ON parallelWork BEGIN
+      UPDATE waveSizes SET active=max(active,(SELECT SUM(length) FROM parallelWork)); END;
     CREATE TRIGGER samplePoint AFTER INSERT ON continuations BEGIN
       UPDATE sizes SET point=max(point,length(CAST(NEW.checkpoint AS BLOB))); END;
     CREATE TRIGGER samplePage AFTER UPDATE OF rows ON pageRuns WHEN NEW.rows IS NOT NULL BEGIN
@@ -107,12 +113,13 @@ if (phase === 'resume') id = readFileSync(db + '.id', 'utf8');
 else {
   const child = load('process-order-batch'),
     parent = load('order-import');
+  if (shape === 'parallel') parent.nodes[1].parameters.concurrency = 4;
   if (shape === 'redrive') {
     Object.assign(parent.nodes[1].parameters, { allowRedrive: true });
     child.nodes[1].parameters.authentication = 'credential';
     child.nodes[1].credentials = { httpAuth: 'service' };
   }
-  if (shape === 'sync')
+  if (incremental)
     Object.assign(parent.nodes[1].parameters, { syncScope: 'orders', keyLifetimeMs: 86400000 });
   if (shape === 'call')
     Object.assign(parent.nodes[1], {
@@ -121,14 +128,16 @@ else {
     });
   if (measuring) {
     child.settings.saveExecutionData = 'none';
-    child.nodes.splice(1, 1);
-    child.connections = [
-      {
-        id: 'r',
-        from: { node: 'input', port: 'main', index: 0 },
-        to: { node: 'return', port: 'main', index: 0 },
-      },
-    ];
+    if (shape !== 'parallel') {
+      child.nodes.splice(1, 1);
+      child.connections = [
+        {
+          id: 'r',
+          from: { node: 'input', port: 'main', index: 0 },
+          to: { node: 'return', port: 'main', index: 0 },
+        },
+      ];
+    }
   }
   h.publish(child);
   h.activate(parent.id, h.publish(parent));
@@ -153,7 +162,7 @@ if (phase === 'redrive-commit') {
 const receipt = h.receipt(id),
   progress = h.progress(id),
   children = h.relations(id).length;
-if (shape === 'sync') {
+if (incremental) {
   const next = h.accept('order-import', 'schedule', { items: [{ json: {} }] });
   while (h.receipt(next).state !== 'finished' && Date.now() < end) await delay(2);
   if (h.receipt(next).outcome !== 'success') throw Error('Next sync failed');
@@ -167,7 +176,15 @@ if (measuring) {
     .prepare('SELECT page_count*page_size AS bytes FROM pragma_page_count(),pragma_page_size()')
     .get().bytes;
   console.log(
-    JSON.stringify({ count, progress, sizes, rssKiB: process.resourceUsage().maxRSS, audit, dbBytes }),
+    JSON.stringify({
+      count,
+      progress,
+      sizes,
+      active: sql.prepare('SELECT active FROM waveSizes').get().active,
+      rssKiB: process.resourceUsage().maxRSS,
+      audit,
+      dbBytes,
+    }),
   );
   sql.close();
 } else console.log(JSON.stringify({ outcome: receipt.outcome, children, progress }));

@@ -187,3 +187,33 @@ Incremental pages enable recovery automatically. For a regular terminal pages no
 ```
 
 A failure ID admits one attempt, including across a restart. A subsequent failure gets its own ID. Recovery info exposes the failed node, visit, child, reason, expiry, whether data is retained, attempt ID and outcome. A run without a safe saved point has an empty list. Unknown sends remain in review: reconcile them as applied or notApplied, or request retryKeyed within the receiver's valid key window on incremental pages. The host checks that window again after resolving credentials, immediately before transport dispatch. Canceled runs and expired points cannot start another attempt. Credentials are resolved against current grants for the pinned revision.
+
+## Parallel batches
+
+Set `draflow.pages.parameters.concurrency` to 2–32 on a terminal root page node to process independent batches on the same page concurrently. The default is 1. Each child uses the direct recorded HTTP contract described under incremental sync. Set the Node host option `maxParallelBatches` or CLI environment variable `DRAFLOW_MAX_PARALLEL_BATCHES` to cap simultaneously executing page batches across imports (default 4, range 1–32).
+
+`orderKey` names a string or numeric source field, default `id`. Adjacent batches with disjoint keys can run together. A repeated key in a later batch waits for the preceding group. Within a batch the HTTP node sends in input order. For ordinary pages, an empty field explicitly declares rows independent. Incremental sync uses `id` and serializes rounds sharing a sync scope. Use concurrency 1 when the receiver requires global input order.
+
+The ledger saves the outcome of each child and commits the cursor after the last successful batch on the page. The total uses source order. A failed group retains its recoverable children until the configured redrive expiry. Use the same `recoveryInfo`, `redrive`, `progress`, and `reconcile` operations as for sequential sync. A canceled import retains confirmed effect keys and exposes outstanding sends for reconciliation.
+
+A 429 or 503 received during parallel page reads or batch writes establishes a durable cooldown for the origin and credential ID (anonymous requests share the origin). Subsequent requests through the host credential-aware HTTP transport observe that deadline, including after restart. Already-dispatched requests may still complete. Page reads enter the retry scheduler. A read deferred before dispatch retains its attempt budget and remains subject to the original deadline. A first write waiting locally for the cooldown remains unsent until dispatch. An ambiguous write uses the recorded delivery policy.
+
+## Compensating a sequence of operations
+
+On a recorded HTTP v2 node in a linear, stop-on-error root workflow, configure a literal `compensation` object, for example:
+
+```json
+{"workflowId":"refund-payment","revision":1,"order":10,"onFailure":true,"when":{"field":"refundable","equals":true}}
+```
+
+Publish the target child first. It must authorize the original workflow in its callable entry and directly connect that entry to a recorded HTTP v2 node and then Return. Each compensable node has a distinct integer order. Smaller values run first. Matching items within the same step run in their original order. The optional condition tests a top-level field on the original input. Each child receives one item containing `input`, the confirmed original HTTP `result`, and `sourceKey`. Use the receipt ID from `result` to reverse the specific business operation. The child uses its own credential grant and a separate delivery key. The ledger retains the source input and confirmed result independently of execution history.
+
+```jsonl
+{"op":"compensate","runId":"<original-run-id>"}
+{"op":"compensationInfo","runId":"<original-run-id>"}
+{"op":"retryCompensation","runId":"<original-run-id>","failureId":"<failed-step-id>"}
+```
+
+An explicit request on a settled run returns the durable compensation ID. Repeating it returns the same ID. If a confirmed matching step has `onFailure: true`, a terminal error starts compensation automatically. An interrupted original run can have an unknown outcome for an unrecorded operation. Check its receipt and the external system before deciding how to resolve it. Automatic compensation requires a confirmed terminal error. Ordinary cancellation preserves the original recorded effects. In-flight original operations require reconciliation before an explicit reversal. Once compensation has started, the original run cannot start another redrive.
+
+The original receipt keeps its outcome. `compensationInfo` returns that outcome, the compensation ID, state (`idle`, `compensating`, `review`, `manual`, or `compensated`), and ordered step records. For `review`, inspect the child’s effect and reconcile its key using the existing CLI. Keyed crash recovery requires the receiver to preserve the key across the recovery interval. Use manual delivery when it cannot. A failed, unsent compensation can be retried by its failure ID; repeated requests return the original retry ID. A completed reversal is never invoked by a later step's retry.

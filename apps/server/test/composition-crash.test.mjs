@@ -116,3 +116,40 @@ test('10x pages retain one page and bounded per-run checkpoints', (t) => {
   assert.ok(samples[1].sizes.page < samples[0].sizes.page * 1.05);
   console.log('Page working set', JSON.stringify(samples));
 });
+
+test('parallel SIGKILL after acceptance reuses the original key', (t) => {
+  const db = setup(t);
+  const first = run(db, 'lost-response', 'parallel');
+  assert.equal(first.signal, 'SIGKILL', first.stderr);
+  const second = run(db, 'resume', 'parallel');
+  assert.equal(second.status, 0, second.stderr);
+  const result = JSON.parse(second.stdout);
+  assert.equal(result.outcome, 'success');
+  const records = (suffix) =>
+    readFileSync(db + suffix, 'utf8')
+      .trim()
+      .split('\n')
+      .map(JSON.parse);
+  const writes = records('.writes');
+  assert.deepEqual(
+    writes.map((w) => Number(w.id)).sort((a, b) => a - b),
+    Array.from({ length: 1003 }, (_, i) => i + 1),
+  );
+  assert.equal(readFileSync(db + '.next-run', 'utf8'), 'watermark');
+  const keys = new Map(writes.map((w) => [w.id, w.key]));
+  for (const a of records('.attempts')) assert.equal(a.key, keys.get(a.id));
+});
+
+test('parallel recovery working set stays within the current page at tenfold volume', (t) => {
+  const samples = [1003, 10030].map((count) => {
+    const r = run(setup(t), 'measure', 'parallel', String(count));
+    assert.equal(r.status, 0, r.stderr);
+    const s = JSON.parse(r.stdout);
+    assert.equal(s.progress[0].items, count);
+    assert.equal(s.active, 100);
+    return s;
+  });
+  assert.ok(samples[1].sizes.point < samples[0].sizes.point * 1.05);
+  assert.ok(samples[1].sizes.page < samples[0].sizes.page * 1.05);
+  console.log('Parallel working set', JSON.stringify(samples));
+});
