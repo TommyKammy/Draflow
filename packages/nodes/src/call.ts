@@ -54,6 +54,28 @@ export const pagesNode: NodeType = {
   parameters: [
     ...targetParameters,
     { name: 'url', label: 'GET endpoint', type: 'string', required: true, noExpression: true },
+    {
+      name: 'allowRedrive',
+      label: 'Retain failed page for redrive',
+      type: 'boolean',
+      default: false,
+      noExpression: true,
+    },
+    {
+      name: 'redriveRetentionMs',
+      label: 'Redrive retention (ms)',
+      type: 'number',
+      min: 1,
+      noExpression: true,
+    },
+    { name: 'syncScope', label: 'Incremental sync scope', type: 'string', default: '', noExpression: true },
+    {
+      name: 'keyLifetimeMs',
+      label: 'Receiver key lifetime (ms)',
+      type: 'number',
+      min: 1,
+      noExpression: true,
+    },
     { name: 'pageSize', label: 'Page size', type: 'number', default: 100, min: 1, noExpression: true },
     { name: 'batchSize', label: 'Batch size', type: 'number', default: 25, min: 1, noExpression: true },
     { name: 'sumField', label: 'Numeric field to total', type: 'string', default: '', noExpression: true },

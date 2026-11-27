@@ -15,7 +15,14 @@ export function pageConfig(node: WorkflowNode) {
     url.searchParams.has('cursor')
   )
     throw new Error('Invalid fixed page endpoint');
+  const scope = node.parameters.syncScope ?? '';
+  if (typeof scope !== 'string' || scope.length > 128 || (scope && url.searchParams.has('since')))
+    throw new Error('Invalid incremental sync scope or endpoint');
   return {
+    recoverable: Boolean(scope) || node.parameters.allowRedrive === true,
+    retention: integer('redriveRetentionMs', 7 * 86400000),
+    scope,
+    keyLifetimeMs: integer('keyLifetimeMs', 86400000),
     url,
     pageSize: integer('pageSize', 100),
     batchSize: integer('batchSize', 25),
@@ -34,9 +41,11 @@ export async function readPage(
   node: WorkflowNode,
   cursor: string | null,
   signal: AbortSignal,
+  since?: string | null,
 ) {
-  const { url, pageSize, sumField } = pageConfig(node);
+  const { url, pageSize, sumField, scope } = pageConfig(node);
   url.searchParams.set('limit', String(pageSize));
+  if (since != null) url.searchParams.set('since', since);
   if (cursor !== null) url.searchParams.set('cursor', cursor);
   const credential = node.credentials?.httpAuth;
   if (credential !== undefined && !credential) throw new Error('Page credential unavailable');
@@ -71,7 +80,26 @@ export async function readPage(
   const rows = body.items as JsonObject[];
   if (sumField && rows.some((row) => typeof row[sumField] !== 'number' || !Number.isFinite(row[sumField])))
     throw new Error('Invalid page sum field');
-  return { rows, next: body.nextCursor as string | null, bytes: bytes.byteLength };
+  let token: string | null = null;
+  if (scope) {
+    if (body.nextCursor === null) {
+      if (typeof body.syncToken !== 'string' || !body.syncToken)
+        throw new Error('Missing terminal sync token');
+      token = body.syncToken;
+    }
+    for (const row of rows) {
+      if (
+        typeof row.id !== 'string' ||
+        !row.id ||
+        typeof row.version !== 'number' ||
+        !Number.isSafeInteger(row.version) ||
+        row.version < 0 ||
+        (row.op !== 'upsert' && row.op !== 'delete')
+      )
+        throw new Error('Invalid change identity, version or operation');
+    }
+  }
+  return { rows, token, next: body.nextCursor as string | null, bytes: bytes.byteLength };
 }
 
 export function retryTime(header: string | null, now: number, attempt: number) {

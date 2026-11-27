@@ -13,19 +13,44 @@ const load = (id) => JSON.parse(readFileSync(new URL('../../../examples/' + id +
 const registry = new NodeRegistry().registerAll(standardNodes);
 // The receiver persists accepted keys independently of the workflow checkpoint.
 const writesPath = db + '.writes';
-const accepted = new Set(existsSync(writesPath)
-  ? readFileSync(writesPath, 'utf8').trim().split('\n').map(line => JSON.parse(line).key)
-  : []);
+const accepted = new Set(
+  existsSync(writesPath)
+    ? readFileSync(writesPath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line).key)
+    : [],
+);
 const options = {
   registry,
+  ...(shape === 'redrive' && {
+    httpAuth: {
+      grants: [
+        {
+          id: 'service',
+          workflowId: 'process-order-batch',
+          nodeId: 'register',
+          kind: 'bearer',
+          origin: 'https://sink.example.test',
+        },
+      ],
+      resolve: async () => (accepted.size === 57 && phase !== 'resume' ? undefined : 'local-test-secret'),
+    },
+  }),
   fetch: async (url, init) => {
     if (new URL(url).hostname === 'source.example.test') {
       const at = Number(new URL(url).searchParams.get('cursor') ?? 0);
+      if (shape === 'sync' && new URL(url).searchParams.get('since') === 'watermark') {
+        appendFileSync(db + '.next-run', 'watermark');
+        return Response.json({ items: [], nextCursor: null, syncToken: 'watermark' });
+      }
       if (!measuring) appendFileSync(db + '.reads', at + '\n');
       return Response.json({
+        ...(shape === 'sync' && { syncToken: 'watermark' }),
         items: Array.from({ length: Math.min(100, count - at) }, (_, i) => ({
           id: at + i + 1,
           amount: 1,
+          ...(shape === 'sync' && { id: String(at + i + 1), version: 1, op: 'upsert' }),
           ...(measuring && { padding: 'x'.repeat(8500) }),
         })),
         nextCursor: at + 100 < count ? String(at + 100) : null,
@@ -39,7 +64,7 @@ const options = {
       appendFileSync(writesPath, record);
       accepted.add(key);
     }
-    if (phase === 'lost-response' && id === 626) kill();
+    if (phase === 'lost-response' && Number(id) === 626) kill();
     return Response.json({ id });
   },
 };
@@ -62,7 +87,7 @@ SqliteLedger.prototype.finish = function (receipt, ...args) {
     )
       kill();
     originalFinish.call(this, receipt, ...args);
-    if (phase === 'after-return') kill();
+    if (phase === 'after-return' || (phase === 'after-token' && info.items === 1000)) kill();
   } else originalFinish.call(this, receipt, ...args);
 };
 if (measuring) {
@@ -82,6 +107,13 @@ if (phase === 'resume') id = readFileSync(db + '.id', 'utf8');
 else {
   const child = load('process-order-batch'),
     parent = load('order-import');
+  if (shape === 'redrive') {
+    Object.assign(parent.nodes[1].parameters, { allowRedrive: true });
+    child.nodes[1].parameters.authentication = 'credential';
+    child.nodes[1].credentials = { httpAuth: 'service' };
+  }
+  if (shape === 'sync')
+    Object.assign(parent.nodes[1].parameters, { syncScope: 'orders', keyLifetimeMs: 86400000 });
   if (shape === 'call')
     Object.assign(parent.nodes[1], {
       type: 'draflow.call',
@@ -103,14 +135,29 @@ else {
   id = h.accept(parent.id, 'schedule', { items: [{ json: { id: 1, amount: 1 } }] });
   writeFileSync(db + '.id', id);
 }
+if (shape === 'redrive' && phase === 'resume') {
+  const { failure, attempt } = JSON.parse(readFileSync(db + '.retry', 'utf8'));
+  if (h.redrive(id, failure) !== attempt) throw Error('Duplicate redrive admitted');
+}
 const end = Date.now() + 120000;
 while (h.receipt(id).state !== 'finished') {
   if (Date.now() > end) throw new Error('No completion: ' + h.receipt(id).state);
   await delay(2);
 }
+if (phase === 'redrive-commit') {
+  const [point] = h.recoveryInfo(id);
+  const attempt = h.redrive(id, point.failure);
+  writeFileSync(db + '.retry', JSON.stringify({ failure: point.failure, attempt }));
+  kill();
+}
 const receipt = h.receipt(id),
   progress = h.progress(id),
   children = h.relations(id).length;
+if (shape === 'sync') {
+  const next = h.accept('order-import', 'schedule', { items: [{ json: {} }] });
+  while (h.receipt(next).state !== 'finished' && Date.now() < end) await delay(2);
+  if (h.receipt(next).outcome !== 'success') throw Error('Next sync failed');
+}
 await h.close();
 if (measuring) {
   const sql = new DatabaseSync(db);

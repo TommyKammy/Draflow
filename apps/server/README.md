@@ -161,3 +161,29 @@ The trusted JSON-lines CLI accepts the following requests. Use `progress` to ins
 ```
 
 Cancellation applies to the run and its unfinished descendants. Confirmed external writes remain effective. An outstanding write with an unknown outcome stays available for reconciliation on the child run. A canceled tree cannot initiate another page or batch after restart.
+
+## Incremental sync
+
+On a terminal `draflow.pages` node of a root workflow, set a stable literal `syncScope` and, for keyed delivery, `keyLifetimeMs` (the receiver's guaranteed idempotency-key lifetime in milliseconds). The child must connect Subworkflow input → recorded HTTP v2 → Return, with stop-on-error. Choose keyed delivery for an idempotent receiver or manual reconciliation for an uncertain non-idempotent write. The source and sink must agree on the meaning of upserts and deletions.
+
+The fixed GET endpoint receives `limit`, optional `cursor` for the next page, and the last completed round's token in `since`. Each item carries a nonempty string `id`, a nonnegative safe-integer `version` increasing per entity, and `op` equal to `upsert` or `delete`. The child receives the entire row. A terminal page supplies a nonempty `syncToken`, even for a round with zero changes. For example:
+
+```json
+{"items":[{"id":"order-8","version":3,"op":"delete"}],"nextCursor":null,"syncToken":"round-42"}
+```
+
+The source must provide a consistent change feed including tombstones and declare its token expiry. Each confirmed write advances the stored entity version in the transaction recording that write. The host retains the maximum version (including deletions) for the lifetime of the scope. Duplicate and older versions count toward the scan’s maxItems limit. Only confirmed changes contribute to the output count and sum. Duplicate and older versions produce no external call. A round commits its token only after all batches succeed. Distinct overlapping runs wait in SQLite and take turns reading from the latest committed token. The progress operation exposes the blocking run ID as `waitingForSyncRun`. A failed owner holds its scope until redrive or explicit reset. An identical delivery key returns its original receipt within the intake deduplication window.
+
+The scope belongs to the workflow ID, pages node ID and syncScope value, and binds its URL, credential binding and child publication. A changed source/filter/destination contract needs an explicitly provisioned scope and initial import. For HTTP 410, or to abandon a failed round, send `{"op":"resetSync","workflowId":"order-import","nodeId":"pages","scope":"orders"}` before starting the next run. This clears the token, preserves applied versions and invalidates the abandoned recovery point. An active child or an unknown send must be settled first. A full rescan requires the source to include deletions relevant to the receiver; absence of a row does not imply deletion.
+
+## Redriving a failed operation
+
+Incremental pages enable recovery automatically. For a regular terminal pages node with a recorded HTTP child, or a recorded HTTP v2 step in a root workflow, opt in with `allowRedrive: true`. Recovery material is kept independently of detailed history for `redriveRetentionMs` (default seven days). The original receipt ID, pinned workflow revision, page position, child input, successful results and operation keys are reused. The host also records each failure and its subsequent attempt. Deleting execution history leaves the recovery point available until its deadline.
+
+```jsonl
+{"op":"recoveryInfo","runId":"<original-run-id>"}
+{"op":"redrive","runId":"<original-run-id>","failureId":"<failure-from-recoveryInfo>"}
+{"op":"recoveryInfo","runId":"<returned-attempt-id>"}
+```
+
+A failure ID admits one attempt, including across a restart. A subsequent failure gets its own ID. Recovery info exposes the failed node, visit, child, reason, expiry, whether data is retained, attempt ID and outcome. A run without a safe saved point has an empty list. Unknown sends remain in review: reconcile them as applied or notApplied, or request retryKeyed within the receiver's valid key window on incremental pages. The host checks that window again after resolving credentials, immediately before transport dispatch. Canceled runs and expired points cannot start another attempt. Credentials are resolved against current grants for the pinned revision.
