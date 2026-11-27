@@ -111,14 +111,30 @@ export function complete(source: string, cursor: number, data: CompletionData): 
       path = path.slice(step[0].length);
     }
     const query = (partial[1] ?? partial[3] ?? '').toLowerCase();
-    const from = cursor - partial[0].length;
-    const end = cursor + (partial[1] !== undefined ? /^[\w$]*/.exec(after)![0].length :
-      quotedEnd(after, partial[2]!, ']'));
+    let from = cursor - partial[0].length;
+    let replaceIndexLiteral = false;
+    let end = cursor;
+    if (partial[1] !== undefined) end += /^[\w$]*/.exec(after)![0].length;
+    else if (partial[2]) end += quotedEnd(after, partial[2], ']');
+    else {
+      const digits = /^\d*/.exec(after)![0];
+      end += digits.length;
+      const remaining = after.slice(digits.length).trimStart();
+      // Inside an existing subscript, leave its brackets and any arithmetic in place.
+      if (/^\d*$/.test(partial[3]!) && (partial[3] || digits) && /^[\]+*/%?&|!=<>^-]/.test(remaining)) {
+        from++; // Keep the opening bracket.
+        replaceIndexLiteral = true;
+      } else end += /^\s*\]/.exec(after.slice(digits.length))?.[0].length ?? 0;
+    }
     if (value !== null && typeof value === 'object') {
       for (const key in value) {
         if (!Object.hasOwn(value, key) || ['constructor','prototype','__proto__'].includes(key) || !key.toLowerCase().startsWith(query)) continue;
-        const property = fieldPath([Array.isArray(value) ? Number(key) : key]);
-        results.push({ label: key, insert: property.startsWith('[') ? property : '.' + property, start: from, end });
+        if (replaceIndexLiteral) {
+          results.push({ label: key, insert: Array.isArray(value) ? key : JSON.stringify(key), start: from, end });
+        } else {
+          const property = fieldPath([Array.isArray(value) ? Number(key) : key]);
+          results.push({ label: key, insert: property.startsWith('[') ? property : '.' + property, start: from, end });
+        }
         if (results.length === 20) break;
       }
     }

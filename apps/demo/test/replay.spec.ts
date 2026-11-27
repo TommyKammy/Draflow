@@ -235,3 +235,72 @@ test('follows recorded run indices and ports when a node runs repeatedly', async
   await replay.getByLabel('Output port').selectOption({ label: 'main[1] · 1' });
   await expect(replay.locator('mark').last()).toContainText('"side": 1');
 });
+
+test('a delayed deletion preserves a different replay and its keyboard focus', async ({ page }) => {
+  await openEnglishDemo(page);
+  const release = await page.evaluateHandle(async () => {
+    const el = document.querySelector('draflow-editor')!, store = el.ports.executions!;
+    let unblock!: () => void;
+    el.ports = { ...el.ports, executions: {
+      append: store.append.bind(store), get: store.get.bind(store), list: store.list.bind(store),
+      async delete(id, run) {
+        await new Promise<void>(resolve => { unblock = resolve; });
+        await store.delete(id, run);
+      },
+    } };
+    await el.run({ runId: 'delete-A' }).done;
+    await el.run({ runId: 'inspect-B' }).done;
+    return () => unblock();
+  });
+  await page.getByRole('button', { name: 'Execution history' }).click();
+  const rows = page.getByRole('dialog').getByRole('listitem');
+  const deleted = rows.filter({ hasText: 'delete-A' });
+  await deleted.getByRole('button', { name: 'Delete' }).click();
+  await rows.filter({ hasText: 'inspect-B' }).getByRole('button', { name: 'Replay' }).click();
+  const heading = page.getByRole('heading', { name: /inspect-B/ });
+  await expect(heading).toBeFocused();
+  await release.evaluate(resume => resume());
+  await expect(deleted).toHaveCount(0);
+  await expect(heading).toBeFocused();
+});
+
+test('replay fits historical notes and preserves recorded group boundaries and folds', async ({ page }) => {
+  await openEnglishDemo(page);
+  await page.evaluate(async () => {
+    const el = document.querySelector('draflow-editor')!, w = el.workflow!;
+    el.workflow = { ...w, meta: { draflowEditor: { version: 1,
+      notes: [{ id: 'memo', text: '<記録時>', color: 'pink', x: 3200, y: -500, width: 240, height: 96 }],
+      groups: [{ id: 'start', label: 'Recorded group', members: ['manual'], collapsed: true }],
+    } } };
+    await el.run().done;
+    el.workflow = w;
+  });
+  await page.getByRole('button', { name: 'Execution history' }).click();
+  await page.getByRole('button', { name: 'Replay' }).click();
+  const graph = page.locator('.replay-graph');
+  const note = graph.locator('[data-note-id="memo"]');
+  await expect(note).toHaveText('<記録時>');
+  await expect(note).toHaveAttribute('data-color', 'pink');
+  await expect(graph.locator('[data-group-id="start"]')).toHaveAttribute('aria-label', 'Recorded group');
+  await expect(graph.locator('[data-node-id="manual"]')).toBeHidden();
+  await expect.poll(() => note.evaluate(el => {
+    const box = el.getBoundingClientRect(), graph = el.closest('.replay-graph')!.getBoundingClientRect();
+    return box.width > 0 && box.left >= graph.left && box.right <= graph.right && box.top >= graph.top && box.bottom <= graph.bottom;
+  })).toBe(true);
+});
+
+test('deleting the replayed run shows executions recorded while replay was open', async ({ page }) => {
+  await openEnglishDemo(page);
+  const run = (id: string) => page.evaluate(async runId => {
+    await document.querySelector('draflow-editor')!.run({ runId }).done;
+  }, id);
+  await run('older');
+  await page.getByRole('button', { name: 'Execution history' }).click();
+  const dialog = page.getByRole('dialog');
+  await dialog.getByRole('button', { name: 'Replay' }).click();
+  await expect(dialog.getByRole('heading', { name: /older/ })).toBeFocused();
+  await run('newer');
+  await dialog.getByRole('listitem').filter({ hasText: 'older' }).getByRole('button', { name: 'Delete' }).click();
+  await expect(dialog.getByRole('listitem')).toHaveText(/newer/);
+  await expect(dialog.getByRole('region', { name: 'Execution replay' })).toHaveCount(0);
+});

@@ -1,7 +1,9 @@
 import type { Note } from '../store/notes.js';
 import type { Translate } from '../locale.js';
 
-export function noteLayer(enabled: () => boolean, scale: () => number, open: (note: Note) => void, move: (note: Note) => void) {
+export function noteLayer(actions?: {
+  enabled(): boolean; scale(): number; open(note: Note): void; move(note: Note): void;
+}) {
   const layer = document.createElement('div');
   layer.className = 'sticky-layer';
   const cards = new Map<string, { card: HTMLElement; body: HTMLButtonElement; grip: HTMLElement; note: Note }>();
@@ -21,12 +23,12 @@ export function noteLayer(enabled: () => boolean, scale: () => number, open: (no
     if (event.button !== 0) return;
     event.stopPropagation();
     const grip = event.target;
-    if (!(grip instanceof HTMLElement) || !grip.classList.contains('sticky-grip') || !enabled() || drag) return;
+    if (!(grip instanceof HTMLElement) || !grip.classList.contains('sticky-grip') || !actions?.enabled() || drag) return;
     const entry = cards.get(grip.parentElement!.dataset.noteId!)!;
     event.preventDefault();
     entry.body.focus({ preventScroll: true });
     grip.setPointerCapture(event.pointerId);
-    drag = { pointer: event.pointerId, clientX: event.clientX, clientY: event.clientY, scale: scale(), note: entry.note, card: entry.card, grip };
+    drag = { pointer: event.pointerId, clientX: event.clientX, clientY: event.clientY, scale: actions.scale(), note: entry.note, card: entry.card, grip };
   };
   layer.onpointermove = event => {
     if (!drag || drag.pointer !== event.pointerId) return;
@@ -37,7 +39,7 @@ export function noteLayer(enabled: () => boolean, scale: () => number, open: (no
     if (!drag || drag.pointer !== event.pointerId) return;
     const { note } = drag, { x, y } = delta(event, drag);
     cancel();
-    if (enabled() && (x || y)) move({ ...note, x: note.x + x, y: note.y + y });
+    if (actions?.enabled() && (x || y)) actions.move({ ...note, x: note.x + x, y: note.y + y });
   };
   layer.onpointercancel = layer.onlostpointercapture = event => { if (drag?.pointer === event.pointerId) cancel(); };
   layer.onkeydown = event => {
@@ -57,7 +59,7 @@ export function noteLayer(enabled: () => boolean, scale: () => number, open: (no
         card.dataset.noteId = note.id;
         grip.className = 'sticky-grip';
         body.type = 'button';
-        body.onclick = () => open(cards.get(note.id)!.note);
+        if (actions) body.onclick = () => actions.open(cards.get(note.id)!.note);
         card.append(grip, body);
         layer.append(card);
         cards.set(note.id, entry = { card, grip, body, note });
