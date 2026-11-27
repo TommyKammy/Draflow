@@ -19,7 +19,7 @@ test('published order sync sends once per webhook delivery or scheduled instant 
     { id: 'c', amount: 7, approved: true },
   ];
   let orders = lines;
-  let reads = 0;
+  const attempts = [];
   const sent = [];
   const db = info.outputPath('orders.db');
   let now = Date.UTC(2024, 0, 1);
@@ -39,9 +39,9 @@ test('published order sync sends once per webhook delivery or scheduled instant 
         resolve: id => 'test-token-' + id,
       },
       fetch: async (url, init) => {
+        attempts.push([init.method, url]);
         const token = new Headers(init.headers).get('authorization');
         if (url === origin + '/orders' && init.method === 'GET' && token === 'Bearer test-token-orders-read') {
-          reads++;
           return Response.json(orders);
         }
         if (url === origin + '/totals' && init.method === 'POST' && token === 'Bearer test-token-orders-send') {
@@ -89,12 +89,14 @@ test('published order sync sends once per webhook delivery or scheduled instant 
     expect(sent).toEqual([payload, payload]);
     await stop();
     await start();
+    tick(); // Recheck the same scheduled instant on the restored host.
     expect(await deliver('initial')).toBe(hookId);
     expect(host.byEvent(doc.id, 'timer', new Date(now).toISOString()).runId).toBe(timerId);
     const history = await host.history.list(doc.id);
     expect(history).toHaveLength(2);
     for (const [runId, trigger] of [[hookId, 'hook'], [timerId, 'timer']]) {
       expect(host.receipt(runId).revision).toBe(revision);
+      expect(history.find(row => row.id === runId)?.status).toBe('success');
       const detail = await host.history.get(doc.id, runId);
       expect(detail.tasks.map(task => task.nodeId)).toEqual([trigger, 'read', 'split', 'keep', 'aggregate', 'send']);
     }
@@ -120,14 +122,16 @@ test('published order sync sends once per webhook delivery or scheduled instant 
     }
     await expect(replay.getByText(/6 \/ 6 · Send totals/i)).toBeVisible();
     await expect(page.locator('draflow-editor')).toHaveAttribute('data-replay-runs', '0');
-    expect(reads).toBe(2);
+    const read = ['GET', origin + '/orders'];
+    const send = ['POST', origin + '/totals'];
+    expect(attempts).toEqual([read, send, read, send]);
     expect(sent).toEqual([payload, payload]);
 
     orders = [];
     const emptyId = await deliver('empty');
     await until(() => host.receipt(emptyId).state === 'finished');
     expect((await host.history.list(doc.id)).find(row => row.id === emptyId).status).toBe('success');
-    expect(reads).toBe(3);
+    expect(attempts).toEqual([read, send, read, send, read]);
     expect(sent).toHaveLength(2);
   } finally {
     await stop();

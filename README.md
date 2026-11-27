@@ -88,7 +88,10 @@ in every row. To use your own API, configure the two URLs and the host's
 Aggregate preserves one `pairedItem` link per contributing row in input order.
 After aggregation, use `$json.items` for the rows that passed the filter.
 The existing `$("Split lines").item` lookup follows the first matching lineage
-when several lines contributed. To choose a specific output of Split Out,
+when several lines contributed. If no lineage matches, `.item` falls back to
+the named node's first output item. Use `$("Split lines").itemFrom("main", 0, 0)`
+to follow the current node’s first input row and leave a missing ancestor
+undefined. To choose a specific output of Split Out,
 use `$("Split lines").itemMatching(index)` with its zero-based output index.
 
 ## Documents

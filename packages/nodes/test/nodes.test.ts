@@ -781,6 +781,27 @@ describe('Split Out and Aggregate', () => {
     expect(result.runData.choose?.[0]?.output?.main?.[0]?.[0]?.json).toMatchObject({ firstOrigin: 'a', secondLine: 9 });
   });
 
+  it('follows the contributing branch through a shared input slot after aggregation', async () => {
+    const tag = (id: string) => node(id, 'draflow.set', id, 1, {
+      assignments: [{ name: 'branch', value: id }],
+    });
+    const filter = node('filter', 'draflow.filter', 'Filter', 2, {
+      conditions: { conditions: [{ left: '={{ $json.branch }}', operator: 'equals', right: 'Left' }] },
+    });
+    const choose = node('choose', 'draflow.set', 'Choose', 4, { assignments: [
+      { name: 'origin', value: '={{ $("Left").item.json.id }}' },
+      { name: 'other', value: '={{ $("Right").itemFrom("main", 0, 0) ?? "absent" }}' },
+    ] });
+    const wf = workflow([start, tag('Left'), tag('Right'), filter, aggregate, choose],
+      [connect('start', 'Left'), connect('start', 'Right'), connect('Left', 'filter'),
+        connect('Right', 'filter'), connect('filter', 'agg'), connect('agg', 'choose')]);
+    const result = await run(wf, seed({ id: 'first' }, { id: 'second' }));
+    const output = result.runData.choose?.[0]?.output?.main?.[0]?.[0]?.json;
+    expect(output?.items).toEqual([{ id: 'first', branch: 'Left' }, { id: 'second', branch: 'Left' }]);
+    expect(output?.origin).toBe('first');
+    expect(output?.other).toBe('absent');
+  });
+
   it('emits no rows for an empty array and rejects a non-array', async () => {
     const wf = workflow([start, split, aggregate], [connect('start', 'split'), connect('split', 'agg')]);
     const empty = await run(wf, seed({ data: [] }));
