@@ -18,8 +18,14 @@ export function pageConfig(node: WorkflowNode) {
   const scope = node.parameters.syncScope ?? '';
   if (typeof scope !== 'string' || scope.length > 128 || (scope && url.searchParams.has('since')))
     throw new Error('Invalid incremental sync scope or endpoint');
+  const concurrency = integer('concurrency', 1);
+  const orderKey = node.parameters.orderKey ?? 'id';
+  if (concurrency > 32 || typeof orderKey !== 'string' || (scope && orderKey !== 'id'))
+    throw new Error('Invalid batch concurrency or ordering field');
   return {
-    recoverable: Boolean(scope) || node.parameters.allowRedrive === true,
+    concurrency,
+    orderKey,
+    recoverable: concurrency > 1 || Boolean(scope) || node.parameters.allowRedrive === true,
     retention: integer('redriveRetentionMs', 7 * 86400000),
     scope,
     keyLifetimeMs: integer('keyLifetimeMs', 86400000),
@@ -80,6 +86,13 @@ export async function readPage(
   const rows = body.items as JsonObject[];
   if (sumField && rows.some((row) => typeof row[sumField] !== 'number' || !Number.isFinite(row[sumField])))
     throw new Error('Invalid page sum field');
+  const { concurrency, orderKey } = pageConfig(node);
+  if (
+    concurrency > 1 &&
+    orderKey &&
+    rows.some((row) => typeof row[orderKey] !== 'string' && typeof row[orderKey] !== 'number')
+  )
+    throw new Error('Parallel rows require a string or numeric ordering key');
   let token: string | null = null;
   if (scope) {
     if (body.nextCursor === null) {

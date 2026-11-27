@@ -76,6 +76,8 @@ export const pagesNode: NodeType = {
       min: 1,
       noExpression: true,
     },
+    { name: 'concurrency', label: 'Concurrent batches', type: 'number', min: 1, max: 32, default: 1, noExpression: true },
+    { name: 'orderKey', label: 'Ordered entity field', type: 'string', default: 'id', noExpression: true },
     { name: 'pageSize', label: 'Page size', type: 'number', default: 100, min: 1, noExpression: true },
     { name: 'batchSize', label: 'Batch size', type: 'number', default: 25, min: 1, noExpression: true },
     { name: 'sumField', label: 'Numeric field to total', type: 'string', default: '', noExpression: true },

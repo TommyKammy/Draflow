@@ -11,6 +11,8 @@ if (!path) throw new Error('Usage: node dist/cli.js DATABASE');
 const authPath = process.env.DRAFLOW_HTTP_AUTH_FILE;
 const httpAuth = authPath ? loadHttpAuth(authPath) : undefined;
 const host = new NodeHost(path, {
+  ...(process.env.DRAFLOW_MAX_PARALLEL_BATCHES !== undefined &&
+    { maxParallelBatches: Number(process.env.DRAFLOW_MAX_PARALLEL_BATCHES) }),
   ...(httpAuth && { httpAuth }),
   ...(process.env.DRAFLOW_HTTP_MAX_RESPONSE_BYTES !== undefined &&
     { maxHttpResponseBytes: Number(process.env.DRAFLOW_HTTP_MAX_RESPONSE_BYTES) }),
@@ -70,6 +72,15 @@ try {
           break;
         case 'cancel':
           result = host.cancel(q.runId);
+          break;
+        case 'compensate':
+          result = host.compensate(q.runId);
+          break;
+        case 'compensationInfo':
+          result = host.compensationInfo(q.runId);
+          break;
+        case 'retryCompensation':
+          result = host.retryCompensation(q.runId, q.failureId);
           break;
         case 'redrive':
           result = host.redrive(q.runId, q.failureId);

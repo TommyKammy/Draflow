@@ -352,7 +352,7 @@ test('upgrading a Phase 5 database retains a queued ordinary page import and del
   await h.close();
   const sql = new DatabaseSync(db);
   sql.exec(
-    'ALTER TABLE pageRuns DROP COLUMN skipped; DROP TRIGGER syncApplied; DROP TABLE syncWork; DROP TABLE syncVersions; DROP TABLE syncQueue; DROP TABLE syncScopes; DROP TABLE recoveryPoints',
+    'DROP TRIGGER compensationApplied; DROP TABLE compensationSteps; DROP TABLE compensations; DROP TABLE compensationRetries; DROP TABLE rateLimits; DROP TABLE parallelWork; ALTER TABLE pageRuns DROP COLUMN skipped; DROP TRIGGER syncApplied; DROP TABLE syncWork; DROP TABLE syncVersions; DROP TABLE syncQueue; DROP TABLE syncScopes; DROP TABLE recoveryPoints',
   );
   sql.close();
   const restored = open();
@@ -539,4 +539,339 @@ test('a late duplicate redrive for the first failure cannot start the next attem
     restored.recoveryInfo(id).map((p) => p.outcome),
     ['error', 'success'],
   );
+});
+
+test('parallel pages retain completed siblings across restart and duplicate redrive', async (t) => {
+  const sent = [],
+    completed = [],
+    rows = Array.from({ length: 1003 }, (_, i) => change(i + 1));
+  let active = 0,
+    peak = 0,
+    calls = 0,
+    fail = true,
+    reads = 0;
+  const auth = {
+    grants: [
+      {
+        id: 'service',
+        workflowId: 'process-order-batch',
+        nodeId: 'register',
+        origin: 'https://sink.example.test',
+        kind: 'bearer',
+      },
+    ],
+    resolve() {
+      if (++calls === 47 && fail) return undefined;
+      return 'opaque-secret';
+    },
+  };
+  const { h, open } = fixture(
+    t,
+    async (url, init) => {
+      if (init.method === 'POST') {
+        const id = JSON.parse(init.body).id;
+        peak = Math.max(peak, ++active);
+        await new Promise((resolve) => setTimeout(resolve, Number(id) === 1 ? 30 : 1));
+        active--;
+        sent.push(id);
+        if (Number(id) % 25 === 0) completed.push(Number(id));
+        return Response.json({});
+      }
+      const i = Number(new URL(url).searchParams.get('cursor') ?? 0);
+      reads++;
+      return Response.json({
+        items: rows.slice(i, i + 100),
+        nextCursor: i + 100 < rows.length ? String(i + 100) : null,
+        syncToken: 'end',
+      });
+    },
+    (child, parent) => {
+      parent.nodes[1].parameters.concurrency = 4;
+      child.nodes[1].credentials = { httpAuth: 'service' };
+      child.nodes[1].parameters.authentication = 'credential';
+    },
+    { httpAuth: auth, maxParallelBatches: 3 },
+  );
+  const id = start(h, 'parallel');
+  assert.equal(start(h, 'parallel'), id);
+  assert.equal(await outcome(h, id), 'error');
+  assert.equal(reads, 1);
+  assert.equal(h.progress(id)[0].pages, 0);
+  const [point] = h.recoveryInfo(id);
+  await h.close();
+  const restored = open();
+  fail = false;
+  const attempt = restored.redrive(id, point.failure);
+  assert.equal(restored.redrive(id, point.failure), attempt);
+  assert.equal(await outcome(restored, id), 'success');
+  assert.equal(restored.relations(id).length, 41);
+  assert.equal(restored.progress(id)[0].total, 1003);
+  assert.equal(peak, 3);
+  assert.notEqual(completed[0], 25);
+  assert.deepEqual(
+    sent.map(Number).sort((a, b) => a - b),
+    rows.map((r) => Number(r.id)),
+  );
+});
+
+test('two parallel imports share host slots and serialize versions of a business ID', async (t) => {
+  const active = new Map(),
+    peaks = new Map(),
+    versions = new Map();
+  let totalPeak = 0;
+  const { h, parent } = fixture(
+    t,
+    async (url, init) => {
+      if (init.method !== 'POST') {
+        const scope = new URL(url).pathname;
+        const rows = Array.from({ length: 12 }, (_, i) => ({
+          ...change(scope + (i === 1 ? 0 : i), i === 1 ? 2 : 1),
+          scope,
+        }));
+        return Response.json({ items: rows, nextCursor: null, syncToken: 'done' });
+      }
+      const { scope, id, version } = JSON.parse(init.body);
+      active.set(scope, (active.get(scope) ?? 0) + 1);
+      peaks.set(scope, Math.max(peaks.get(scope) ?? 0, active.get(scope)));
+      totalPeak = Math.max(
+        totalPeak,
+        [...active.values()].reduce((a, b) => a + b, 0),
+      );
+      await new Promise((r) => setTimeout(r, version === 1 ? 8 : 1));
+      const sequence = versions.get(id) ?? [];
+      sequence.push(version);
+      versions.set(id, sequence);
+      active.set(scope, active.get(scope) - 1);
+      return Response.json({});
+    },
+    (c, p) => {
+      c.nodes[0].parameters.callers.push('second');
+      Object.assign(p.nodes[1].parameters, { concurrency: 2, batchSize: 1 });
+    },
+    { maxParallelBatches: 3 },
+  );
+  const second = structuredClone(parent);
+  second.id = 'second';
+  second.nodes[1].parameters.url = 'https://source.example.test/other';
+  h.activate(second.id, h.publish(second));
+  const a = start(h, 'a'),
+    b = h.accept(second.id, 'schedule', { items: [{ json: {} }] });
+  assert.deepEqual(await Promise.all([outcome(h, a), outcome(h, b)]), ['success', 'success']);
+  assert.equal(totalPeak, 3);
+  assert.deepEqual([...peaks.values()], [2, 2]);
+  for (const scope of peaks.keys()) assert.deepEqual(versions.get(scope + '0'), [1, 2]);
+});
+
+test('parallel receiver cooldown persists across restart and also gates sequential imports', async (t) => {
+  const sends = [];
+  let since = 0;
+  const { h, open, parent } = fixture(
+    t,
+    async (url, init) => {
+      if (init.method === 'POST') {
+        sends.push(Date.now());
+        if (!since) {
+          since = Date.now();
+          return new Response(null, { status: 429, headers: { 'retry-after': '1' } });
+        }
+        return Response.json({});
+      }
+      return Response.json({ items: [change(1)], nextCursor: null, syncToken: 'one' });
+    },
+    (child, parent) => {
+      parent.nodes[1].parameters.concurrency = 2;
+      child.nodes[0].parameters.callers.push('sequential');
+    },
+  );
+  const id = start(h, 'hold');
+  await until(
+    () =>
+      h.inspect(id).uncertain.length && h.relations(id).some((r) => h.receipt(r.child).state === 'review'),
+  );
+  await h.close();
+  const restored = open(),
+    seq = structuredClone(parent);
+  seq.id = 'sequential';
+  seq.nodes[1].parameters.concurrency = 1;
+  restored.activate(seq.id, restored.publish(seq));
+  const other = restored.accept(seq.id, 'schedule', { items: [{ json: {} }] });
+  const [unknown] = restored.inspect(id).uncertain;
+  assert.ok(restored.reconcile(unknown.runId, unknown.key, 'retryKeyed'));
+  assert.deepEqual(await Promise.all([outcome(restored, id), outcome(restored, other)]), [
+    'success',
+    'success',
+  ]);
+  assert.equal(sends.length, 3);
+  assert.ok(sends.slice(1).every((at) => at - since >= 1000));
+});
+
+test('parallel cancellation retains confirmed sends and every uncertain in-flight operation', async (t) => {
+  const sent = [];
+  const { h, open } = fixture(
+    t,
+    async (url, init) => {
+      if (init.method !== 'POST')
+        return Response.json({
+          items: Array.from({ length: 20 }, (_, i) => change(i)),
+          nextCursor: null,
+          syncToken: 'x',
+        });
+      const row = JSON.parse(init.body);
+      sent.push(row.id);
+      if (Number(row.id) < 2) return Response.json({});
+      await new Promise((resolve) => init.signal.addEventListener('abort', resolve, { once: true }));
+      throw Error('lost response');
+    },
+    (c, p) => Object.assign(p.nodes[1].parameters, { batchSize: 2, concurrency: 4 }),
+  );
+  const root = start(h, 'cancel-parallel');
+  await until(() => sent.length === 5 && h.progress(root)[0].items === 2);
+  assert.ok(h.cancel(root));
+  assert.equal(await outcome(h, root), 'canceled');
+  await h.close();
+  const restored = open();
+  const unknown = restored.inspect(root).uncertain;
+  assert.equal(unknown.length, 3);
+  assert.equal(restored.progress(root)[0].items, 2);
+  for (const op of unknown) assert.ok(restored.reconcile(op.runId, op.key, 'applied', { confirmed: true }));
+  await until(() => restored.relations(root).every((r) => restored.receipt(r.child).state === 'finished'));
+  const effects = restored.relations(root).flatMap((r) => restored.effects(r.child));
+  assert.equal(effects.filter((e) => e.state === 'success').length, 5);
+  assert.equal(sent.length, 5);
+});
+
+test('a sequential import respects occupied host batch slots', async (t) => {
+  let active = 0,
+    peak = 0;
+  const { h, parent } = fixture(
+    t,
+    async (url, init) => {
+      if (init.method !== 'POST')
+        return Response.json({
+          items: Array.from({ length: 12 }, (_, i) => change(i)),
+          nextCursor: null,
+          syncToken: 'x',
+        });
+      peak = Math.max(peak, ++active);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      active--;
+      return Response.json({});
+    },
+    (c, p) => {
+      c.nodes[0].parameters.callers.push('serial');
+      Object.assign(p.nodes[1].parameters, { batchSize: 3, concurrency: 2 });
+    },
+    { maxParallelBatches: 2 },
+  );
+  const serial = structuredClone(parent);
+  serial.id = 'serial';
+  serial.nodes[1].parameters.concurrency = 1;
+  h.activate(serial.id, h.publish(serial));
+  const a = start(h, 'parallel');
+  await until(() => active === 2);
+  const b = h.accept(serial.id, 'schedule', { items: [{ json: {} }] });
+  assert.deepEqual(await Promise.all([outcome(h, a), outcome(h, b)]), ['success', 'success']);
+  assert.equal(peak, 2);
+});
+
+test('upgrading a 6.2 recovery point preserves its failed child and accepted event key', async (t) => {
+  const writes = [];
+  let enabled = false;
+  const { h, open, db } = fixture(
+    t,
+    async (url, init) => {
+      if (init.method !== 'POST')
+        return Response.json({ items: initial.slice(0, 3), nextCursor: null, syncToken: 'done' });
+      writes.push(JSON.parse(init.body).id);
+      return Response.json({});
+    },
+    (c) => {
+      c.nodes[1].credentials = { httpAuth: 'service' };
+      c.nodes[1].parameters.authentication = 'credential';
+    },
+    {
+      httpAuth: {
+        grants: [
+          {
+            id: 'service',
+            workflowId: 'process-order-batch',
+            nodeId: 'register',
+            kind: 'bearer',
+            origin: 'https://sink.example.test',
+          },
+        ],
+        resolve: () => (writes.length === 1 && !enabled ? undefined : 'opaque-secret'),
+      },
+    },
+  );
+  const id = start(h, 'old-redrive');
+  assert.equal(await outcome(h, id), 'error');
+  const [point] = h.recoveryInfo(id);
+  await h.close();
+  const sql = new DatabaseSync(db);
+  sql.exec(`DROP TRIGGER compensationApplied; DROP TRIGGER releaseParallelSyncWork;
+    DROP TABLE compensationSteps; DROP TABLE compensations; DROP TABLE compensationRetries;
+    DROP TABLE rateLimits; DROP TABLE parallelWork;
+    UPDATE recoveryPoints SET data=json_remove(data,'$.wave');`);
+  sql.close();
+  enabled = true;
+  const restored = open();
+  assert.equal(start(restored, 'old-redrive'), id);
+  const attempt = restored.redrive(id, point.failure);
+  assert.equal(restored.redrive(id, point.failure), attempt);
+  assert.equal(await outcome(restored, id), 'success');
+  assert.deepEqual(writes, ['1', '2', '3']);
+});
+
+test('a shared cooldown preserves the first GET attempt of a separate import', async (t) => {
+  let calls = 0;
+  const { h, parent } = fixture(
+    t,
+    async () => {
+      if (++calls === 1) return new Response(null, { status: 429, headers: { 'retry-after': '1' } });
+      return Response.json({ items: [], nextCursor: null, syncToken: 'end' });
+    },
+    (child, parent) => {
+      parent.nodes[1].parameters.concurrency = 2;
+      child.nodes[0].parameters.callers.push('other-import');
+    },
+  );
+  const other = structuredClone(parent);
+  other.id = 'other-import';
+  Object.assign(other.nodes[1].parameters, { concurrency: 1, maxAttempts: 1 });
+  h.activate(other.id, h.publish(other));
+  const first = start(h, 'first');
+  await until(() => h.progress(first)[0]?.retryAt);
+  const second = h.accept(other.id, 'schedule', { items: [{ json: {} }] });
+  assert.equal(await outcome(h, second), 'success');
+  assert.equal(await outcome(h, first), 'success');
+  assert.equal(calls, 3);
+});
+
+test('cancellation during rate-limit wait leaves only the dispatched write for reconciliation', async (t) => {
+  const sent = [];
+  const { h, open } = fixture(
+    t,
+    async (url, init) => {
+      if (init.method !== 'POST')
+        return Response.json({ items: [change(1), change(2)], nextCursor: null, syncToken: 'end' });
+      sent.push(JSON.parse(init.body).id);
+      return new Response(null, { status: 429, headers: { 'retry-after': '30' } });
+    },
+    (child, parent) => Object.assign(parent.nodes[1].parameters, { concurrency: 2, batchSize: 1 }),
+  );
+  const root = start(h, 'cancel-before-dispatch');
+  await until(
+    () =>
+      h.relations(root).some((r) => h.receipt(r.child).state === 'review') &&
+      h
+        .relations(root)
+        .some((r) => h.receipt(r.child).state === 'running' && h.effects(r.child).length === 1),
+  );
+  assert.ok(h.cancel(root));
+  assert.equal(await outcome(h, root), 'canceled');
+  await h.close();
+  const restored = open();
+  assert.deepEqual(sent, ['1']);
+  assert.equal(restored.inspect(root).uncertain.length, 1);
 });

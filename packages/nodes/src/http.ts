@@ -158,6 +158,7 @@ export const httpRequestNodeV2: NodeType = {
   },
   credentials: [{ name: 'httpAuth', label: 'HTTP authentication' }],
   parameters: [
+    { name: 'compensation', label: 'Compensation workflow', type: 'json', noExpression: true },
     { name: 'allowRedrive', label: 'Retain failed recorded step for redrive', type: 'boolean', default: false, noExpression: true },
     { name: 'redriveRetentionMs', label: 'Redrive retention (ms)', type: 'number', min: 1, noExpression: true },
     {
