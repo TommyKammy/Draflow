@@ -30,32 +30,34 @@ test('reconnect keeps a failed save retryable until storage acknowledges the edi
   await expect(page.getByText('Saved', { exact: true })).toBeVisible();
 });
 
-async function mapManual(editor) {
-  await editor.evaluate(e => {
+async function mapManual(editor, lookup = 'Manual') {
+  await editor.evaluate((e, lookup) => {
     const w = e.workflow;
-    w.nodes[1].parameters.assignments = [{ name: 'origin', value: '={{ $("Manual").item.json.amount }}' }];
+    w.nodes[1].parameters.assignments = [{ name: 'origin', value: '={{ $(' + JSON.stringify(lookup) + ').item.json.amount }}' }];
     w.pinData = { manual: [{ json: { amount: 1 } }] };
     e.workflow = w;
-  });
+  }, lookup);
 }
 
-test('duplicating two connected nodes maps and executes against the duplicate ancestor', async ({ page }) => {
-  const editor = page.locator('draflow-editor');
-  await mapManual(editor);
-  await page.locator('[data-node-id=manual]').click();
-  await page.locator('[data-node-id=set]').click({ modifiers: ['Shift'] });
-  await page.keyboard.press('Control+d');
-  const values = await editor.evaluate(async e => {
-    const w = e.workflow;
-    const copy = w.nodes.find(n => n.name === 'Manual 2');
-    const sink = w.nodes.find(n => n.name === 'Set 2');
-    w.pinData[copy.id][0].json.amount = 2;
-    e.workflow = w;
-    const result = await e.run().done;
-    return [result.runData.set[0], result.runData[sink.id][0]].map(t => t.output.main[0][0].json.origin);
+for (const lookup of ['Manual', 'manual']) {
+  test('duplicating two connected nodes preserves a lookup by ' + lookup, async ({ page }) => {
+    const editor = page.locator('draflow-editor');
+    await mapManual(editor, lookup);
+    await page.locator('[data-node-id=manual]').click();
+    await page.locator('[data-node-id=set]').click({ modifiers: ['Shift'] });
+    await page.keyboard.press('Control+d');
+    const values = await editor.evaluate(async e => {
+      const w = e.workflow;
+      const copy = w.nodes.find(n => n.name === 'Manual 2');
+      const sink = w.nodes.find(n => n.name === 'Set 2');
+      w.pinData[copy.id][0].json.amount = 2;
+      e.workflow = w;
+      const result = await e.run().done;
+      return [result.runData.set[0], result.runData[sink.id][0]].map(t => t.output.main[0][0].json.origin);
+    });
+    expect(values).toEqual([1, 2]);
   });
-  expect(values).toEqual([1, 2]);
-});
+}
 
 test('processing returned pinned data leaves the document and the next run intact', async ({ page }) => {
   const editor = page.locator('draflow-editor');
@@ -111,4 +113,21 @@ test('rename validates, updates references in one undo step, saves and respects 
   await card.focus();
   await page.keyboard.press('Enter');
   await expect(rename).toBeDisabled();
+});
+
+test('processing public node events cannot change a pinned run or its partial cache', async ({ page }) => {
+  const editor = page.locator('draflow-editor');
+  await mapManual(editor);
+  const values = await editor.evaluate(async e => {
+    function annotate(event) {
+      if (event.nodeId === 'manual') event.task.output.main[0][0].json.amount = 77;
+    }
+    e.addEventListener('draflow-node-finish', event => annotate(event.detail), { once: true });
+    const first = e.run();
+    first.on('node:finish', annotate);
+    const result = await first.done;
+    const partial = await e.runNode('set').done;
+    return [result, partial].map(run => run.runData.set[0].output.main[0][0].json.origin);
+  });
+  expect(values).toEqual([1, 1]);
 });

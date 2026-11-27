@@ -4,15 +4,15 @@ type Expr = ReturnType<typeof parseExpressionSource>;
 type Replacement = { start: number; end: number; text: string };
 
 // Only rewrite literal node lookups. Ordinary strings and dynamically computed names are user data.
-function rewriteExpression(source: string, names: ReadonlyMap<string, string>) {
+function rewriteExpression(source: string, names: ReadonlyMap<string, string>, lookups: ReadonlyMap<string, string>) {
   const patches: Replacement[] = [];
   const captures = new Map<string, string>();
   function visit(node: Expr, offset: number, locals: readonly string[]) {
     const global = (expr: Expr, name: string) =>
       expr.type === 'Identifier' && expr.name === name && !locals.includes(name);
-    function literal(arg: Expr | undefined) {
+    function literal(arg: Expr | undefined, replacements: ReadonlyMap<string, string>) {
       if (arg?.type !== 'Literal' || typeof arg.value !== 'string') return;
-      const name = names.get(arg.value);
+      const name = replacements.get(arg.value);
       if (name !== undefined && name !== arg.value) {
         patches.push({ start: offset + arg.start, end: offset + arg.end, text: JSON.stringify(name) });
       }
@@ -21,8 +21,8 @@ function rewriteExpression(source: string, names: ReadonlyMap<string, string>) {
     switch (node.type) {
       case 'Call': {
         const fn = node.callee;
-        if (global(fn, '$') || global(fn, '$items')) literal(node.args[0]);
-        if (fn.type === 'Member' && global(fn.object, '$node') && memberName(fn) === 'has') literal(node.args[0]);
+        if (global(fn, '$') || global(fn, '$items')) literal(node.args[0], lookups);
+        if (fn.type === 'Member' && global(fn.object, '$node') && memberName(fn) === 'has') literal(node.args[0], names);
         child(fn);
         node.args.forEach(child);
         break;
@@ -30,7 +30,7 @@ function rewriteExpression(source: string, names: ReadonlyMap<string, string>) {
       case 'Member': {
         const key = memberName(node);
         if (global(node.object, '$node') && key !== undefined && key !== 'keys' && key !== 'has') {
-          const name = names.get(key);
+          const name = lookups.get(key);
           if (name !== undefined && name !== key) {
             const quoted = JSON.stringify(name);
             if (name === 'keys' || name === 'has' || isUnsafeObjectKey(name)) {
@@ -91,9 +91,9 @@ function memberName(node: Extract<Expr, { type: 'Member' }>) {
   return undefined;
 }
 
-export function remapReferences(node: WorkflowNode, names: ReadonlyMap<string, string>): WorkflowNode {
+export function remapReferences(node: WorkflowNode, names: ReadonlyMap<string, string>, lookups = names): WorkflowNode {
   function rewrite(value: ParamValue): ParamValue {
-    if (typeof value === 'string' && value.startsWith('=')) return rewriteExpression(value, names);
+    if (typeof value === 'string' && value.startsWith('=')) return rewriteExpression(value, names, lookups);
     if (Array.isArray(value)) return value.map(entry => rewrite(entry)!);
     if (value && typeof value === 'object') {
       return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, rewrite(entry)!]));

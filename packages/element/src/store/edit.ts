@@ -42,7 +42,11 @@ function uniqueName(base: string, names: Set<string>) {
 }
 
 export function fragment(workflow: Workflow, ids: Set<string>): Workflow {
-  const nodes = workflow.nodes.filter(n => ids.has(n.id));
+  const selected = workflow.nodes.filter(n => ids.has(n.id));
+  // Resolve ID lookups while the original graph (including unselected names) is available.
+  const names = new Set(workflow.nodes.map(n => n.name));
+  const idLookups = new Map(selected.filter(n => !names.has(n.id)).map(n => [n.id, n.name]));
+  const nodes = idLookups.size ? selected.map(n => remapReferences(n, new Map(), idLookups)) : selected;
   const connections = workflow.connections.filter(e => ids.has(e.from.node) && ids.has(e.to.node));
   const pinData = Object.fromEntries(Object.entries(workflow.pinData ?? {}).filter(([id]) => ids.has(id)));
   const copy: Workflow = { schema: 'draflow/v1', id: 'clipboard', name: 'Selection', nodes, connections, settings: {}, pinData };
@@ -56,7 +60,10 @@ export function applyEdit(w: Workflow, edit: Edit): Workflow {
       const node = w.nodes.find(n => n.id === edit.id);
       if (!node || !edit.name.trim() || w.nodes.some(n => n.name === edit.name)) return w;
       const names = new Map([[node.name, edit.name]]);
-      return { ...w, nodes: w.nodes.map(n => remapReferences(n === node ? { ...n, name: edit.name } : n, names)) };
+      // Names precede IDs in the engine. Preserve references to a node whose ID the new name would hide.
+      const shadowed = w.nodes.find(n => n !== node && n.id === edit.name);
+      const lookups = shadowed ? new Map(names).set(shadowed.id, shadowed.name) : names;
+      return { ...w, nodes: w.nodes.map(n => remapReferences(n === node ? { ...n, name: edit.name } : n, names, lookups)) };
     }
     case 'group': {
       const groups = groupsOf(w);
@@ -130,7 +137,7 @@ export function applyEdit(w: Workflow, edit: Edit): Workflow {
       const src = structuredClone(edit.fragment);
       if (!src.nodes.length) return w;
       const ids = new Map(src.nodes.map(node => [node.id, createId('node')]));
-      const names = new Set(w.nodes.map(n => n.name));
+      const names = new Set(w.nodes.flatMap(n => [n.name, n.id]));
       const renamed = new Map(src.nodes.map(n => [n.name, uniqueName(n.name, names)]));
       const nodes = src.nodes.map(n => ({ ...remapReferences(n, renamed), id: ids.get(n.id)!, name: renamed.get(n.name)!,
         position: { x: n.position.x + 32, y: n.position.y + 32 } }));

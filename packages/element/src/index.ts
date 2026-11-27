@@ -378,10 +378,12 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
   }
 
   function publish(event: EditorRunEvent) {
+    // Public listeners may annotate the payload while the engine is still routing the task.
+    const external = structuredClone(event);
     host.dispatchEvent(new CustomEvent('draflow-' + event.type.replace(':', '-'), {
-      detail: event.detail, bubbles: true, composed: true,
+      detail: external.detail, bubbles: true, composed: true,
     }));
-    options.onRun?.(event);
+    options.onRun?.(external);
   }
 
   function showResult(result: RunResult) {
@@ -490,10 +492,7 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
         detach();
         const result = detail.result;
         log.finish(result, snapshot.name);
-        // The public handle exposes mutable task data. Keep partial execution independent of its consumers.
-        cached = result.status === 'success'
-          ? structuredClone(Object.fromEntries([...displayed.keys()].map(id => [id, result.runData[id]!])))
-          : undefined;
+        cached = result.status === 'success' ? Object.fromEntries([...displayed.keys()].map(id => [id, result.runData[id]!])) : undefined;
         dirty.clear();
         showResult(result);
         details.refresh();
@@ -501,7 +500,8 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
         publish({ type: 'run:finish', detail });
       }),
     ];
-    void handle.done.catch((error: unknown) => {
+    const done = handle.done.then(result => structuredClone(result));
+    void done.catch((error: unknown) => {
       if (active !== handle) return;
       detach();
       failure = String(error);
@@ -510,7 +510,10 @@ export function createWorkflowEditor(host: HTMLElement, options: EditorOptions =
       details.refresh();
       refresh();
     });
-    return handle;
+    return {
+      id: handle.id, cancel: handle.cancel, done,
+      on: (event, listener) => handle.on(event, payload => listener(structuredClone(payload))),
+    };
   }
 
   function openDocument(next: Workflow, fresh = false) {

@@ -16,6 +16,7 @@ test('pans on two axes, zooms around the cursor, and fits the graph again', asyn
   const canvas = page.getByRole('group', { name: 'ワークフローキャンバス' });
   const card = canvas.locator('[data-node-id="manual"]');
   await expect(canvas.locator('svg path')).toHaveCount(1);
+  await card.hover({ trial: true }); // Wait for the initial fit before measuring the pan delta.
   const before = await bounds(card);
   const area = await bounds(canvas);
   await page.mouse.move(area.x + 20, area.y + 20);
