@@ -653,3 +653,21 @@ test('reopening validates node versions in pinned children before accepting work
   await done(restored, id);
   assert.equal(restored.receipt(id).outcome, 'success');
 });
+
+test('shared merge ancestry returns both original rows within the worker time budget', async (t) => {
+  const h = fixture(t).open();
+  const merges = Array.from({ length: 25 }, (_, i) =>
+    node('merge' + i, 'merge', { mode: 'mergeByKey', key: 'n' }));
+  const doc = child(merges);
+  for (const edge of [...doc.connections]) {
+    if (edge.to.node === 'return') continue;
+    doc.connections.push({ ...edge, id: edge.id + '-right', to: { ...edge.to, index: 1 } });
+  }
+  h.publish(doc);
+  h.activate('parent', h.publish(parent()));
+  const id = start(h);
+  await done(h, id);
+  assert.equal(h.receipt(id).outcome, 'success');
+  const rows = (await h.history.get('parent', id)).tasks.at(-1).task.output.main[0];
+  assert.deepEqual(rows.map(row => [row.json.n, row.pairedItem.item]), [[1, 0], [2, 1]]);
+});

@@ -1450,6 +1450,7 @@ function resolveItemLineage(
     if (item !== undefined) {
       return followLineage(
         item,
+        itemSource.itemIndex,
         itemSource.source,
         target.id,
         runData,
@@ -1468,19 +1469,27 @@ function resolveItemLineage(
   const item = items[itemIndex];
   if (item === undefined) return undefined;
 
-  return followLineage(item, source, target.id, runData, itemSourcesByRun, 0, collect);
+  return followLineage(item, itemIndex, source, target.id, runData, itemSourcesByRun, 0, collect);
 }
 
 function followLineage(
   item: Item,
+  itemIndex: number,
   source: SourceRef | null,
   targetId: string,
   runData: RunData,
   itemSourcesByRun: Map<string, ItemSources>,
   depth: number,
   collect?: (item: Item) => void,
+  visited = collect && new Map<string, number>(),
 ): Item | undefined {
   if (source === null || depth > 64) return undefined;
+  if (visited) {
+    // A shorter path can still reach ancestors beyond the first path's depth limit.
+    const key = JSON.stringify([source.node, source.runIndex, source.port, source.index, itemIndex]);
+    if ((visited.get(key) ?? Infinity) <= depth) return undefined;
+    visited.set(key, depth);
+  }
   if (source.node === targetId) {
     if (!collect) return item;
     collect(item);
@@ -1509,12 +1518,14 @@ function followLineage(
       if (nextItem !== undefined) {
         const found = followLineage(
           nextItem,
+          perItem.itemIndex,
           perItem.source,
           targetId,
           runData,
           itemSourcesByRun,
           depth + 1,
           collect,
+          visited,
         );
         if (found !== undefined) return found;
       }
@@ -1530,12 +1541,14 @@ function followLineage(
     const nextSource = task.source?.[inputIndex] ?? null;
     const found = followLineage(
       nextItem,
+      pairing.item,
       nextSource,
       targetId,
       runData,
       itemSourcesByRun,
       depth + 1,
       collect,
+      visited,
     );
     if (found !== undefined) return found;
   }
