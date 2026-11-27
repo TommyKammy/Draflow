@@ -96,7 +96,11 @@ export function executionHistory(store: ExecutionStore, current: () => Workflow,
               const removed = [...list.children].find(el => (el as HTMLElement).dataset.runId === row.id);
               if (removed?.matches(':focus-within') || (inspecting === row.id && replay?.root.matches(':focus-within'))) filter.focus();
               removed?.remove();
-              if (inspecting === row.id) { clearReplay(); message.textContent = ''; }
+              if (inspecting === row.id) {
+                // Appends defer list refresh while the replay is open.
+                await refresh();
+                return;
+              }
               if (!list.childElementCount) message.textContent = t('No executions');
             } catch (error) { if (valid()) { message.textContent = String(error); remove.disabled = false; } }
           };

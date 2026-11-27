@@ -28,3 +28,9 @@ it('replaces the whole numeric subscript at the caret and preserves the surround
   expect(choices('=x {{ $json.rows[1|2].value + 1 }} y', context))
     .toContainEqual(['10', '=x {{ $json.rows[10].value + 1 }} y']);
 });
+
+it('keeps arithmetic around a completed array index', () => {
+  const context = { ...data, json: () => ({ rows: Array(13).fill({ value: 7 }) }) };
+  expect(choices('={{ $json.rows[1|2 + 1].value }}', context))
+    .toContainEqual(['10', '={{ $json.rows[10 + 1].value }}']);
+});

@@ -288,3 +288,19 @@ test('replay fits historical notes and preserves recorded group boundaries and f
     return box.width > 0 && box.left >= graph.left && box.right <= graph.right && box.top >= graph.top && box.bottom <= graph.bottom;
   })).toBe(true);
 });
+
+test('deleting the replayed run shows executions recorded while replay was open', async ({ page }) => {
+  await openEnglishDemo(page);
+  const run = (id: string) => page.evaluate(async runId => {
+    await document.querySelector('draflow-editor')!.run({ runId }).done;
+  }, id);
+  await run('older');
+  await page.getByRole('button', { name: 'Execution history' }).click();
+  const dialog = page.getByRole('dialog');
+  await dialog.getByRole('button', { name: 'Replay' }).click();
+  await expect(dialog.getByRole('heading', { name: /older/ })).toBeFocused();
+  await run('newer');
+  await dialog.getByRole('listitem').filter({ hasText: 'older' }).getByRole('button', { name: 'Delete' }).click();
+  await expect(dialog.getByRole('listitem')).toHaveText(/newer/);
+  await expect(dialog.getByRole('region', { name: 'Execution replay' })).toHaveCount(0);
+});
