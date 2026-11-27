@@ -3,6 +3,7 @@ import { createInterface } from 'node:readline';
 import { NodeRegistry } from '@draflow/core';
 import { standardNodes } from '@draflow/nodes';
 import { loadHttpAuth } from './http-config.js';
+import { createWebhookServer } from './webhook.js';
 import { NodeHost } from './host.js';
 
 const path = process.argv[2];
@@ -17,8 +18,18 @@ const host = new NodeHost(path, {
     void stop(1);
   },
 });
+const webhookPort = process.env.DRAFLOW_WEBHOOK_PORT;
+const webhooks = webhookPort === undefined ? undefined : createWebhookServer(host, {
+  signingKey: process.env.DRAFLOW_WEBHOOK_SECRET ?? '',
+  ...(process.env.DRAFLOW_WEBHOOK_MAX_BODY_BYTES !== undefined &&
+    { maxBodyBytes: Number(process.env.DRAFLOW_WEBHOOK_MAX_BODY_BYTES) }),
+});
+if (webhooks) {
+  webhooks.listen(Number(webhookPort), process.env.DRAFLOW_WEBHOOK_HOST ?? '127.0.0.1');
+}
 const input = createInterface({ input: process.stdin });
 async function stop(code: number) {
+  webhooks?.close();
   input.close();
   try {
     await host.close();
@@ -44,6 +55,9 @@ try {
           break;
         case 'deactivate':
           host.deactivate(q.workflowId);
+          break;
+        case 'listenTest':
+          result = host.listenTest(q.workflow, q.triggerNodeId, q.ttlMs);
           break;
         case 'accept':
           result = host.accept(q.workflowId, q.triggerNodeId, q.event);
@@ -72,6 +86,7 @@ try {
     }
   }
 } finally {
+  webhooks?.close();
   try {
     await host.close();
   } catch (error) {
