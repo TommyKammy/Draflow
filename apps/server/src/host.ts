@@ -32,6 +32,7 @@ interface HostOptions extends Omit<ExecutionEngineOptions, 'credentialFetch'> {
   };
   shared?: SharedOptions;
   organization?: string;
+  businessOnly?: boolean;
   prepareBusiness?: (
     organization: string,
     event: string,
@@ -93,6 +94,8 @@ export class NodeHost {
     if (options.organization && options.shared && options.organization !== options.shared.organization)
       throw Error('Ledger organization mismatch');
     const organization = options.shared?.organization ?? options.organization;
+    if (options.businessOnly && (!organization || !options.prepareBusiness))
+      throw Error('A business worker requires an organization and preparation callback');
     if (organization && options.httpAuth && options.httpAuth.organization !== organization)
       throw Error('HTTP credentials belong to a different organization');
     const fetchFn = options.fetch ?? fetch;
@@ -485,7 +488,7 @@ export class NodeHost {
   }
 
   #prepareScheduleTimer(minDelay = 0) {
-    if (this.options.shared) return;
+    if (this.options.shared || this.options.businessOnly) return;
     const next = this.#ledger.nextScheduleTime();
     if (next === undefined) return;
     // Recheck long waits periodically in case the wall clock moves.
@@ -497,10 +500,10 @@ export class NodeHost {
     return !['intake', 'scheduler'].includes(this.options.shared?.role ?? 'all');
   }
   #schedules() {
-    return !['intake', 'worker'].includes(this.options.shared?.role ?? 'all');
+    return !this.options.businessOnly && !['intake', 'worker'].includes(this.options.shared?.role ?? 'all');
   }
   #armSchedules(minDelay = 0) {
-    if (this.options.shared) return; // Every scheduler polls the durable due times.
+    if (this.options.shared || this.options.businessOnly) return; // Every scheduler polls the durable due times.
     const cancel = this.#prepareScheduleTimer(minDelay);
     this.#cancelSchedule?.();
     this.#cancelSchedule = cancel;
@@ -597,7 +600,11 @@ export class NodeHost {
     while (true) {
       await yieldToHost();
       if (this.#stopping || this.#fault) return;
-      const job = this.#ledger.claim(this.#parallel.size < this.#parallelLimit, this.#parallelLimit);
+      const job = this.#ledger.claim(
+        this.#parallel.size < this.#parallelLimit,
+        this.#parallelLimit,
+        this.options.businessOnly ? 'business' : this.options.prepareBusiness ? 'all' : 'ordinary',
+      );
       if (!job) {
         this.#worker = undefined;
         return;

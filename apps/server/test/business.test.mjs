@@ -2,12 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { NodeRegistry } from '@draflow/core';
 import { standardNodes } from '@draflow/nodes';
 import { NodeHost } from '../dist/host.js';
-import { until } from './fixture.mjs';
+import { registry, workflow, until } from './fixture.mjs';
 
 test('permanent business receipts survive restart, partial fanout and conflicting replays', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'business-'));
@@ -129,3 +129,42 @@ test(
     await until(() => h.receipt(id).outcome === 'success');
   },
 );
+
+test('ordinary and business workers leave incompatible jobs for their owner after restart', async (t) => {
+  const path = join(mkdtempSync(join(tmpdir(), 'business-lanes-')), 'ledger');
+  const organization = randomUUID();
+  const shared = process.env.DRAFLOW_TEST_POSTGRES && {
+    organization,
+    connectionString: process.env.DRAFLOW_TEST_POSTGRES,
+  };
+  const options = { registry: registry().registerAll(standardNodes), organization, shared };
+  let host = new NodeHost(path, options);
+  t.after(async () => {
+    await host.close();
+    rmSync(resolve(path, '..'), { recursive: true, force: true });
+  });
+  const open = async (extra) => {
+    await host.close();
+    host = new NodeHost(path, { ...options, ...extra });
+  };
+  const business = host.acceptBusiness({
+    organization,
+    project: 'p',
+    event: 'e',
+    rule: 'r',
+    revision: 1,
+    proposal: {},
+  });
+  const revision = host.publish(workflow());
+  host.activate('flow', revision);
+  const ordinary = () => host.accept('flow', 'a', { items: [{ json: {} }] });
+  const first = ordinary();
+  await until(() => host.receipt(first).outcome === 'success');
+  assert.equal(host.receipt(business).state, 'queued');
+  await open({ businessOnly: true, prepareBusiness: async () => ({ status: 'prepared' }) });
+  const second = ordinary();
+  await until(() => host.receipt(business).outcome === 'success');
+  assert.equal(host.receipt(second).state, 'queued');
+  await open({});
+  await until(() => host.receipt(second).outcome === 'success');
+});

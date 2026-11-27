@@ -25,6 +25,7 @@ try {
   const work = createWorkUseCases(deps);
   host = new NodeHost(ledgerPath, {
     organization,
+    businessOnly: true,
     registry: new NodeRegistry().registerAll(standardNodes),
     ...(process.env.DRAFLOW_POSTGRES_URL && {
       shared: { organization, connectionString: process.env.DRAFLOW_POSTGRES_URL },

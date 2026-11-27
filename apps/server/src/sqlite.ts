@@ -1188,7 +1188,7 @@ export class ExecutionLedger {
     ).run(target, until);
   }
 
-  claim(allowParallel = true, batchLimit = 4) {
+  claim(allowParallel = true, batchLimit = 4, lane: 'business' | 'ordinary' | 'all' = 'all') {
     return this.#transaction(() => {
       if (this.shared) {
         const active = this.#prepare("SELECT count(*) AS n FROM runs WHERE state='running'").get()!;
@@ -1199,9 +1199,13 @@ export class ExecutionLedger {
         ).get()!;
         allowParallel = allowParallel && Number(batches.n) < batchLimit;
       }
+      const eligible =
+        !this.#businessEnabled || lane === 'all'
+          ? ''
+          : `AND ${lane === 'ordinary' ? 'NOT ' : ''}EXISTS(SELECT 1 FROM business_receipts b WHERE b.run=r.runId)`;
       const next = this.#prepare(
         `SELECT r.runId,r.payload FROM runs r LEFT JOIN readyAfter y ON r.runId=y.runId
-         WHERE r.state='queued' AND (? OR NOT EXISTS(
+         WHERE r.state='queued' ${eligible} AND (? OR NOT EXISTS(
            SELECT 1 FROM calls c JOIN pageRuns p ON p.runId=c.parent AND p.node=c.node AND p.visit=c.visit
            WHERE c.child=r.runId))
          AND NOT EXISTS(SELECT 1 FROM parallelWork w JOIN runs k ON k.runId=w.child
