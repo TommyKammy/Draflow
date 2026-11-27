@@ -1,3 +1,4 @@
+import type { BusinessDelivery } from './business.js';
 import type { Identity } from './operator-store.js';
 import { type SharedOptions, OwnershipLost } from './postgres.js';
 import { randomUUID } from 'node:crypto';
@@ -31,6 +32,14 @@ interface HostOptions extends Omit<ExecutionEngineOptions, 'credentialFetch'> {
   };
   shared?: SharedOptions;
   organization?: string;
+  prepareBusiness?: (
+    organization: string,
+    event: string,
+    rule: string,
+    run: string,
+    project: string,
+    revision: number,
+  ) => Promise<{ status: 'prepared' | 'skipped' | 'denied' }>;
   httpAuth?: HttpAuth;
   maxHttpResponseBytes?: number;
   maxCallDepth?: number;
@@ -176,6 +185,14 @@ export class NodeHost {
     }
   }
 
+  acceptBusiness(delivery: BusinessDelivery) {
+    this.#ready();
+    if (!this.organization || delivery.organization !== this.organization)
+      throw Error('Business organization mismatch');
+    const run = this.#ledger.acceptBusiness(delivery, this.#capacity, (workflow) => this.publish(workflow));
+    this.#wake();
+    return run;
+  }
   get organization() {
     return this.options.shared?.organization ?? this.options.organization;
   }
@@ -613,12 +630,51 @@ export class NodeHost {
   }
 
   async #runJob(job: NonNullable<ReturnType<ExecutionLedger['claim']>>, controller: AbortController) {
-    const { receipt: r, items } = job;
+    const { receipt: r } = job;
+    let items = job.items;
     if (this.#ledger.canceled(r.runId)) {
       this.#ledger.finishCanceled(r);
       return;
     }
     const publication = this.#ledger.publication(r.workflowId, r.revision);
+    if (this.organization && r.workflowId.startsWith('business-') && this.#ledger.isBusinessRun(r.runId)) {
+      const context = items[0]!.json;
+      const decision =
+        this.organization === context.organization
+          ? await this.options.prepareBusiness?.(
+              this.organization,
+              String(context.event),
+              String(context.rule),
+              r.runId,
+              String(context.project),
+              Number(context.revision),
+            )
+          : undefined;
+      if (!decision || (decision.status !== 'prepared' && decision.status !== 'skipped')) {
+        this.#ledger.finish(
+          r,
+          {
+            id: r.runId,
+            workflowId: r.workflowId,
+            workflowName: publication.workflow.name,
+            mode: r.mode,
+            startNodeId: r.triggerNodeId,
+            status: 'error',
+            startedAt: r.startedAt!,
+            stoppedAt: this.#scheduleClock.now(),
+            executed: 0,
+            reused: 0,
+          },
+          {
+            workflow: publication.workflow,
+            tasks: [],
+            error: { name: 'BusinessAuthorization', message: 'Business action unavailable' },
+          },
+        );
+        return;
+      }
+      items = [{ json: { businessStatus: decision.status } }];
+    }
     const operation = this.#ledger.pendingMode(r.runId);
     if (operation === 'pages') {
       const entry = this.#ledger.continuation(r.runId)!.checkpoint.stack[0]!;

@@ -352,3 +352,19 @@ Use POST with `Content-Type: application/json` for mutations. Supply a unique `r
 The console shows the oldest queued and review ages, the last worker heartbeat, and failed compensation steps. `DRAFLOW_MONITOR_MS` sets the age threshold (default 30 seconds, minimum 1 second). The CLI samples at one quarter of the threshold, capped at one second, emits JSON monitor transitions on stderr, and records the latest active/cleared event per alert kind in the organization ledger. The screen links active and recently cleared alerts to their runs. A missing first heartbeat indicates that worker availability has yet to be observed. An existing review migrated from an older ledger uses its start/admission time until the next review transition. A separate intake process should host monitoring when it must remain available during a worker outage. Service-level monitoring of that intake and the database belongs to the deployment.
 
 Run `node --test apps/server/test/operator.test.mjs` for the SQLite contract; set `DRAFLOW_TEST_POSTGRES` to a disposable PostgreSQL database for the shared contract and worker-loss drill. Run `node apps/server/test/operator-bench.mjs` with the same optional environment variable for the 100,000-history authenticated first-page benchmark. The browser regression is `pnpm exec playwright test operator.spec.mjs`.
+
+## Prood business automation (Phase 8.1–8.2)
+
+The optional Prood worker accepts committed project subscriptions and prepares the two permitted operations (assign a task or set its status). The Prood application owns authentication, rule revisions, delegation, task versions, the transactional subscription outbox and authorization audits. Each organization-bound Draflow ledger keeps a permanent receipt per project/event/rule and pins the generated proposal workflow. The receipt, publication binding and queued run commit atomically. The public rule format cannot introduce executable nodes, URLs, credentials or child workflows. These phases produce proposals only. Enabling changes to tasks requires the receiver-side operation receipts in Phase 8.3.
+
+Build both checkouts. With a migrated Prood deployment and its workspace ID:
+
+```sh
+PROOD_SQLITE_PATH=/data/prood.sqlite node apps/server/src/prood-worker.mjs /path/to/Prood wks_WORKSPACE_ID /data/draflow-organization.sqlite
+```
+
+For PostgreSQL, set `DATABASE_URL` for Prood and `DRAFLOW_POSTGRES_URL` for Draflow (the final path argument may be `:memory:` in shared mode). Run one logical binding per Prood workspace. Every worker executing business proposals must use the Prood preparation callback; a missing authorizer fails closed. Supervise this process as other Node workers. SQLite mode needs one Draflow writer per file. PostgreSQL supports replicas. Upgrade all Draflow processes per organization for schema v4. Offline cutover migrates the receipt and immutable publication bindings.
+
+The authenticated Prood page at `/automation/review` previews a rule document and requests explicit delegation. Project managers use the same validation via `POST /api/v1/projects/:projectId/automation/:rule` with `op: preview|publish|stop`, the current revision (zero to create), and their own user ID as `delegate` when publishing. A manual start uses `op: start` and a task ID. Earlier events are not backfilled on publication. Rule edits keep already selected revisions; stopping a rule or changing its delegate invalidates earlier delegations. A later edit to the task conservatively skips a stale proposal.
+
+The cross-checkout test is opt-in: set `PROOD_CHECKOUT` to the built Prood checkout and run `node --test apps/server/test/prood-business.test.mjs`. Set `DRAFLOW_TEST_POSTGRES` to a disposable PostgreSQL database to repeat using both PostgreSQL adapters. The Playwright test `apps/demo/test/prood-rule.spec.mjs` takes the same checkout path.

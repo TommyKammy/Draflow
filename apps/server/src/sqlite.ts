@@ -1,3 +1,4 @@
+import { businessSchema, describeDelivery, type BusinessDelivery } from './business.js';
 import { operatorSchema, sqliteReviewClock, seedReviewClock } from './operator-schema.js';
 import { OperatorStore } from './operator-store.js';
 import { deliverySchema, ledgerTables, sqliteTriggers } from './ledger-schema.js';
@@ -70,6 +71,7 @@ export class ExecutionLedger {
   readonly #db: DatabaseSync | PostgresDatabase;
   readonly shared?: PostgresDatabase;
   readonly operators: OperatorStore;
+  readonly #businessEnabled: boolean;
   #inTransaction = false;
   readonly history: ExecutionStore;
 
@@ -84,6 +86,7 @@ export class ExecutionLedger {
     shared?: SharedOptions,
     organization?: string,
   ) {
+    this.#businessEnabled = Boolean(organization || shared);
     if (organization !== undefined) validateOrganization(organization);
     this.#db = shared ? (this.shared = new PostgresDatabase(shared)) : new DatabaseSync(path);
     if (!shared) {
@@ -95,7 +98,8 @@ export class ExecutionLedger {
         BEGIN EXCLUSIVE;
         ${ledgerTables}
         ${sqliteTriggers}`);
-        if (organization) this.#db.exec(operatorSchema + sqliteReviewClock + seedReviewClock);
+        if (organization)
+          this.#db.exec(businessSchema + operatorSchema + sqliteReviewClock + seedReviewClock);
         if (!this.#prepare("SELECT 1 FROM pragma_table_info('active') WHERE name='registration'").get()) {
           this.#db.exec(
             "ALTER TABLE active ADD COLUMN registration TEXT NOT NULL DEFAULT ''; UPDATE active SET registration=lower(hex(randomblob(16)))",
@@ -1035,6 +1039,60 @@ export class ExecutionLedger {
     });
   }
 
+  isBusinessRun(id: string) {
+    return !!this.#prepare('SELECT 1 FROM business_receipts WHERE run=?').get(id);
+  }
+
+  acceptBusiness(
+    d: BusinessDelivery,
+    capacity: number,
+    publish: (workflow: PublishedWorkflow['workflow']) => number,
+  ) {
+    const descriptor = describeDelivery(d);
+    return this.#transaction(() => {
+      const prior = this.#prepare('SELECT fingerprint,run FROM business_receipts WHERE delivery=?').get(
+        descriptor.key,
+      );
+      if (prior) {
+        if (prior.fingerprint !== descriptor.fingerprint) throw Error('Business delivery conflict');
+        return String(prior.run);
+      }
+      const stored = this.#prepare('SELECT revision FROM business_publications WHERE workflow=?').get(
+        descriptor.workflow,
+      );
+      const revision = stored ? Number(stored.revision) : publish(descriptor.document);
+      if (!stored)
+        this.#prepare('INSERT INTO business_publications VALUES(?,?)').run(descriptor.workflow, revision);
+      const run = this.accept(
+        descriptor.workflow,
+        'event',
+        {
+          items: [
+            {
+              json: {
+                organization: d.organization,
+                event: d.event,
+                rule: d.rule,
+                project: d.project,
+                revision: d.revision,
+              },
+            },
+          ],
+        },
+        capacity,
+        0,
+        () => {},
+        revision,
+      );
+      this.#prepare('INSERT INTO business_receipts VALUES(?,?,?)').run(
+        descriptor.key,
+        descriptor.fingerprint,
+        run,
+      );
+      return run;
+    });
+  }
+
   accept(
     id: string,
     trigger: string,
@@ -1808,6 +1866,7 @@ export class ExecutionLedger {
       }
       // These validated direct children cannot send before creating their effect checkpoint.
       if (
+        (this.#businessEnabled && r.workflowId.startsWith('business-') && this.isBusinessRun(r.runId)) ||
         this.parallelChild(r.runId) ||
         this.#prepare('SELECT 1 FROM compensationSteps WHERE child=?').get(r.runId)
       ) {

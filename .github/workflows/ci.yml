@@ -95,7 +95,7 @@ jobs:
       - run: node --test --test-name-pattern="incremental tokens|parallel pages retain|two parallel imports|parallel receiver cooldown|occupied host|first GET attempt|during rate-limit wait" apps/server/test/sync.test.mjs
         env:
           DRAFLOW_TEST_SHARED: postgres://postgres:local-ci-only@localhost:5432/postgres
-      - run: node --test apps/server/test/operator.test.mjs && node apps/server/test/operator-bench.mjs
+      - run: node --test apps/server/test/operator.test.mjs apps/server/test/business.test.mjs && node apps/server/test/operator-bench.mjs
         env:
           DRAFLOW_TEST_POSTGRES: postgres://postgres:local-ci-only@localhost:5432/postgres
       - run: node apps/server/test/postgres-ha.mjs
