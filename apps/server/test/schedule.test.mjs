@@ -244,3 +244,43 @@ test('normal Node host timer automatically admits a published schedule', async (
   assert.equal(host.receipt(row.id).triggerNodeId, 'a');
   host.deactivate('flow');
 });
+
+test('a clock rewind and reactivation cannot admit an already completed slot after restart', async (t) => {
+  const f = setup(t, '2024-01-01T00:00:00Z', { dedupMs: 0 });
+  const revision = f.install({ intervalSeconds: 10 });
+  const slot = '2024-01-01T00:00:10Z';
+  f.advance(slot);
+  const original = f.receipt(slot).runId;
+  await until(() => f.host.receipt(original).state === 'finished');
+  f.host.deactivate('flow');
+  await f.host.close();
+  f.advance('2024-01-01T00:00:00Z');
+  f.reopen();
+  f.host.activate('flow', revision);
+  f.advance(slot);
+  assert.equal(f.receipt(slot).runId, original);
+  assert.equal(f.host.stats().queued, 0);
+  f.advance('2024-01-01T00:00:20Z');
+  await until(() => f.calls.length === 2);
+  assert.equal(f.calls[1].runId, f.receipt('2024-01-01T00:00:20Z').runId);
+});
+
+test('simultaneously overdue schedules recover independently when only one queue slot is available', async (t) => {
+  const f = setup(t, '2024-01-01T00:00:00Z', { capacity: 1 });
+  const doc = document({ intervalSeconds: 10 });
+  Object.assign(doc.nodes[1], { type: scheduleNode.type, parameters: { intervalSeconds: 20 } });
+  f.host.activate('flow', f.host.publish(doc));
+  await f.host.close();
+  const slot = '2024-01-01T00:01:00.000Z';
+  f.advance(slot);
+  f.reopen();
+  const first = f.host.byEvent('flow', 'a', slot);
+  await until(() => f.host.receipt(first.runId).state === 'finished');
+  assert.equal(f.host.byEvent('flow', 'b', slot), undefined);
+  await f.host.close();
+  f.reopen();
+  const second = f.host.byEvent('flow', 'b', slot);
+  assert.notEqual(second.runId, first.runId);
+  await until(() => f.host.receipt(second.runId).state === 'finished');
+  assert.deepEqual(f.calls.map(call => call.runId), [first.runId, second.runId]);
+});

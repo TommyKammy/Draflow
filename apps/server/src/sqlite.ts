@@ -26,6 +26,9 @@ export interface Receipt {
   outcome: ExecutionSummary['status'] | null;
 }
 
+// Scheduled instants stay reserved for the lifetime of the receipt, including after reactivation.
+const noExpiry = -1;
+
 const fields =
   'runId, workflowId, revision, triggerNodeId, eventKey, mode, state, acceptedAt, startedAt, stoppedAt, outcome';
 
@@ -223,7 +226,6 @@ export class SqliteLedger {
     scheduledAt: number,
     nextAt: number,
     capacity: number,
-    ttl: number,
   ) {
     const stamp = new Date(scheduledAt).toISOString();
     return this.accept(
@@ -231,7 +233,7 @@ export class SqliteLedger {
       trigger,
       { key: stamp, items: [{ json: { scheduledAt: stamp } }] },
       capacity,
-      ttl,
+      null,
       () => {
         // Moving the cursor and admitting its work either both commit or both roll back.
         this.#prepare('UPDATE schedules SET nextAt=? WHERE workflowId=? AND triggerNodeId=?').run(
@@ -283,7 +285,7 @@ export class SqliteLedger {
     trigger: string,
     event: Omit<TriggerEvent, 'runId'>,
     capacity: number,
-    ttl: number,
+    ttl: number | null,
     validate: (revision: number) => void,
     pinnedRevision?: number,
   ): string {
@@ -298,8 +300,8 @@ export class SqliteLedger {
         const existing = this.#prepare(
           `SELECT d.runId FROM deliveries d JOIN runs USING(runId)
           WHERE d.workflowId=? AND d.triggerNodeId=? AND d.eventKey=?
-          AND (d.expiresAt>? OR runs.state IN ('queued','running','interrupted'))`,
-        ).get(id, trigger, event.key, now);
+          AND (d.expiresAt=? OR d.expiresAt>? OR runs.state IN ('queued','running','interrupted'))`,
+        ).get(id, trigger, event.key, noExpiry, now);
         if (existing) return String(existing.runId);
       }
       if (Number(this.#prepare("SELECT COUNT(*) AS n FROM runs WHERE state='queued'").get()!.n) >= capacity) {
@@ -325,7 +327,7 @@ export class SqliteLedger {
           id,
           trigger,
           event.key,
-          now + ttl,
+          ttl === null ? noExpiry : now + ttl,
           runId,
         );
       }

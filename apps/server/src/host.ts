@@ -240,7 +240,6 @@ export class NodeHost {
           due,
           nextTime(row.spec, due),
           this.#capacity,
-          this.#ttl,
         );
         this.#wake();
       }
