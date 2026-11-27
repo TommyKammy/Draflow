@@ -71,6 +71,15 @@ try {
         case 'cancel':
           result = host.cancel(q.runId);
           break;
+        case 'redrive':
+          result = host.redrive(q.runId, q.failureId);
+          break;
+        case 'recoveryInfo':
+          result = host.recoveryInfo(q.runId);
+          break;
+        case 'resetSync':
+          result = host.resetSync(q.workflowId, q.nodeId, q.scope);
+          break;
         case 'progress':
           result = host.inspect(q.runId);
           break;

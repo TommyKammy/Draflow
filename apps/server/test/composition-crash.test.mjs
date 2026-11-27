@@ -43,7 +43,10 @@ for (const phase of [
       Array.from({ length: pages ? 1003 : 1 }, (_, i) => i + 1),
     );
     assert.equal(new Set(writes.map((w) => w.key)).size, writes.length);
-    const attempts = readFileSync(db + '.attempts', 'utf8').trim().split('\n').map(JSON.parse);
+    const attempts = readFileSync(db + '.attempts', 'utf8')
+      .trim()
+      .split('\n')
+      .map(JSON.parse);
     const expected = [...writes];
     if (phase === 'lost-response') expected.splice(626, 0, writes[625]);
     assert.deepEqual(attempts, expected);
@@ -57,6 +60,47 @@ for (const phase of [
       );
   });
 }
+for (const phase of ['lost-response', 'last-batch', 'after-token']) {
+  test('incremental sync survives SIGKILL ' + phase, (t) => {
+    const db = setup(t);
+    assert.equal(run(db, phase, 'sync').signal, 'SIGKILL');
+    const recovered = run(db, 'resume', 'sync');
+    assert.equal(recovered.status, 0, recovered.stderr);
+    assert.equal(JSON.parse(recovered.stdout).outcome, 'success');
+    const records = (suffix) =>
+      readFileSync(db + suffix, 'utf8')
+        .trim()
+        .split('\n')
+        .map(JSON.parse);
+    const writes = records('.writes');
+    assert.deepEqual(
+      writes.map((w) => Number(w.id)),
+      Array.from({ length: 1003 }, (_, i) => i + 1),
+    );
+    const expected = [...writes];
+    if (phase === 'lost-response') expected.splice(626, 0, writes[625]);
+    assert.deepEqual(records('.attempts'), expected);
+    assert.equal(readFileSync(db + '.next-run', 'utf8'), 'watermark');
+  });
+}
+test('SIGKILL immediately after redrive acceptance preserves one attempt and its successful rows', (t) => {
+  const db = setup(t);
+  const first = run(db, 'redrive-commit', 'redrive', '100');
+  assert.equal(first.signal, 'SIGKILL', first.stderr);
+  const second = run(db, 'resume', 'redrive', '100');
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal(JSON.parse(second.stdout).outcome, 'success');
+  for (const suffix of ['.attempts', '.writes']) {
+    const rows = readFileSync(db + suffix, 'utf8')
+      .trim()
+      .split('\n')
+      .map(JSON.parse);
+    assert.deepEqual(
+      rows.map((r) => r.id),
+      Array.from({ length: 100 }, (_, i) => i + 1),
+    );
+  }
+});
 test('10x pages retain one page and bounded per-run checkpoints', (t) => {
   const samples = [1003, 10030].map((count) => {
     const r = run(setup(t), 'measure', 'pages', String(count));

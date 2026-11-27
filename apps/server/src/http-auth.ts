@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { CredentialBinding, CredentialFetch, FetchLike } from '@draflow/core';
 
 export type HttpGrant = {
@@ -11,6 +12,10 @@ export interface HttpAuth {
   grants: readonly HttpGrant[];
   resolve(id: string): Promise<string | undefined> | string | undefined;
 }
+
+export const beforeRecordedSend = new AsyncLocalStorage<() => void>();
+
+export class UnsentCredentialError extends Error {}
 
 export class ReadThrottled extends Error {
   constructor(
@@ -102,7 +107,7 @@ function grantFor(binding: CredentialBinding, url: string, auth?: HttpAuth) {
     target.password ||
     !(target.protocol === 'https:' || (local && target.protocol === 'http:'))
   ) {
-    throw new Error('HTTP credential destination denied');
+    throw new UnsentCredentialError('HTTP credential destination denied');
   }
   const grant = auth?.grants.find(
     (rule) =>
@@ -119,7 +124,7 @@ function grantFor(binding: CredentialBinding, url: string, auth?: HttpAuth) {
     ) ||
     binding.slot !== 'httpAuth'
   ) {
-    throw new Error('HTTP credential not authorized');
+    throw new UnsentCredentialError('HTTP credential not authorized');
   }
   return grant;
 }
@@ -139,11 +144,12 @@ export function serverHttp(fetchFn: FetchLike, limit: number, auth?: HttpAuth): 
         headers.set(header, grant.kind === 'bearer' ? 'Bearer ' + secret : secret);
         init = { ...init, headers, redirect: 'error' };
       } catch {
-        throw new Error('HTTP credential unavailable or invalid');
+        throw new UnsentCredentialError('HTTP credential unavailable or invalid');
       }
     }
     let response: Response;
     let bytes: Uint8Array<ArrayBuffer> | null;
+    beforeRecordedSend.getStore()?.();
     try {
       init?.signal?.throwIfAborted();
       response = await fetchFn(url, init);
@@ -151,7 +157,10 @@ export function serverHttp(fetchFn: FetchLike, limit: number, auth?: HttpAuth): 
         void response.body?.cancel().catch(() => {});
         throw new ReadThrottled(response.status, response.headers.get('retry-after'));
       }
-      bytes = await readBounded(response, limit, init?.signal);
+      if (binding.type === 'draflow.pages' && response.status === 410) {
+        void response.body?.cancel().catch(() => {});
+        bytes = null;
+      } else bytes = await readBounded(response, limit, init?.signal);
     } catch (error) {
       if (error instanceof ResponseLimit || error instanceof ReadThrottled) throw error;
       // Provider, transport and stream errors can contain request headers.

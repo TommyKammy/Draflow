@@ -158,6 +158,8 @@ export const httpRequestNodeV2: NodeType = {
   },
   credentials: [{ name: 'httpAuth', label: 'HTTP authentication' }],
   parameters: [
+    { name: 'allowRedrive', label: 'Retain failed recorded step for redrive', type: 'boolean', default: false, noExpression: true },
+    { name: 'redriveRetentionMs', label: 'Redrive retention (ms)', type: 'number', min: 1, noExpression: true },
     {
       name: 'delivery', label: 'Recorded delivery', type: 'select', default: 'none', noExpression: true,
       options: [{ label: 'Off', value: 'none' }, { label: 'Receiver supports idempotency keys', value: 'keyed' },

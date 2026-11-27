@@ -70,7 +70,8 @@ export class NodeHost {
       const checked = new Set<string>();
       for (const row of this.#ledger.requiredPublications()) {
         this.#checkPublication(
-          this.#ledger.publication(String(row.workflowId), Number(row.revision)), checked,
+          this.#ledger.publication(String(row.workflowId), Number(row.revision)),
+          checked,
         );
       }
       this.#armSchedules();
@@ -106,6 +107,29 @@ export class NodeHost {
   effects(runId: string) {
     return this.#ledger.effects(runId);
   }
+  redrive(runId: string, failureId: string) {
+    this.#ready();
+    const point = this.#ledger.recoveryInfo(runId).find((p) => p.failure === failureId);
+    if (point?.attempt) return String(point.attempt);
+    const receipt = this.#ledger.get(runId);
+    if (point?.retained && receipt)
+      this.#checkPublication(this.#ledger.publication(receipt.workflowId, receipt.revision));
+    const attempt = this.#ledger.redrive(runId, failureId, this.#scheduleClock.now());
+    this.#wake();
+    return attempt;
+  }
+
+  recoveryInfo(runId: string) {
+    return this.#ledger.recoveryInfo(runId);
+  }
+
+  resetSync(workflowId: string, nodeId: string, scope: string) {
+    this.#ready();
+    const reset = this.#ledger.resetSync(workflowId, nodeId, scope);
+    this.#wake();
+    return reset;
+  }
+
   reconcile(runId: string, key: string, decision: Reconciliation, result: JsonObject = {}) {
     this.#ready();
     if (!isPlainObject(result)) throw new Error('Expected a JSON object');
@@ -393,6 +417,9 @@ export class NodeHost {
                   Math.min(30000, Number(state.created) + pageConfig(node).deadlineMs - now),
                 ),
               ]),
+              node.parameters.syncScope
+                ? (this.#ledger.syncScope(r.runId)?.token as string | null)
+                : undefined,
             );
             if (controller.signal.aborted) {
               this.#ledger.finishCanceled(r);

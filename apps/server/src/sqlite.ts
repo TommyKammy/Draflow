@@ -15,6 +15,7 @@ import type {
   WaitResult,
 } from '@draflow/core';
 import { buildGraph, hasPath } from '@draflow/core';
+import { beforeRecordedSend, UnsentCredentialError } from './http-auth.js';
 import { retryTime, pageConfig, type readPage } from './pages.js';
 import type { Schedule } from './schedule.js';
 
@@ -129,9 +130,42 @@ export class SqliteLedger {
           runId TEXT REFERENCES runs(runId), node TEXT, visit INTEGER, cursor TEXT, next TEXT, rows TEXT,
           offset INTEGER NOT NULL DEFAULT 0, pages INTEGER NOT NULL DEFAULT 0, batches INTEGER NOT NULL DEFAULT 0,
           items INTEGER NOT NULL DEFAULT 0, bytes INTEGER NOT NULL DEFAULT 0, total REAL NOT NULL DEFAULT 0,
+          skipped INTEGER NOT NULL DEFAULT 0,
           error TEXT, created INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, retryAt INTEGER,
           PRIMARY KEY(runId,node,visit)
         );
+        CREATE TABLE IF NOT EXISTS recoveryPoints (
+          failure TEXT PRIMARY KEY, runId TEXT NOT NULL REFERENCES runs(runId), node TEXT NOT NULL,
+          visit INTEGER NOT NULL, child TEXT, reason TEXT NOT NULL, expires INTEGER NOT NULL,
+          data TEXT, attempt TEXT, accepted INTEGER, outcome TEXT
+        );
+        CREATE INDEX IF NOT EXISTS recoveryRun ON recoveryPoints(runId);
+        CREATE INDEX IF NOT EXISTS recoveryExpiry ON recoveryPoints(expires) WHERE data IS NOT NULL;
+        CREATE TABLE IF NOT EXISTS syncScopes (
+          scope TEXT PRIMARY KEY, contract TEXT NOT NULL, token TEXT, candidate TEXT, owner TEXT REFERENCES runs(runId)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS syncOwner ON syncScopes(owner) WHERE owner IS NOT NULL;
+        CREATE TABLE IF NOT EXISTS syncQueue (
+          runId TEXT PRIMARY KEY REFERENCES runs(runId), scope TEXT NOT NULL REFERENCES syncScopes(scope)
+        );
+        CREATE INDEX IF NOT EXISTS syncQueueScope ON syncQueue(scope);
+        CREATE TABLE IF NOT EXISTS syncVersions (
+          scope TEXT, entity TEXT, version INTEGER NOT NULL, PRIMARY KEY(scope,entity)
+        );
+        CREATE TABLE IF NOT EXISTS syncWork (
+          child TEXT, item INTEGER, scope TEXT NOT NULL, entity TEXT NOT NULL, version INTEGER NOT NULL,
+          lifetime INTEGER NOT NULL, firstSend INTEGER, PRIMARY KEY(child,item)
+        );
+        CREATE TRIGGER IF NOT EXISTS releaseSyncWork AFTER UPDATE OF data ON recoveryPoints
+        WHEN OLD.data IS NOT NULL AND NEW.data IS NULL AND NEW.attempt IS NULL AND OLD.child IS NOT NULL
+        BEGIN
+          DELETE FROM syncWork WHERE child=OLD.child;
+        END;
+        CREATE TRIGGER IF NOT EXISTS syncApplied AFTER UPDATE OF state ON effects WHEN NEW.state='success'
+        BEGIN
+          INSERT INTO syncVersions SELECT scope,entity,version FROM syncWork WHERE child=NEW.runId AND item=NEW.item
+          ON CONFLICT(scope,entity) DO UPDATE SET version=max(version,excluded.version);
+        END;
         CREATE TABLE IF NOT EXISTS canceledRuns (runId TEXT PRIMARY KEY REFERENCES runs(runId));
         CREATE TABLE IF NOT EXISTS readyAfter (runId TEXT PRIMARY KEY REFERENCES runs(runId), cutoff INTEGER NOT NULL);
         CREATE INDEX IF NOT EXISTS pageRetry ON pageRuns(retryAt) WHERE retryAt IS NOT NULL;
@@ -147,6 +181,9 @@ export class SqliteLedger {
           workflowId TEXT, id TEXT, status TEXT NOT NULL, startedAt INTEGER NOT NULL,
           summary TEXT NOT NULL, detail TEXT, PRIMARY KEY(workflowId, id)
         );`);
+      if (!this.#prepare("SELECT 1 FROM pragma_table_info('pageRuns') WHERE name='skipped'").get()) {
+        this.#db.exec('ALTER TABLE pageRuns ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0');
+      }
       if (!this.#prepare("SELECT 1 FROM pragma_table_info('deliveries') WHERE name='source'").get()) {
         // Earlier ledgers reserved scheduled instants with noExpiry and used run mode for other deliveries.
         this.#db.exec(`ALTER TABLE deliveries RENAME TO legacy_deliveries;
@@ -244,6 +281,15 @@ export class SqliteLedger {
   private validateTargets(root: Workflow) {
     const visit = (workflow: Workflow, ancestors: string[]) => {
       for (const node of workflow.nodes) {
+        if (
+          node.type === 'draflow.httpRequest' &&
+          node.parameters.allowRedrive === true &&
+          (node.typeVersion !== 2 ||
+            !['manual', 'keyed'].includes(String(node.parameters.delivery)) ||
+            !Number.isSafeInteger(node.parameters.redriveRetentionMs ?? 604800000) ||
+            Number(node.parameters.redriveRetentionMs ?? 604800000) < 1)
+        )
+          throw new Error('Redrive requires recorded HTTP v2 and positive retention');
         if (node.disabled || !['draflow.call', 'draflow.pages'].includes(node.type)) continue;
         if (node.type === 'draflow.pages') pageConfig(node);
         const { workflowId, revision } = node.parameters;
@@ -257,6 +303,15 @@ export class SqliteLedger {
         if (ancestors.includes(workflowId) || ancestors.length > this.maxCallDepth)
           throw new Error('Recursive or too deep subworkflow');
         const child = this.publication(workflowId, revision).workflow;
+        if (
+          child.nodes.some(
+            (n) =>
+              !n.disabled &&
+              ((n.type === 'draflow.httpRequest' && n.parameters.allowRedrive === true) ||
+                (n.type === 'draflow.pages' && pageConfig(n).recoverable)),
+          )
+        )
+          throw new Error('Recoverable steps must belong to a root workflow');
         const entries = child.nodes.filter((n) => !n.disabled && n.type === 'draflow.childInput');
         const returns = child.nodes.filter((n) => !n.disabled && n.type === 'draflow.return');
         const callers = entries[0]?.parameters.callers;
@@ -271,6 +326,42 @@ export class SqliteLedger {
           throw new Error('Return must be terminal');
         if (!hasPath(buildGraph(child), entries[0]!.id, returns[0]!.id))
           throw new Error('Return must be reachable from the callable entry');
+        if (node.type === 'draflow.pages' && pageConfig(node).recoverable) {
+          const write = child.nodes.find((n) => n.type === 'draflow.httpRequest' && n.typeVersion === 2);
+          if (
+            node.parameters.syncScope &&
+            write?.parameters.delivery === 'keyed' &&
+            node.parameters.keyLifetimeMs === undefined
+          )
+            throw new Error('Configure the receiver key lifetime for incremental keyed delivery');
+          const connected = (a: string, b: string) =>
+            child.connections.some(
+              (e) =>
+                e.from.node === a &&
+                e.to.node === b &&
+                e.from.port === 'main' &&
+                e.to.port === 'main' &&
+                e.from.index === 0 &&
+                e.to.index === 0,
+            );
+          if (
+            !write ||
+            write.disabled ||
+            !['manual', 'keyed'].includes(String(write.parameters.delivery)) ||
+            Object.keys(child.pinData ?? {}).length > 0 ||
+            child.nodes.length !== 3 ||
+            child.connections.length !== 2 ||
+            !connected(entries[0]!.id, write.id) ||
+            !connected(write.id, returns[0]!.id) ||
+            child.nodes.some((n) => n.settings?.onError && n.settings.onError !== 'stop') ||
+            (node.settings?.onError && node.settings.onError !== 'stop') ||
+            workflow.connections.some((e) => e.from.node === node.id) ||
+            workflow.nodes.filter((n) => n.type === 'draflow.pages').length !== 1
+          )
+            throw new Error(
+              'Recoverable pages require a terminal pages node and a direct recorded HTTP child',
+            );
+        }
         visit(child, [...ancestors, workflowId]);
       }
     };
@@ -296,6 +387,20 @@ export class SqliteLedger {
       `INSERT INTO runs(runId,workflowId,revision,triggerNodeId,mode,payload,state,acceptedAt)
       VALUES(?,?,?,?,'subworkflow',?,'queued',?)`,
     ).run(child, id, revision, entry.id, JSON.stringify(items), Date.now());
+    if (node.type === 'draflow.pages' && pageConfig(node).scope) {
+      const scope = this.syncScope(parent.runId)!;
+      const insert = this.#prepare('INSERT INTO syncWork VALUES(?,?,?,?,?,?,NULL)');
+      items.forEach(({ json }, i) =>
+        insert.run(
+          child,
+          i,
+          String(scope.scope),
+          String(json.id),
+          Number(json.version),
+          pageConfig(node).keyLifetimeMs,
+        ),
+      );
+    }
     this.#prepare('INSERT INTO calls VALUES(?,?,?,?,?)').run(child, parent.runId, node.id, visit, batch);
     this.#prepare("UPDATE runs SET state='waiting' WHERE runId=?").run(parent.runId);
     this.#recordPause(parent.runId);
@@ -331,6 +436,7 @@ export class SqliteLedger {
       for (const row of rows) {
         const run = String(row.runId);
         this.#prepare('INSERT OR IGNORE INTO canceledRuns VALUES(?)').run(run);
+        this.#prepare('DELETE FROM syncQueue WHERE runId=?').run(run);
         this.#prepare('UPDATE pageRuns SET retryAt=NULL WHERE runId=?').run(run);
         this.#prepare("INSERT INTO transitions VALUES(?, '', ?, 'cancelRequested')").run(run, Date.now());
         if (row.state === 'waiting') this.#prepare("UPDATE runs SET state='queued' WHERE runId=?").run(run);
@@ -402,12 +508,214 @@ export class SqliteLedger {
     return due.length;
   }
 
+  syncScope(owner: string) {
+    return this.#prepare('SELECT scope,token FROM syncScopes WHERE owner=?').get(owner);
+  }
+
+  #nextSync(key: string) {
+    const next = this.#prepare('SELECT runId FROM syncQueue WHERE scope=? ORDER BY rowid LIMIT 1').get(key);
+    if (!next) return;
+    this.#prepare('DELETE FROM syncQueue WHERE runId=?').run(String(next.runId));
+    this.#prepare('UPDATE syncScopes SET owner=? WHERE scope=?').run(String(next.runId), key);
+    this.#yieldPage(String(next.runId));
+  }
+
+  resetSync(workflow: string, node: string, name: string) {
+    const key = JSON.stringify([workflow, node, name]);
+    return this.#transaction(() => {
+      const row = this.#prepare('SELECT owner FROM syncScopes WHERE scope=?').get(key);
+      if (!row) throw new Error('Unknown sync scope');
+      if (row.owner) {
+        const state = this.get(String(row.owner))?.state;
+        if (
+          (state !== 'finished' && state !== 'interrupted') ||
+          this.inspect(String(row.owner)).uncertain.length
+        )
+          throw new Error('Sync is active or requires reconciliation');
+        if (
+          this.#prepare(
+            `SELECT 1 FROM calls JOIN runs ON child=runId
+          WHERE parent=? AND state NOT IN ('finished','interrupted')`,
+          ).get(row.owner)
+        )
+          throw new Error('Child is still active');
+      }
+      if (row.owner) {
+        this.#prepare('DELETE FROM syncWork WHERE child IN (SELECT child FROM calls WHERE parent=?)').run(
+          row.owner,
+        );
+        this.#prepare('UPDATE recoveryPoints SET data=NULL WHERE runId=?').run(row.owner);
+      }
+      this.#prepare('UPDATE syncScopes SET owner=NULL,candidate=NULL,token=NULL WHERE scope=?').run(key);
+      this.#nextSync(key);
+      return true;
+    });
+  }
+
   pageState(id: string, node: string, visit: number) {
     return this.#prepare('SELECT * FROM pageRuns WHERE runId=? AND node=? AND visit=?').get(id, node, visit)!;
   }
 
+  #canRetryUnsent(id: string, nodeId: string) {
+    const receipt = this.get(id)!;
+    if (receipt.mode === 'subworkflow') return Boolean(this.#recoverableParent(id));
+    return this.publication(receipt.workflowId, receipt.revision).workflow.nodes.some(
+      (n) => n.id === nodeId && n.parameters.allowRedrive === true,
+    );
+  }
+
+  #recoverableParent(child: string) {
+    const link = this.#prepare('SELECT parent,node,visit FROM calls WHERE child=?').get(child);
+    if (!link) return;
+    const parent = this.get(String(link.parent))!;
+    const node = this.publication(parent.workflowId, parent.revision).workflow.nodes.find(
+      (n) => n.id === link.node,
+    )!;
+    if (node.type === 'draflow.pages' && pageConfig(node).recoverable)
+      return { parent, node, visit: Number(link.visit) };
+  }
+
+  // Called inside the failure transaction, before either receipt releases its recovery data.
+  #archivePage(parent: Receipt, node: WorkflowNode, visit: number, reason: string, child?: Receipt) {
+    if (parent.mode === 'subworkflow' || this.canceled(parent.runId) || !pageConfig(node).recoverable) return;
+    const id = parent.runId;
+    const config = pageConfig(node);
+    this.#purgeRecovery();
+    const snapshot = {
+      point: this.#prepare('SELECT checkpoint FROM continuations WHERE runId=?').get(id)?.checkpoint,
+      page: this.pageState(id, node.id, visit),
+      cursors: this.#prepare('SELECT digest FROM seenCursors WHERE runId=? AND node=? AND visit=?').all(
+        id,
+        node.id,
+        visit,
+      ),
+      payload: child && this.#prepare('SELECT payload FROM runs WHERE runId=?').get(child.runId)?.payload,
+      effects:
+        child &&
+        this.#prepare("SELECT key,result FROM effects WHERE runId=? AND state='success'").all(child.runId),
+    };
+    this.#prepare('INSERT INTO recoveryPoints VALUES(?,?,?,?,?,?,?,?,NULL,NULL,NULL)').run(
+      randomUUID(),
+      id,
+      node.id,
+      visit,
+      child?.runId ?? null,
+      reason,
+      Date.now() + config.retention,
+      JSON.stringify(snapshot),
+    );
+  }
+
+  #archiveHttp(receipt: Receipt, detail: ExecutionDetail) {
+    if (receipt.mode === 'subworkflow' || this.canceled(receipt.runId)) return;
+    const failed = detail.tasks.at(-1);
+    if (failed?.task?.status !== 'error') return;
+    const node = detail.workflow.nodes.find((n) => n.id === failed.nodeId);
+    if (node?.type !== 'draflow.httpRequest' || node.parameters.allowRedrive !== true) return;
+    const point = this.#prepare("SELECT checkpoint FROM continuations WHERE runId=? AND mode='effect'").get(
+      receipt.runId,
+    );
+    if (!point) return;
+    const entry = (JSON.parse(String(point.checkpoint)) as Checkpoint).stack[0]!;
+    if (entry.nodeId !== node.id || entry.runIndex !== failed.task.runIndex) return;
+    this.#purgeRecovery();
+    const effects = this.#prepare(
+      "SELECT key,result FROM effects WHERE runId=? AND nodeId=? AND visit=? AND state='success'",
+    ).all(receipt.runId, node.id, entry.runIndex);
+    this.#prepare('INSERT INTO recoveryPoints VALUES(?,?,?,?,NULL,?,?,?,NULL,NULL,NULL)').run(
+      randomUUID(),
+      receipt.runId,
+      node.id,
+      entry.runIndex,
+      detail.error?.message ?? 'Recorded HTTP failed',
+      Date.now() + Number(node.parameters.redriveRetentionMs ?? 604800000),
+      JSON.stringify({ point: point.checkpoint, effects }),
+    );
+  }
+
+  recoveryInfo(id: string) {
+    this.#purgeRecovery();
+    return this.#prepare(
+      `SELECT runId,failure,node,visit,child,reason,expires,attempt,accepted,outcome,
+      data IS NOT NULL AS retained FROM recoveryPoints WHERE runId=? OR attempt=? ORDER BY rowid`,
+    ).all(id, id);
+  }
+
+  #purgeRecovery() {
+    const cutoff = Date.now();
+    this.#prepare('UPDATE recoveryPoints SET data=NULL WHERE data IS NOT NULL AND expires<=?').run(cutoff);
+  }
+
+  redrive(id: string, failure: string, now: number) {
+    this.#purgeRecovery();
+    return this.#transaction(() => {
+      const point = this.#prepare('SELECT * FROM recoveryPoints WHERE runId=? AND failure=?').get(
+        id,
+        failure,
+      );
+      if (!point) {
+        if (this.canceled(id)) throw new Error('Canceled run cannot be redriven');
+        if (this.inspect(id).uncertain.length) throw new Error('Reconcile uncertain sends before redrive');
+        throw new Error('No safe redrive point for this failure');
+      }
+      if (point.attempt) return String(point.attempt);
+      const r = this.get(id)!;
+      if (!point.data) throw new Error('Redrive data expired or invalidated');
+      if (r.state !== 'finished' || r.outcome !== 'error' || this.canceled(id))
+        throw new Error('Only an uncanceled, failed run can be redriven');
+      const node = this.publication(r.workflowId, r.revision).workflow.nodes.find(
+        (n) => n.id === point.node,
+      )!;
+      if (node.type === 'draflow.pages' && pageConfig(node).scope && !this.syncScope(id))
+        throw new Error('Sync scope was reset');
+      const saved = JSON.parse(String(point.data)) as {
+        point: string;
+        page: { cursor: string | null; next: string | null; rows: string | null };
+        cursors: { digest: string }[];
+        payload?: string;
+        effects?: { key: string; result: string }[];
+      };
+      const child = point.child;
+      if (node.type === 'draflow.pages') {
+        this.#prepare(
+          `UPDATE pageRuns SET error=NULL,attempts=0,created=?,retryAt=NULL,cursor=?,next=?,rows=?
+        WHERE runId=? AND node=? AND visit=?`,
+        ).run(now, saved.page.cursor, saved.page.next, saved.page.rows, id, node.id, Number(point.visit));
+        const seen = this.#prepare('INSERT OR IGNORE INTO seenCursors VALUES(?,?,?,?)');
+        for (const row of saved.cursors) seen.run(id, node.id, Number(point.visit), row.digest);
+      }
+      const mode = node.type === 'draflow.pages' ? 'pages' : 'effect';
+      this.#prepare("INSERT INTO continuations VALUES(?,?,'',?,0,NULL)").run(id, saved.point, mode);
+      const reopen = this.#prepare(
+        'UPDATE runs SET state=?,payload=?,startedAt=NULL,stoppedAt=NULL,outcome=NULL WHERE runId=?',
+      );
+      reopen.run(child ? 'waiting' : 'queued', '[]', id);
+      for (const effect of saved.effects ?? [])
+        this.#prepare('UPDATE effects SET result=? WHERE key=?').run(effect.result, effect.key);
+      if (child) {
+        // Re-enter only the validated input -> recorded HTTP -> return child. Keep its operation keys.
+        reopen.run('queued', saved.payload!, child);
+      }
+      const attempt = randomUUID();
+      this.#prepare('UPDATE recoveryPoints SET data=NULL,attempt=?,accepted=? WHERE failure=?').run(
+        attempt,
+        Date.now(),
+        failure,
+      );
+      this.#prepare("INSERT INTO transitions VALUES(?,?,?,'redrive')").run(id, node.id, Date.now());
+      return attempt;
+    });
+  }
+
   pageFailure(id: string, node: string, visit: number, error: string) {
     this.#transaction(() => {
+      const parent = this.get(id)!;
+      const target = this.publication(parent.workflowId, parent.revision).workflow.nodes.find(
+        (n) => n.id === node,
+      )!;
+      if (pageConfig(target).scope && error === 'HTTP 410')
+        error = 'HTTP 410: sync token expired; resetSync required';
+      else this.#archivePage(parent, target, visit, error);
       this.#prepare(
         'UPDATE pageRuns SET error=?,cursor=NULL,next=NULL,rows=NULL,retryAt=NULL WHERE runId=? AND node=? AND visit=?',
       ).run(error, id, node, visit);
@@ -420,17 +728,10 @@ export class SqliteLedger {
       config = pageConfig(node);
     const state = this.pageState(id, node.id, visit);
     if (
-      Number(state.items) + page.rows.length > config.maxItems ||
+      Number(state.items) + Number(state.skipped) + page.rows.length > config.maxItems ||
       Number(state.bytes) + page.bytes > config.maxBytes
     )
       return this.pageFailure(id, node.id, visit, 'Page item or byte limit exceeded');
-    if (
-      config.sumField &&
-      !Number.isFinite(
-        page.rows.reduce((sum, row) => sum + Number(row[config.sumField]), Number(state.total)),
-      )
-    )
-      return this.pageFailure(id, node.id, visit, 'Page total exceeds numeric range');
     if (
       page.next !== null &&
       this.#prepare('SELECT 1 FROM seenCursors WHERE runId=? AND node=? AND visit=? AND digest=?').get(
@@ -441,14 +742,35 @@ export class SqliteLedger {
       )
     )
       return this.pageFailure(id, node.id, visit, 'Repeated page cursor');
+    const scope = config.scope ? this.syncScope(id) : undefined;
+    let rows = page.rows;
+    if (scope) {
+      const versions = new Map<string, number>();
+      const last = this.#prepare('SELECT version FROM syncVersions WHERE scope=? AND entity=?');
+      rows = rows.filter((row) => {
+        const entity = String(row.id);
+        const previous = versions.get(entity) ?? Number(last.get(String(scope.scope), entity)?.version ?? -1);
+        if (Number(row.version) <= previous) return false;
+        versions.set(entity, Number(row.version));
+        return true;
+      });
+    }
+    if (
+      config.sumField &&
+      !Number.isFinite(
+        rows.reduce((sum, row) => sum + Number(row[config.sumField]), Number(state.total)),
+      )
+    )
+      return this.pageFailure(id, node.id, visit, 'Page total exceeds numeric range');
     this.#transaction(() => {
+      if (scope) this.#prepare('UPDATE syncScopes SET candidate=? WHERE owner=?').run(page.token, id);
       if (page.next !== null) {
         const digest = createHash('sha256').update(page.next).digest('hex');
         this.#prepare('INSERT INTO seenCursors VALUES(?,?,?,?)').run(id, node.id, visit, digest);
       }
       this.#prepare(
-        'UPDATE pageRuns SET rows=?,next=?,offset=0,bytes=bytes+?,attempts=0,retryAt=NULL WHERE runId=? AND node=? AND visit=?',
-      ).run(JSON.stringify(page.rows), page.next, page.bytes, id, node.id, visit);
+        'UPDATE pageRuns SET rows=?,next=?,offset=0,bytes=bytes+?,skipped=skipped+?,attempts=0,retryAt=NULL WHERE runId=? AND node=? AND visit=?',
+      ).run(JSON.stringify(rows), page.next, page.bytes, page.rows.length - rows.length, id, node.id, visit);
     });
   }
 
@@ -476,6 +798,11 @@ export class SqliteLedger {
     ).run(id, node.id, visit);
     const s = this.pageState(id, node.id, visit);
     if (this.canceled(id)) return;
+    if (s.cursor === null && node.parameters.syncScope) {
+      const scope = this.syncScope(id)!;
+      this.#prepare('UPDATE syncScopes SET token=candidate,candidate=NULL,owner=NULL WHERE owner=?').run(id);
+      this.#nextSync(String(scope.scope));
+    }
     if (s.cursor === null)
       this.#resume(id, {
         reason: 'result',
@@ -507,10 +834,11 @@ export class SqliteLedger {
     const { batchSize, sumField } = pageConfig(node);
     const offset = Number(state.offset);
     const batch = rows.slice(offset, offset + batchSize);
-    const sum = sumField ? batch.reduce((total, row) => total + Number(row[sumField]), 0) : 0;
+    const prior = Number(state.total);
+    const total = sumField ? batch.reduce((sum, row) => sum + Number(row[sumField]), prior) : prior;
     this.#prepare(
-      'UPDATE pageRuns SET offset=offset+?,items=items+?,batches=batches+1,total=total+? WHERE runId=? AND node=? AND visit=?',
-    ).run(batch.length, batch.length, sum, id, node.id, visit);
+      'UPDATE pageRuns SET offset=offset+?,items=items+?,batches=batches+1,total=? WHERE runId=? AND node=? AND visit=?',
+    ).run(batch.length, batch.length, total, id, node.id, visit);
     if (offset + batch.length === rows.length) this.#advancePage(id, node, visit);
     else if (!this.canceled(id)) this.#yieldPage(id);
   }
@@ -521,7 +849,16 @@ export class SqliteLedger {
       FROM calls c JOIN tree t ON c.parent=t.id) SELECT e.runId,e.nodeId,e.visit,e.item,e.key
       FROM effects e JOIN tree t ON e.runId=t.id WHERE e.state='unknown'`,
     ).all(id);
-    return { pages: this.progress(id), calls: this.relations(id), uncertain, canceled: this.canceled(id) };
+    const waiting = this.#prepare(
+      'SELECT s.owner FROM syncQueue q JOIN syncScopes s ON s.scope=q.scope WHERE q.runId=?',
+    ).get(id);
+    return {
+      pages: this.progress(id),
+      calls: this.relations(id),
+      uncertain,
+      canceled: this.canceled(id),
+      ...(waiting && { waitingForSyncRun: waiting.owner }),
+    };
   }
 
   progress(id: string) {
@@ -794,7 +1131,33 @@ export class SqliteLedger {
         throw new Error('External result requires reconciliation');
       const key = String(operation.key);
       this.#prepare("UPDATE effects SET state='unknown', fingerprint=? WHERE key=?").run(fingerprint, key);
-      const result = await send(key);
+      const change = this.#prepare('SELECT firstSend,lifetime FROM syncWork WHERE child=? AND item=?').get(
+        runId,
+        index,
+      );
+      let result: JsonObject;
+      try {
+        if (change) {
+          // Credential lookup can suspend. Check the receiver's window at transport dispatch.
+          const guard = () => {
+            const now = Date.now();
+            if (change.firstSend != null && now >= Number(change.firstSend) + Number(change.lifetime))
+              throw new Error('Receiver key expired; reconcile before retry');
+            if (change.firstSend == null)
+              this.#prepare('UPDATE syncWork SET firstSend=? WHERE child=? AND item=?').run(now, runId, index);
+          };
+          result = await beforeRecordedSend.run(guard, () => send(key));
+        } else result = await send(key);
+      } catch (error) {
+        // An earlier attempt may have reached the receiver even if this attempt never left the host.
+        if (
+          operation.state === 'unsent' &&
+          error instanceof UnsentCredentialError &&
+          this.#canRetryUnsent(runId, nodeId)
+        )
+          this.#prepare("UPDATE effects SET state='unsent' WHERE key=?").run(key);
+        throw error;
+      }
       this.#prepare("UPDATE effects SET state='success',result=? WHERE key=? AND state='unknown'").run(
         JSON.stringify(result),
         key,
@@ -831,11 +1194,22 @@ export class SqliteLedger {
     if (Buffer.byteLength(json) > 1024 * 1024) throw new Error('Reconciliation data exceeds 1 MiB');
     return this.#transaction(() => {
       if (this.get(id)?.state !== 'review') return false;
-      const op = this.#prepare("SELECT mode FROM effects WHERE runId=? AND key=? AND state='unknown'").get(
-        id,
-        key,
-      );
+      const op = this.#prepare(
+        "SELECT mode,item FROM effects WHERE runId=? AND key=? AND state='unknown'",
+      ).get(id, key);
       if (!op || (decision === 'retryKeyed' && (op.mode !== 'keyed' || this.canceled(id)))) return false;
+      const change = this.#prepare('SELECT firstSend,lifetime FROM syncWork WHERE child=? AND item=?').get(
+        id,
+        Number(op.item),
+      );
+      if (
+        decision === 'retryKeyed' &&
+        change?.firstSend != null &&
+        Date.now() >= Number(change.firstSend) + Number(change.lifetime)
+      )
+        return false;
+      if (decision === 'notApplied' && change)
+        this.#prepare('UPDATE syncWork SET firstSend=NULL WHERE child=? AND item=?').run(id, Number(op.item));
       // A keyed retry keeps the unknown state, original fingerprint and key.
       if (decision !== 'retryKeyed') {
         this.#prepare('UPDATE effects SET state=?,result=? WHERE key=?').run(
@@ -901,12 +1275,46 @@ export class SqliteLedger {
         );
         if (request.mode === 'pages') {
           const entry = state.stack[0]!;
+          const r = this.get(state.runId)!;
+          const node = this.publication(r.workflowId, r.revision).workflow.nodes.find(
+            (n) => n.id === entry.nodeId,
+          )!;
+          const { scope, url } = pageConfig(node);
           this.#prepare('INSERT INTO pageRuns(runId,node,visit,created) VALUES(?,?,?,?)').run(
             state.runId,
             entry.nodeId,
             entry.runIndex,
             now,
           );
+          if (scope) {
+            const key = JSON.stringify([r.workflowId, node.id, scope]);
+            const contract = JSON.stringify([
+              url.href,
+              node.credentials ?? {},
+              node.parameters.workflowId,
+              node.parameters.revision,
+            ]);
+            this.#prepare('INSERT OR IGNORE INTO syncScopes(scope,contract) VALUES(?,?)').run(key, contract);
+            if (
+              !this.#prepare(
+                'UPDATE syncScopes SET owner=?,candidate=NULL WHERE scope=? AND contract=? AND owner IS NULL',
+              ).run(r.runId, key, contract).changes
+            ) {
+              const existing = this.#prepare('SELECT contract FROM syncScopes WHERE scope=?').get(key);
+              if (existing?.contract !== contract) {
+                this.#resume(r.runId, {
+                  reason: 'result',
+                  data: {},
+                  failure: 'Sync definition changed; provision a new scope',
+                });
+              } else {
+                this.#prepare('INSERT INTO syncQueue VALUES(?,?)').run(r.runId, key);
+                this.#prepare("UPDATE runs SET state='waiting' WHERE runId=?").run(r.runId);
+                this.#recordPause(r.runId);
+              }
+              return;
+            }
+          }
         }
         if (request.mode === 'return')
           this.#resume(state.runId, { reason: 'result', data: {}, returnPairing: request.pairing });
@@ -993,10 +1401,25 @@ export class SqliteLedger {
       // Leave the claim and journal intact so startup can reconcile the external outcome.
       if (this.#prepare("SELECT 1 FROM effects WHERE runId=? AND state='unknown'").get(receipt.runId))
         throw new Error('Cannot finish a run with an uncertain external outcome');
+      if (summary.status === 'error') this.#archiveHttp(receipt, detail);
+      if (receipt.mode === 'subworkflow' && summary.status === 'error') {
+        const target = this.#recoverableParent(receipt.runId);
+        if (target?.parent.state === 'waiting')
+          this.#archivePage(
+            target.parent,
+            target.node,
+            target.visit,
+            detail.error?.message ?? 'Batch failed',
+            receipt,
+          );
+      }
       const update = this.#prepare(
         `UPDATE runs SET state=?,stoppedAt=?,outcome=?,payload=NULL WHERE runId=? AND state='running'`,
       ).run(interrupted ? 'interrupted' : 'finished', Date.now(), summary.status, receipt.runId);
       if (!update.changes) throw new Error('Run no longer owned');
+      this.#prepare(
+        'UPDATE recoveryPoints SET outcome=? WHERE runId=? AND attempt IS NOT NULL AND outcome IS NULL',
+      ).run(summary.status, receipt.runId);
       this.#prepare('DELETE FROM continuations WHERE runId=?').run(receipt.runId);
       this.#prepare('UPDATE pageRuns SET cursor=NULL,next=NULL,rows=NULL,retryAt=NULL WHERE runId=?').run(
         receipt.runId,
@@ -1008,7 +1431,8 @@ export class SqliteLedger {
       this.#prepare('UPDATE effects SET result=NULL WHERE runId=?').run(receipt.runId);
       const link = this.#prepare('SELECT * FROM calls WHERE child=?').get(receipt.runId);
       const parent = link && this.get(String(link.parent));
-      const settlingCanceledBatch = parent?.state === 'queued' && summary.status === 'success' && this.canceled(parent.runId);
+      const settlingCanceledBatch =
+        parent?.state === 'queued' && summary.status === 'success' && this.canceled(parent.runId);
       if (parent && (parent.state === 'waiting' || settlingCanceledBatch)) {
         const returnId = detail.workflow.nodes.find((n) => n.type === 'draflow.return' && !n.disabled)?.id;
         const returned = detail.tasks.filter((t) => t.nodeId === returnId);
@@ -1028,12 +1452,15 @@ export class SqliteLedger {
         else if (!settlingCanceledBatch) this.#resume(parent.runId, response);
       }
       const policy = detail.workflow.settings.saveExecutionData;
+      if (link && summary.status !== 'error')
+        this.#prepare('DELETE FROM syncWork WHERE child=?').run(receipt.runId);
       if (policy !== 'none' && (policy !== 'error' || summary.status === 'error'))
         this.#append(summary, detail);
     });
   }
 
   recover() {
+    this.#purgeRecovery();
     for (const row of this.#prepare("SELECT runId FROM runs WHERE state='running'").all()) {
       const r = this.get(String(row.runId))!;
       if (
