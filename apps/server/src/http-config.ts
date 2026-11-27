@@ -9,6 +9,20 @@ export function loadHttpAuth(path: string): HttpAuth {
     if (!isPlainObject(data) || !Array.isArray(data.grants) || !isPlainObject(data.environment))
       throw new Error();
     const variables = new Map(Object.entries(data.environment));
+    const profiles = new Map<string, Map<string, string>>();
+    if (data.versions !== undefined) {
+      if (!isPlainObject(data.versions)) throw Error();
+      for (const [id, entries] of Object.entries(data.versions)) {
+        if (!isPlainObject(entries)) throw Error();
+        const versions = new Map<string, string>();
+        for (const [version, variable] of Object.entries(entries)) {
+          if (!/^[A-Za-z0-9_-]{1,64}$/.test(version) || typeof variable !== 'string' || !variable)
+            throw Error();
+          versions.set(version, variable);
+        }
+        profiles.set(id, versions);
+      }
+    }
     const grants: HttpGrant[] = data.grants.map((rule) => {
       if (!isPlainObject(rule)) throw new Error();
       const { workflowId, nodeId, id, origin, kind, header } = rule;
@@ -28,8 +42,9 @@ export function loadHttpAuth(path: string): HttpAuth {
     return {
       ...(typeof data.organization === 'string' && { organization: data.organization }),
       grants,
-      resolve(id) {
-        const name = variables.get(id);
+      versions: Object.fromEntries([...profiles].map(([id, entries]) => [id, [...entries.keys()]])),
+      resolve(id, version) {
+        const name = version === undefined ? variables.get(id) : profiles.get(id)?.get(version);
         return typeof name === 'string' && Object.hasOwn(process.env, name) ? process.env[name] : undefined;
       },
     };

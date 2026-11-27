@@ -1,3 +1,5 @@
+import { operatorSchema, sqliteReviewClock, seedReviewClock } from './operator-schema.js';
+import { OperatorStore } from './operator-store.js';
 import { deliverySchema, ledgerTables, sqliteTriggers } from './ledger-schema.js';
 import { PostgresDatabase, validateOrganization, type SharedOptions } from './postgres.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -67,6 +69,8 @@ function encodeCheckpoint(state: Checkpoint) {
 export class ExecutionLedger {
   readonly #db: DatabaseSync | PostgresDatabase;
   readonly shared?: PostgresDatabase;
+  readonly operators: OperatorStore;
+  #inTransaction = false;
   readonly history: ExecutionStore;
 
   #now() {
@@ -91,6 +95,7 @@ export class ExecutionLedger {
         BEGIN EXCLUSIVE;
         ${ledgerTables}
         ${sqliteTriggers}`);
+        if (organization) this.#db.exec(operatorSchema + sqliteReviewClock + seedReviewClock);
         if (!this.#prepare("SELECT 1 FROM pragma_table_info('active') WHERE name='registration'").get()) {
           this.#db.exec(
             "ALTER TABLE active ADD COLUMN registration TEXT NOT NULL DEFAULT ''; UPDATE active SET registration=lower(hex(randomblob(16)))",
@@ -122,6 +127,12 @@ export class ExecutionLedger {
         throw error;
       }
     }
+    this.operators = new OperatorStore(
+      (sql) => this.#prepare(sql),
+      (fn) => this.#transaction(fn),
+      () => this.#now(),
+      Boolean(this.shared),
+    );
     this.history = {
       append: async (summary, detail) => this.#append(summary, detail),
       list: async (id, status) =>
@@ -161,7 +172,9 @@ export class ExecutionLedger {
 
   #transaction<T>(operation: () => T): T {
     if (this.shared) return this.shared.atomic(operation);
+    if (this.#inTransaction) return operation();
     this.#db.exec('BEGIN IMMEDIATE');
+    this.#inTransaction = true;
     try {
       const result = operation();
       this.#db.exec('COMMIT');
@@ -174,6 +187,8 @@ export class ExecutionLedger {
         /* no active transaction */
       }
       throw error;
+    } finally {
+      this.#inTransaction = false;
     }
   }
 

@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>実行モニター · Draflow</title>
+    <link rel="stylesheet" href="/operator/console.css" />
+    <script type="module" src="/operator/console.js"></script>
+  </head>
+  <body>
+    <header>
+      <b>Draflow</b><span>運用コンソール</span><span id="who"></span
+      ><button id="logout" hidden>ログアウト</button>
+    </header>
+    <main>
+      <h1>実行モニター</h1>
+      <form id="login">
+        <label>組織 ID<input id="org" required autocomplete="off" /></label
+        ><label>アクセストークン<input id="token" required type="password" autocomplete="off" /></label
+        ><button>ログイン</button>
+      </form>
+      <p id="message" role="status"></p>
+      <section id="work" hidden>
+        <p id="monitorError" aria-live="polite" hidden></p>
+        <section aria-label="稼働状況" id="metrics"></section>
+        <div id="alerts" aria-live="polite"></div>
+        <h2 id="runsTitle">実行一覧</h2>
+        <form id="filters">
+          <label>状態<select name="status"></select></label><label>フロー ID<input name="workflow" /></label
+          ><label>公開版<input type="number" min="1" name="revision" /></label
+          ><label>開始（受付日時）<input name="from" type="datetime-local" /></label
+          ><label>終了<input name="to" type="datetime-local" /></label
+          ><label>実行 ID<input name="id" /></label><button>検索</button>
+        </form>
+        <div class="table" role="region" aria-labelledby="runsTitle" tabindex="0">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">フロー / 実行 ID</th>
+                <th scope="col">公開版</th>
+                <th scope="col">状態</th>
+                <th scope="col">受付日時</th>
+              </tr>
+            </thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+        <button id="next" hidden>次の50件</button>
+        <section id="detail" hidden aria-labelledby="detailTitle">
+          <h2 id="detailTitle" tabindex="-1">実行詳細</h2>
+          <div id="record"></div>
+        </section>
+        <details id="auditPanel">
+          <summary>操作の監査履歴</summary>
+          <form id="auditFilter">
+            <label>監査対象 ID<input name="target" /></label><button>監査履歴を検索</button>
+          </form>
+          <ol id="audit"></ol>
+          <button id="olderAudit" hidden>以前の100件</button>
+        </details>
+      </section>
+    </main>
+  </body>
+</html>
