@@ -116,7 +116,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: TommyKammy/Prood
-          ref: 52efef273c206219322c450b24a914d10f4a91d5
+          ref: a70531771b7b3f90123fcde0ccb17117ade8690d
           path: .prood
           persist-credentials: false
       - uses: pnpm/action-setup@v4
