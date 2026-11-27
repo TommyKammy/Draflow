@@ -1,4 +1,5 @@
 import type { NodeType } from '@draflow/core';
+import { webhookNode } from './webhook.js';
 import { filterNode } from './filter.js';
 import { httpRequestNode, httpRequestNodeV2 } from './http.js';
 import { ifNode } from './if.js';
@@ -7,6 +8,7 @@ import { mergeNode } from './merge.js';
 import { noOpNode } from './noop.js';
 import { setNode } from './set.js';
 
+export { webhookNode } from './webhook.js';
 export { filterNode } from './filter.js';
 export { httpRequestNode, httpRequestNodeV2 } from './http.js';
 export { ifNode } from './if.js';
@@ -18,6 +20,7 @@ export * from './helpers.js';
 
 export const standardNodes: NodeType[] = [
   manualTriggerNode,
+  webhookNode,
   noOpNode,
   setNode,
   ifNode,

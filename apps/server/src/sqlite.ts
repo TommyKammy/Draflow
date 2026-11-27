@@ -44,6 +44,15 @@ export class SqliteLedger {
           workflowId TEXT PRIMARY KEY, revision INTEGER NOT NULL,
           FOREIGN KEY(workflowId, revision) REFERENCES publications
         );
+        CREATE TABLE IF NOT EXISTS webhookRoutes (
+          path TEXT PRIMARY KEY, workflowId TEXT NOT NULL REFERENCES active(workflowId) ON DELETE CASCADE,
+          triggerNodeId TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS webhookTestDocuments (workflowId TEXT PRIMARY KEY);
+        CREATE TEMP TABLE testWebhooks (
+          path TEXT PRIMARY KEY, workflowId TEXT NOT NULL, revision INTEGER NOT NULL,
+          triggerNodeId TEXT NOT NULL, expiresAt INTEGER NOT NULL, document TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS runs (
           runId TEXT NOT NULL UNIQUE, workflowId TEXT NOT NULL, revision INTEGER NOT NULL,
           triggerNodeId TEXT NOT NULL, eventKey TEXT, mode TEXT NOT NULL, payload TEXT,
@@ -145,8 +154,53 @@ export class SqliteLedger {
     ).all();
   }
 
-  activate(id: string, revision: number) {
-    this.#prepare('INSERT OR REPLACE INTO active VALUES(?,?)').run(id, revision);
+  activate(id: string, revision: number, routes: { path: string; triggerNodeId: string }[]) {
+    this.#transaction(() => {
+      if (this.#prepare('SELECT 1 FROM webhookTestDocuments WHERE workflowId=?').get(id))
+        throw new Error('Cannot activate a test snapshot');
+      this.#prepare('DELETE FROM webhookRoutes WHERE workflowId=?').run(id);
+      this.#prepare(
+        'INSERT INTO active VALUES(?,?) ON CONFLICT(workflowId) DO UPDATE SET revision=excluded.revision',
+      ).run(id, revision);
+      for (const route of routes) {
+        if (this.#prepare('SELECT 1 FROM webhookRoutes WHERE path=?').get(route.path)) {
+          throw new Error('Webhook route already registered: ' + route.path);
+        }
+        this.#prepare('INSERT INTO webhookRoutes VALUES(?,?,?)').run(route.path, id, route.triggerNodeId);
+      }
+    });
+  }
+
+  registerTestWebhook(
+    path: string,
+    workflow: PublishedWorkflow['workflow'],
+    triggerNodeId: string,
+    expiresAt: number,
+  ) {
+    this.#transaction(() => {
+      this.#prepare('DELETE FROM testWebhooks WHERE expiresAt<=?').run(Date.now());
+      this.#prepare('INSERT INTO testWebhooks VALUES(?,?,1,?,?,?)').run(
+        path,
+        workflow.id,
+        triggerNodeId,
+        expiresAt,
+        JSON.stringify(workflow),
+      );
+    });
+  }
+
+  webhook(path: string) {
+    const row = this.#prepare(
+      `SELECT workflowId,revision,triggerNodeId FROM webhookRoutes JOIN active USING(workflowId) WHERE path=?
+      UNION ALL SELECT workflowId,revision,triggerNodeId FROM testWebhooks WHERE path=? AND expiresAt>?`,
+    ).get(path, path, Date.now());
+    return (
+      row && {
+        workflowId: String(row.workflowId),
+        revision: Number(row.revision),
+        triggerNodeId: String(row.triggerNodeId),
+      }
+    );
   }
   deactivate(id: string) {
     this.#prepare('DELETE FROM active WHERE workflowId=?').run(id);
@@ -159,11 +213,13 @@ export class SqliteLedger {
     capacity: number,
     ttl: number,
     validate: (revision: number) => void,
+    pinnedRevision?: number,
   ): string {
     return this.#transaction(() => {
-      const active = this.#prepare('SELECT revision FROM active WHERE workflowId=?').get(id);
-      if (!active) throw new Error(`Inactive workflow: ${id}`);
-      const revision = Number(active.revision);
+      const selected =
+        pinnedRevision ?? this.#prepare('SELECT revision FROM active WHERE workflowId=?').get(id)?.revision;
+      if (selected == null) throw new Error(`Inactive workflow: ${id}`);
+      const revision = Number(selected);
       validate(revision);
       const now = Date.now();
       if (event.key !== undefined) {
@@ -216,6 +272,16 @@ export class SqliteLedger {
       'SELECT runId FROM deliveries WHERE workflowId=? AND triggerNodeId=? AND eventKey=?',
     ).get(workflowId, triggerNodeId, eventKey);
     return delivery && this.get(String(delivery.runId));
+  }
+
+  /** Called inside the admission transaction, so rejected test requests leave no durable draft. */
+  retainTestSnapshot(path: string, id: string) {
+    if (this.#prepare('SELECT 1 FROM webhookTestDocuments WHERE workflowId=?').get(id)) return;
+    this.#prepare(
+      `INSERT INTO publications(workflowId,revision,document)
+      SELECT workflowId,revision,document FROM testWebhooks WHERE path=? AND workflowId=?`,
+    ).run(path, id);
+    this.#prepare('INSERT INTO webhookTestDocuments VALUES(?)').run(id);
   }
 
   claim() {

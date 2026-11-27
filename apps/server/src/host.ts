@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { setImmediate as yieldToHost } from 'node:timers/promises';
 import { isPlainObject, type ExecutionEngineOptions, type Workflow } from '@draflow/core';
 import { MemoryRuntime, type TriggerEvent } from '@draflow/runtime';
@@ -14,9 +15,13 @@ interface HostOptions extends Omit<ExecutionEngineOptions, 'credentialFetch'> {
   onWorkerError?: (error: unknown) => void;
 }
 
+export class WebhookGone extends Error {}
+
 export class NodeHost {
   readonly #ledger: SqliteLedger;
   readonly #engine: ExecutionEngineOptions;
+  // Only in-flight uploads need to distinguish successive activations of the same revision.
+  readonly #webhookActivations = new Map<string, { revision: number; token: symbol }>();
   readonly #capacity: number;
   readonly #ttl: number;
   #stopping = false;
@@ -36,7 +41,11 @@ export class NodeHost {
     }
     this.#engine = {
       ...options,
-      credentialFetch: serverHttp(options.fetch ?? fetch, options.maxHttpResponseBytes ?? 1024 * 1024, options.httpAuth),
+      credentialFetch: serverHttp(
+        options.fetch ?? fetch,
+        options.maxHttpResponseBytes ?? 1024 * 1024,
+        options.httpAuth,
+      ),
     };
     this.#ledger = new SqliteLedger(path, budget);
     try {
@@ -80,13 +89,86 @@ export class NodeHost {
 
   activate(id: string, revision: number) {
     this.#ready();
-    new MemoryRuntime(this.#engine).restore(this.#ledger.publication(id, revision));
-    this.#ledger.activate(id, revision);
+    const publication = this.#ledger.publication(id, revision);
+    new MemoryRuntime(this.#engine).restore(publication);
+    const routes = publication.workflow.nodes
+      .filter((n) => !n.disabled && n.type === 'draflow.webhook')
+      .map((node) => {
+        const path = node.parameters.path;
+        if (typeof path !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(path))
+          throw new Error('Invalid Webhook path');
+        return { path: '/webhook/' + path, triggerNodeId: node.id };
+      });
+    this.#ledger.activate(id, revision, routes);
+    if (this.#webhookActivations.get(id)?.revision !== revision) this.#webhookActivations.delete(id);
+  }
+
+  listenTest(workflow: Workflow, triggerNodeId: string, ttlMs = 60_000) {
+    this.#ready();
+    if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0 || ttlMs > 86_400_000)
+      throw new Error('Invalid test URL lifetime');
+    const token = randomUUID();
+    const path = '/webhook-test/' + token;
+    const workflowId = 'webhook-test-' + token;
+    const runtime = new MemoryRuntime(this.#engine);
+    runtime.saveDraft({ ...workflow, id: workflowId });
+    const snapshot = runtime.publish(workflowId).workflow;
+    if (!snapshot.nodes.some((n) => n.id === triggerNodeId && n.type === 'draflow.webhook' && !n.disabled)) {
+      throw new Error('Expected an enabled Webhook node');
+    }
+    const expiresAt = Date.now() + ttlMs;
+    this.#ledger.registerTestWebhook(path, snapshot, triggerNodeId, expiresAt);
+    return { path, workflowId, expiresAt };
+  }
+
+  webhook(path: string) {
+    this.#ready();
+    const route = this.#ledger.webhook(path);
+    if (!route) return undefined;
+    // A test URL already has a unique, non-reusable session ID.
+    if (path.startsWith('/webhook-test/')) return { ...route, registration: route.workflowId };
+    let activation = this.#webhookActivations.get(route.workflowId);
+    if (!activation) {
+      activation = { revision: route.revision, token: Symbol() };
+      this.#webhookActivations.set(route.workflowId, activation);
+    }
+    return { ...route, registration: activation.token };
+  }
+
+  acceptWebhook(
+    path: string,
+    target: NonNullable<ReturnType<NodeHost['webhook']>>,
+    event: TriggerEvent,
+  ) {
+    this.#ready();
+    const runId = this.#ledger.accept(
+      target.workflowId,
+      target.triggerNodeId,
+      { ...event, mode: 'webhook' },
+      this.#capacity,
+      this.#ttl,
+      () => {
+        const current = this.webhook(path);
+        if (
+          !current ||
+          current.registration !== target.registration ||
+          current.workflowId !== target.workflowId ||
+          current.revision !== target.revision ||
+          current.triggerNodeId !== target.triggerNodeId
+        )
+          throw new WebhookGone();
+        if (path.startsWith('/webhook-test/')) this.#ledger.retainTestSnapshot(path, target.workflowId);
+      },
+      target.revision,
+    );
+    this.#wake();
+    return runId;
   }
 
   deactivate(id: string) {
     this.#ready();
     this.#ledger.deactivate(id);
+    this.#webhookActivations.delete(id);
   }
 
   accept(id: string, trigger: string, event: Omit<TriggerEvent, 'runId'>): string {

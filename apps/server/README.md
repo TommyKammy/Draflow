@@ -46,3 +46,34 @@ For the CLI, set `DRAFLOW_HTTP_AUTH_FILE` to a server-local JSON file and popula
 Use `"kind": "bearer"` for an Authorization bearer token. Embedded hosts can pass `httpAuth: { grants, resolve(id) }` to NodeHost. The transport checks the workflow, node, slot and exact origin before calling the provider. Authenticated requests use HTTPS (loopback HTTP is supported for local services), reject conflicting credential headers and disable redirects.
 
 The server limits each standard HTTP response to 1 MiB by default. Configure `maxHttpResponseBytes` or `DRAFLOW_HTTP_MAX_RESPONSE_BYTES` to override it. Both v1 and v2 count streamed body bytes and cancel oversized responses, including error bodies. A successful response supplies its ordinary business data to subsequent nodes and the existing execution-history policy. A response reflecting the credential value in text or a decoded JSON key/value fails before reaching workflow output. Server-side failures retain the HTTP status or a diagnostic category; upstream error bodies, status text, response headers, transport exceptions and provider exceptions are excluded from history.
+
+## Webhook intake
+
+Add a `draflow.webhook` v1 trigger with a literal `parameters.path` such as `orders`. Use 1–100 ASCII letters, digits, hyphens or underscores. Publishing saves the document. Activating it registers its enabled Webhook nodes as `POST /webhook/<path>`. Activation replaces the document's routes atomically. A duplicate path rejects the entire activation and leaves the previous routes serving. Deactivation removes its routes. Active production routes survive restart. An upload must finish within the same activation. Deactivation or a revision switch invalidates pending uploads, including when the original revision is later restored. Repeating activation of the current revision preserves them.
+
+Enable the CLI listener by setting `DRAFLOW_WEBHOOK_PORT` and `DRAFLOW_WEBHOOK_SECRET` before starting the host. The listener binds to loopback by default; `DRAFLOW_WEBHOOK_HOST` changes the bind address. The CLI uses one signing key for its senders. Embedders can call `createWebhookServer(host, { signingKey, maxBodyBytes })` with a key or a function that selects a key by exact request path. The listener resolves the signing key after the bounded body has arrived, so a rotation applies to deliveries still uploading. Management operations remain on the trusted CLI or host API.
+
+For a test delivery, send the CLI operation `listenTest` with the draft `workflow`, its `triggerNodeId` and optionally `ttlMs` (default 60 seconds, maximum one day). The returned `path` is a unique `/webhook-test/<token>`. Its `workflowId` identifies the isolated test snapshot for history and credential grants. Arming a test does not activate the draft or inherit production grants. Test URLs expire on timeout or restart. Already accepted test jobs retain their snapshot for recovery.
+
+Sign the exact raw UTF-8 JSON bytes. With Node's `createHmac` from `node:crypto`, a sender can use:
+
+```js
+const bytes = Buffer.from(JSON.stringify({ order: 42 }));
+const path = '/webhook/orders';
+const delivery = 'order-created-42';
+const signature = createHmac('sha256', signingKey)
+  .update(path + '\n' + delivery + '\n').update(bytes).digest('hex');
+const response = await fetch(origin + path, {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'X-Draflow-Delivery': delivery,
+    'X-Draflow-Signature': 'sha256=' + signature,
+  },
+  body: bytes,
+});
+```
+
+Use the returned test path verbatim when signing test requests. The optional delivery ID is 1–256 printable non-space ASCII characters. To send an independent event, omit its header and sign with an empty delivery field. The workflow receives a single item with `json.body` containing the verified JSON value. Signatures and HTTP headers are excluded from the workflow.
+
+A committed acceptance returns HTTP 202 and `{"runId":"…"}`. Redelivery of a signed event ID follows the host's deduplication window. Both intake modes share the bounded worker queue and use independent deduplication scopes. Invalid JSON or delivery headers return 400, failed signatures 401, unknown or expired routes 404, unsupported methods 405 and oversized bodies 413. The raw body limit defaults to 1 MiB and can be changed with `DRAFLOW_WEBHOOK_MAX_BODY_BYTES`. Queue or storage unavailability returns 503.
