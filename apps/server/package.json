@@ -12,7 +12,8 @@
     "@draflow/core": "workspace:*",
     "@draflow/nodes": "workspace:*",
     "@draflow/runtime": "workspace:*",
-    "@draflow/storage": "workspace:*"
+    "@draflow/storage": "workspace:*",
+    "@js-temporal/polyfill": "^0.5.1"
   },
   "devDependencies": {
     "@types/node": "22"

@@ -3,6 +3,14 @@ import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import type { ExecutionDetail, ExecutionStore, ExecutionSummary } from '@draflow/storage';
 import type { PublishedWorkflow, TriggerEvent } from '@draflow/runtime';
 
+import type { Schedule } from './schedule.js';
+
+export class QueueFull extends Error {
+  constructor() {
+    super('Queue full');
+  }
+}
+
 export type RunState = 'queued' | 'running' | 'finished' | 'interrupted';
 export interface Receipt {
   runId: string;
@@ -44,6 +52,12 @@ export class SqliteLedger {
           workflowId TEXT PRIMARY KEY, revision INTEGER NOT NULL,
           FOREIGN KEY(workflowId, revision) REFERENCES publications
         );
+        CREATE TABLE IF NOT EXISTS schedules (
+          workflowId TEXT NOT NULL REFERENCES active(workflowId) ON DELETE CASCADE,
+          triggerNodeId TEXT NOT NULL, spec TEXT NOT NULL, nextAt INTEGER NOT NULL,
+          PRIMARY KEY(workflowId,triggerNodeId)
+        );
+        CREATE INDEX IF NOT EXISTS scheduleDue ON schedules(nextAt);
         CREATE TABLE IF NOT EXISTS webhookRoutes (
           path TEXT PRIMARY KEY, workflowId TEXT NOT NULL REFERENCES active(workflowId) ON DELETE CASCADE,
           triggerNodeId TEXT NOT NULL
@@ -154,14 +168,30 @@ export class SqliteLedger {
     ).all();
   }
 
-  activate(id: string, revision: number, routes: { path: string; triggerNodeId: string }[]) {
+  activate(
+    id: string,
+    revision: number,
+    routes: { path: string; triggerNodeId: string }[],
+    schedules: { triggerNodeId: string; spec: Schedule; nextAt: number }[],
+  ) {
     this.#transaction(() => {
       if (this.#prepare('SELECT 1 FROM webhookTestDocuments WHERE workflowId=?').get(id))
         throw new Error('Cannot activate a test snapshot');
+      if (this.#prepare('SELECT revision FROM active WHERE workflowId=?').get(id)?.revision === revision)
+        return;
       this.#prepare('DELETE FROM webhookRoutes WHERE workflowId=?').run(id);
       this.#prepare(
         'INSERT INTO active VALUES(?,?) ON CONFLICT(workflowId) DO UPDATE SET revision=excluded.revision',
       ).run(id, revision);
+      this.#prepare('DELETE FROM schedules WHERE workflowId=?').run(id);
+      for (const schedule of schedules) {
+        this.#prepare('INSERT INTO schedules VALUES(?,?,?,?)').run(
+          id,
+          schedule.triggerNodeId,
+          JSON.stringify(schedule.spec),
+          schedule.nextAt,
+        );
+      }
       for (const route of routes) {
         if (this.#prepare('SELECT 1 FROM webhookRoutes WHERE path=?').get(route.path)) {
           throw new Error('Webhook route already registered: ' + route.path);
@@ -169,6 +199,48 @@ export class SqliteLedger {
         this.#prepare('INSERT INTO webhookRoutes VALUES(?,?,?)').run(route.path, id, route.triggerNodeId);
       }
     });
+  }
+
+  nextScheduleTime() {
+    const value = this.#prepare('SELECT MIN(nextAt) AS time FROM schedules').get()!.time;
+    return value === null ? undefined : Number(value);
+  }
+
+  dueSchedules(now: number) {
+    return this.#prepare('SELECT * FROM schedules WHERE nextAt<=? ORDER BY nextAt,workflowId,triggerNodeId')
+      .all(now)
+      .map((row) => ({
+        workflowId: String(row.workflowId),
+        triggerNodeId: String(row.triggerNodeId),
+        spec: JSON.parse(String(row.spec)) as Schedule,
+        nextAt: Number(row.nextAt),
+      }));
+  }
+
+  acceptSchedule(
+    id: string,
+    trigger: string,
+    scheduledAt: number,
+    nextAt: number,
+    capacity: number,
+    ttl: number,
+  ) {
+    const stamp = new Date(scheduledAt).toISOString();
+    return this.accept(
+      id,
+      trigger,
+      { key: stamp, items: [{ json: { scheduledAt: stamp } }] },
+      capacity,
+      ttl,
+      () => {
+        // Moving the cursor and admitting its work either both commit or both roll back.
+        this.#prepare('UPDATE schedules SET nextAt=? WHERE workflowId=? AND triggerNodeId=?').run(
+          nextAt,
+          id,
+          trigger,
+        );
+      },
+    );
   }
 
   registerTestWebhook(
@@ -231,7 +303,7 @@ export class SqliteLedger {
         if (existing) return String(existing.runId);
       }
       if (Number(this.#prepare("SELECT COUNT(*) AS n FROM runs WHERE state='queued'").get()!.n) >= capacity) {
-        throw new Error('Queue full');
+        throw new QueueFull();
       }
       const runId = randomUUID();
       // The queued ledger row is the work item. Neither record can exist alone.
