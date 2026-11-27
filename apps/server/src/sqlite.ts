@@ -1697,7 +1697,7 @@ export class SqliteLedger {
       if (
         !interrupted &&
         receipt.mode !== 'subworkflow' &&
-        detail.workflow.nodes.some((n) => compensationSpec(n))
+        detail.workflow.nodes.some((n) => !n.disabled && compensationSpec(n))
       ) {
         const uncertainChild = this.#prepare(
           `WITH RECURSIVE descendants(id) AS (
