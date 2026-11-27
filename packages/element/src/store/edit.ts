@@ -1,3 +1,4 @@
+import { remapReferences } from './references.js';
 import { groupsOf, withGroups, type Group } from './groups.js';
 import { editNote, type Note } from './notes.js';
 import { createConnection, createId, createNode, type Connection, type Item, type NodePortRef, type NodeType, type WorkflowNode, type Workflow } from '@draflow/core';
@@ -22,6 +23,7 @@ export function creatorPorts(type: NodeType, placement: Placement) {
 }
 
 export type Edit =
+  | { type: 'rename'; id: string; name: string }
   | { type: 'group'; id: string; value?: Group }
   | { type: 'note'; id: string; value?: Note }
   | { type: 'configure'; node: WorkflowNode; removeErrorOutput?: boolean; removePin?: boolean }
@@ -50,6 +52,12 @@ export function fragment(workflow: Workflow, ids: Set<string>): Workflow {
 
 export function applyEdit(w: Workflow, edit: Edit): Workflow {
   switch (edit.type) {
+    case 'rename': {
+      const node = w.nodes.find(n => n.id === edit.id);
+      if (!node || !edit.name.trim() || w.nodes.some(n => n.name === edit.name)) return w;
+      const names = new Map([[node.name, edit.name]]);
+      return { ...w, nodes: w.nodes.map(n => remapReferences(n === node ? { ...n, name: edit.name } : n, names)) };
+    }
     case 'group': {
       const groups = groupsOf(w);
       if (!groups) return w;
@@ -123,7 +131,8 @@ export function applyEdit(w: Workflow, edit: Edit): Workflow {
       if (!src.nodes.length) return w;
       const ids = new Map(src.nodes.map(node => [node.id, createId('node')]));
       const names = new Set(w.nodes.map(n => n.name));
-      const nodes = src.nodes.map(n => ({ ...n, id: ids.get(n.id)!, name: uniqueName(n.name, names),
+      const renamed = new Map(src.nodes.map(n => [n.name, uniqueName(n.name, names)]));
+      const nodes = src.nodes.map(n => ({ ...remapReferences(n, renamed), id: ids.get(n.id)!, name: renamed.get(n.name)!,
         position: { x: n.position.x + 32, y: n.position.y + 32 } }));
       const connections = src.connections.flatMap(c => {
         const from = ids.get(c.from.node), to = ids.get(c.to.node);

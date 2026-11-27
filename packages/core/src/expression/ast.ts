@@ -15,6 +15,8 @@ export interface IdentifierExpr extends SourceRange {
 
 export interface MemberExpr extends SourceRange {
   type: 'Member';
+  /** Offset of the member access operator, after any parentheses around the receiver. */
+  accessStart: number;
   object: Expr;
   property: Expr;
   computed: boolean;

@@ -44,7 +44,10 @@ select an edge, then choose **接続にノードを挿入**. One Undo restores t
 card or an edge and press Delete to remove it. The toolbar supports Undo and Redo;
 Ctrl/Cmd+D duplicates a selection and Ctrl/Cmd+C/V copies and pastes a subgraph.
 Double-click a card or focus it and press Enter to open its details. Edit parameters
-or settings, then choose **Execute step** to run through that node. Input and Output
+or settings. **Rename node** updates literal node references throughout the workflow in
+one undoable edit. Duplicating or pasting connected nodes updates references within
+the copied selection. Expressions that calculate a node name at runtime keep their
+original logic. Choose **Execute step** to run through that node. Input and Output
 show each port separately. Choose a run, port, and item to inspect its data in
 Schema, Table, or JSON. Table pages contain up to 100 rows.
 
