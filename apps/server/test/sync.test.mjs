@@ -22,6 +22,10 @@ function fixture(t, fetch, configure = () => {}, options = {}) {
       registry: new NodeRegistry().registerAll(standardNodes),
       fetch,
       ...options,
+      ...(process.env.DRAFLOW_TEST_SHARED && {
+        shared: { organization: dir, connectionString: process.env.DRAFLOW_TEST_SHARED, pollMs: 60 },
+        ...(options.httpAuth && { httpAuth: { ...options.httpAuth, organization: dir } }),
+      }),
     });
     t.after(() => h.close());
     return h;
@@ -36,8 +40,8 @@ function fixture(t, fetch, configure = () => {}, options = {}) {
   return { h, open, child, parent, db: join(dir, 'host.db') };
 }
 const start = (h, key) => h.accept('order-import', 'schedule', { key, items: [{ json: {} }] });
-async function outcome(h, id) {
-  await until(() => h.receipt(id).state === 'finished');
+async function outcome(h, id, timeoutMs) {
+  await until(() => h.receipt(id).state === 'finished', timeoutMs);
   return h.receipt(id).outcome;
 }
 
@@ -379,7 +383,10 @@ test('a delayed credential lookup cannot send a retry beyond the receiver key li
       },
     ],
     resolve: async () => {
-      if (++resolutions === 2) offset += 2000;
+      if (++resolutions === 2) {
+        if (process.env.DRAFLOW_TEST_SHARED) await new Promise((resolve) => setTimeout(resolve, 1100));
+        else offset += 2000;
+      }
       return 'credential-12345';
     },
   };
@@ -571,7 +578,9 @@ test('parallel pages retain completed siblings across restart and duplicate redr
       if (init.method === 'POST') {
         const id = JSON.parse(init.body).id;
         peak = Math.max(peak, ++active);
-        await new Promise((resolve) => setTimeout(resolve, Number(id) === 1 ? 30 : 1));
+        const firstInBatch = (Number(id) - 1) % 25 === 0;
+        const pause = process.env.DRAFLOW_TEST_SHARED && firstInBatch ? 200 : 1;
+        await new Promise((resolve) => setTimeout(resolve, Number(id) === 1 ? pause + 100 : pause));
         active--;
         sent.push(id);
         if (Number(id) % 25 === 0) completed.push(Number(id));
@@ -603,7 +612,7 @@ test('parallel pages retain completed siblings across restart and duplicate redr
   fail = false;
   const attempt = restored.redrive(id, point.failure);
   assert.equal(restored.redrive(id, point.failure), attempt);
-  assert.equal(await outcome(restored, id), 'success');
+  assert.equal(await outcome(restored, id, 90000), 'success');
   assert.equal(restored.relations(id).length, 41);
   assert.equal(restored.progress(id)[0].total, 1003);
   assert.equal(peak, 3);
@@ -637,7 +646,8 @@ test('two parallel imports share host slots and serialize versions of a business
         totalPeak,
         [...active.values()].reduce((a, b) => a + b, 0),
       );
-      await new Promise((r) => setTimeout(r, version === 1 ? 8 : 1));
+      // Give the other workers time to claim their batches over a real DB connection.
+      await new Promise((resolve) => setTimeout(resolve, process.env.DRAFLOW_TEST_SHARED ? 200 : 8));
       const sequence = versions.get(id) ?? [];
       sequence.push(version);
       versions.set(id, sequence);
@@ -656,7 +666,7 @@ test('two parallel imports share host slots and serialize versions of a business
   h.activate(second.id, h.publish(second));
   const a = start(h, 'a'),
     b = h.accept(second.id, 'schedule', { items: [{ json: {} }] });
-  assert.deepEqual(await Promise.all([outcome(h, a), outcome(h, b)]), ['success', 'success']);
+  assert.deepEqual(await Promise.all([outcome(h, a, 30000), outcome(h, b, 30000)]), ['success', 'success']);
   assert.equal(totalPeak, 3);
   assert.deepEqual([...peaks.values()], [2, 2]);
   for (const scope of peaks.keys()) assert.deepEqual(versions.get(scope + '0'), [1, 2]);
@@ -770,7 +780,7 @@ test('a sequential import respects occupied host batch slots', async (t) => {
   const a = start(h, 'parallel');
   await until(() => active === 2);
   const b = h.accept(serial.id, 'schedule', { items: [{ json: {} }] });
-  assert.deepEqual(await Promise.all([outcome(h, a), outcome(h, b)]), ['success', 'success']);
+  assert.deepEqual(await Promise.all([outcome(h, a, 30000), outcome(h, b, 30000)]), ['success', 'success']);
   assert.equal(peak, 2);
 });
 

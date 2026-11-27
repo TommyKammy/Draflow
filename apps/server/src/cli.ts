@@ -6,16 +6,37 @@ import { loadHttpAuth } from './http-config.js';
 import { createWebhookServer } from './webhook.js';
 import { NodeHost } from './host.js';
 
-const path = process.argv[2];
+const path = process.argv[2] ?? (process.env.DRAFLOW_POSTGRES_URL ? ':memory:' : undefined);
 if (!path) throw new Error('Usage: node dist/cli.js DATABASE');
 const authPath = process.env.DRAFLOW_HTTP_AUTH_FILE;
 const httpAuth = authPath ? loadHttpAuth(authPath) : undefined;
 const host = new NodeHost(path, {
-  ...(process.env.DRAFLOW_MAX_PARALLEL_BATCHES !== undefined &&
-    { maxParallelBatches: Number(process.env.DRAFLOW_MAX_PARALLEL_BATCHES) }),
+  ...(process.env.DRAFLOW_MAX_PARALLEL_BATCHES !== undefined && {
+    maxParallelBatches: Number(process.env.DRAFLOW_MAX_PARALLEL_BATCHES),
+  }),
+  ...(process.env.DRAFLOW_ORGANIZATION && { organization: process.env.DRAFLOW_ORGANIZATION }),
+  ...(process.env.DRAFLOW_POSTGRES_URL && {
+    shared: {
+      connectionString: process.env.DRAFLOW_POSTGRES_URL,
+      organization: process.env.DRAFLOW_ORGANIZATION ?? '',
+      role: (process.env.DRAFLOW_ROLE ?? 'all') as 'all' | 'intake' | 'scheduler' | 'worker',
+      ...(process.env.DRAFLOW_LEASE_MS && { leaseMs: Number(process.env.DRAFLOW_LEASE_MS) }),
+      ...(process.env.DRAFLOW_POLL_MS && { pollMs: Number(process.env.DRAFLOW_POLL_MS) }),
+      ...(process.env.DRAFLOW_ORG_ACTIVE_RUNS && {
+        maxActiveRuns: Number(process.env.DRAFLOW_ORG_ACTIVE_RUNS),
+      }),
+      ...(process.env.DRAFLOW_TARGET_CONCURRENCY && {
+        maxTargetRequests: Number(process.env.DRAFLOW_TARGET_CONCURRENCY),
+      }),
+      ...(process.env.DRAFLOW_RATE_ACCOUNTS && {
+        rateAccounts: JSON.parse(process.env.DRAFLOW_RATE_ACCOUNTS),
+      }),
+    },
+  }),
   ...(httpAuth && { httpAuth }),
-  ...(process.env.DRAFLOW_HTTP_MAX_RESPONSE_BYTES !== undefined &&
-    { maxHttpResponseBytes: Number(process.env.DRAFLOW_HTTP_MAX_RESPONSE_BYTES) }),
+  ...(process.env.DRAFLOW_HTTP_MAX_RESPONSE_BYTES !== undefined && {
+    maxHttpResponseBytes: Number(process.env.DRAFLOW_HTTP_MAX_RESPONSE_BYTES),
+  }),
   registry: new NodeRegistry().registerAll(standardNodes),
   onWorkerError(error) {
     console.error(error);
@@ -23,11 +44,15 @@ const host = new NodeHost(path, {
   },
 });
 const webhookPort = process.env.DRAFLOW_WEBHOOK_PORT;
-const webhooks = webhookPort === undefined ? undefined : createWebhookServer(host, {
-  signingKey: process.env.DRAFLOW_WEBHOOK_SECRET ?? '',
-  ...(process.env.DRAFLOW_WEBHOOK_MAX_BODY_BYTES !== undefined &&
-    { maxBodyBytes: Number(process.env.DRAFLOW_WEBHOOK_MAX_BODY_BYTES) }),
-});
+const webhooks =
+  webhookPort === undefined
+    ? undefined
+    : createWebhookServer(host, {
+        signingKey: process.env.DRAFLOW_WEBHOOK_SECRET ?? '',
+        ...(process.env.DRAFLOW_WEBHOOK_MAX_BODY_BYTES !== undefined && {
+          maxBodyBytes: Number(process.env.DRAFLOW_WEBHOOK_MAX_BODY_BYTES),
+        }),
+      });
 if (webhooks) {
   webhooks.listen(Number(webhookPort), process.env.DRAFLOW_WEBHOOK_HOST ?? '127.0.0.1');
 }
@@ -62,7 +87,13 @@ try {
           break;
         case 'reloadHttpAuth':
           if (!authPath || !httpAuth) throw new Error('DRAFLOW_HTTP_AUTH_FILE is not configured');
-          Object.assign(httpAuth, loadHttpAuth(authPath));
+          const replacement = loadHttpAuth(authPath);
+          if (
+            process.env.DRAFLOW_ORGANIZATION &&
+            replacement.organization !== process.env.DRAFLOW_ORGANIZATION
+          )
+            throw Error('HTTP credential organization mismatch');
+          Object.assign(httpAuth, replacement);
           break;
         case 'listenTest':
           result = host.listenTest(q.workflow, q.triggerNodeId, q.ttlMs);

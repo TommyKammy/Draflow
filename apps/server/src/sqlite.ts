@@ -1,5 +1,7 @@
+import { deliverySchema, ledgerTables, sqliteTriggers } from './ledger-schema.js';
+import { PostgresDatabase, validateOrganization, type SharedOptions } from './postgres.js';
 import { createHash, randomUUID } from 'node:crypto';
-import { DatabaseSync, type StatementSync } from 'node:sqlite';
+import { DatabaseSync } from 'node:sqlite';
 import type { ExecutionDetail, ExecutionStore, ExecutionSummary } from '@draflow/storage';
 import type { PublishedWorkflow, TriggerEvent } from '@draflow/runtime';
 
@@ -46,11 +48,6 @@ export interface Receipt {
 // Scheduled instants stay reserved for the lifetime of the receipt, including after reactivation.
 const noExpiry = -1;
 
-const deliverySchema = `CREATE TABLE IF NOT EXISTS deliveries (
-  workflowId TEXT, triggerNodeId TEXT, eventKey TEXT, source TEXT NOT NULL, expiresAt INTEGER NOT NULL,
-  runId TEXT NOT NULL REFERENCES runs(runId), PRIMARY KEY(workflowId, triggerNodeId, eventKey, source)
-);`;
-
 const fields =
   'runId, workflowId, revision, triggerNodeId, eventKey, mode, state, acceptedAt, startedAt, stoppedAt, outcome';
 
@@ -67,161 +64,63 @@ function encodeCheckpoint(state: Checkpoint) {
   return json;
 }
 
-export class SqliteLedger {
-  readonly #db: DatabaseSync;
+export class ExecutionLedger {
+  readonly #db: DatabaseSync | PostgresDatabase;
+  readonly shared?: PostgresDatabase;
   readonly history: ExecutionStore;
+
+  #now() {
+    return this.shared?.now() ?? Date.now();
+  }
 
   constructor(
     path: string,
     private readonly maxDetailBytes: number,
     private readonly maxCallDepth = 8,
+    shared?: SharedOptions,
+    organization?: string,
   ) {
-    this.#db = new DatabaseSync(path);
-    try {
-      // Keep the writer lock until close. Only the owner may recover running jobs.
-      this.#db.exec(`PRAGMA locking_mode=EXCLUSIVE;
+    if (organization !== undefined) validateOrganization(organization);
+    this.#db = shared ? (this.shared = new PostgresDatabase(shared)) : new DatabaseSync(path);
+    if (!shared) {
+      try {
+        // Keep the writer lock until close. Only the owner may recover running jobs.
+        this.#db.exec(`PRAGMA locking_mode=EXCLUSIVE;
         PRAGMA foreign_keys=ON;
         PRAGMA synchronous=FULL;
         BEGIN EXCLUSIVE;
-        CREATE TABLE IF NOT EXISTS publications (
-          workflowId TEXT, revision INTEGER, document TEXT NOT NULL,
-          PRIMARY KEY(workflowId, revision)
-        );
-        CREATE TABLE IF NOT EXISTS active (
-          workflowId TEXT PRIMARY KEY, revision INTEGER NOT NULL,
-          FOREIGN KEY(workflowId, revision) REFERENCES publications
-        );
-        CREATE TABLE IF NOT EXISTS schedules (
-          workflowId TEXT NOT NULL REFERENCES active(workflowId) ON DELETE CASCADE,
-          triggerNodeId TEXT NOT NULL, spec TEXT NOT NULL, nextAt INTEGER NOT NULL,
-          PRIMARY KEY(workflowId,triggerNodeId)
-        );
-        CREATE INDEX IF NOT EXISTS scheduleDue ON schedules(nextAt);
-        CREATE TABLE IF NOT EXISTS webhookRoutes (
-          path TEXT PRIMARY KEY, workflowId TEXT NOT NULL REFERENCES active(workflowId) ON DELETE CASCADE,
-          triggerNodeId TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS webhookTestDocuments (workflowId TEXT PRIMARY KEY);
-        CREATE TEMP TABLE testWebhooks (
-          path TEXT PRIMARY KEY, workflowId TEXT NOT NULL, revision INTEGER NOT NULL,
-          triggerNodeId TEXT NOT NULL, expiresAt INTEGER NOT NULL, document TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS runs (
-          runId TEXT NOT NULL UNIQUE, workflowId TEXT NOT NULL, revision INTEGER NOT NULL,
-          triggerNodeId TEXT NOT NULL, eventKey TEXT, mode TEXT NOT NULL, payload TEXT,
-          state TEXT NOT NULL, acceptedAt INTEGER NOT NULL, startedAt INTEGER, stoppedAt INTEGER, outcome TEXT,
-          FOREIGN KEY(workflowId, revision) REFERENCES publications
-        );
-        CREATE INDEX IF NOT EXISTS queue ON runs(state);
-        CREATE TABLE IF NOT EXISTS continuations (
-          runId TEXT PRIMARY KEY REFERENCES runs(runId), checkpoint TEXT NOT NULL,
-          token TEXT NOT NULL, mode TEXT NOT NULL, dueAt INTEGER NOT NULL, response TEXT
-        );
-        CREATE INDEX IF NOT EXISTS continuationDue ON continuations(dueAt) WHERE mode IN ('event','time') AND response IS NULL;
-        CREATE TABLE IF NOT EXISTS effects (
-          runId TEXT REFERENCES runs(runId), nodeId TEXT, visit INTEGER, item INTEGER, key TEXT UNIQUE NOT NULL,
-          fingerprint TEXT NOT NULL, mode TEXT NOT NULL, state TEXT NOT NULL, result TEXT,
-          PRIMARY KEY(runId,nodeId,visit,item)
-        );
-        CREATE TABLE IF NOT EXISTS compensationSteps (
-          source TEXT PRIMARY KEY REFERENCES effects(key), root TEXT NOT NULL, priority INTEGER NOT NULL,
-          workflow TEXT NOT NULL, revision INTEGER NOT NULL, auto INTEGER NOT NULL, input TEXT NOT NULL, result TEXT,
-          child TEXT UNIQUE, status TEXT NOT NULL DEFAULT 'pending', failure TEXT, reason TEXT);
-        CREATE INDEX IF NOT EXISTS compensationRoot ON compensationSteps(root, priority);
-        CREATE TABLE IF NOT EXISTS compensations(root TEXT PRIMARY KEY, id TEXT UNIQUE NOT NULL, state TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS compensationRetries(failure TEXT PRIMARY KEY, root TEXT NOT NULL, attempt TEXT NOT NULL);
-        CREATE TRIGGER IF NOT EXISTS compensationApplied AFTER UPDATE OF state ON effects WHEN NEW.state='success'
-        BEGIN
-          UPDATE compensationSteps SET result=NEW.result WHERE source=NEW.key;
-        END;
-        CREATE TABLE IF NOT EXISTS calls (
-          child TEXT PRIMARY KEY REFERENCES runs(runId), parent TEXT NOT NULL REFERENCES runs(runId),
-          node TEXT NOT NULL, visit INTEGER NOT NULL, batch INTEGER NOT NULL,
-          UNIQUE(parent,node,visit,batch)
-        );
-        CREATE TABLE IF NOT EXISTS pageRuns (
-          runId TEXT REFERENCES runs(runId), node TEXT, visit INTEGER, cursor TEXT, next TEXT, rows TEXT,
-          offset INTEGER NOT NULL DEFAULT 0, pages INTEGER NOT NULL DEFAULT 0, batches INTEGER NOT NULL DEFAULT 0,
-          items INTEGER NOT NULL DEFAULT 0, bytes INTEGER NOT NULL DEFAULT 0, total REAL NOT NULL DEFAULT 0,
-          skipped INTEGER NOT NULL DEFAULT 0,
-          error TEXT, created INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, retryAt INTEGER,
-          PRIMARY KEY(runId,node,visit)
-        );
-        CREATE TABLE IF NOT EXISTS parallelWork (
-          child TEXT PRIMARY KEY REFERENCES runs(runId), parent TEXT NOT NULL REFERENCES runs(runId),
-          start INTEGER NOT NULL, length INTEGER NOT NULL, baseTotal REAL NOT NULL,
-          status TEXT NOT NULL, failure TEXT, retryData TEXT);
-        CREATE INDEX IF NOT EXISTS parallelParent ON parallelWork(parent,start);
-        CREATE TABLE IF NOT EXISTS rateLimits (target TEXT PRIMARY KEY, untilMs INTEGER NOT NULL);
-        CREATE TABLE IF NOT EXISTS recoveryPoints (
-          failure TEXT PRIMARY KEY, runId TEXT NOT NULL REFERENCES runs(runId), node TEXT NOT NULL,
-          visit INTEGER NOT NULL, child TEXT, reason TEXT NOT NULL, expires INTEGER NOT NULL,
-          data TEXT, attempt TEXT, accepted INTEGER, outcome TEXT
-        );
-        CREATE INDEX IF NOT EXISTS recoveryRun ON recoveryPoints(runId);
-        CREATE INDEX IF NOT EXISTS recoveryExpiry ON recoveryPoints(expires) WHERE data IS NOT NULL;
-        CREATE TABLE IF NOT EXISTS syncScopes (
-          scope TEXT PRIMARY KEY, contract TEXT NOT NULL, token TEXT, candidate TEXT, owner TEXT REFERENCES runs(runId)
-        );
-        CREATE UNIQUE INDEX IF NOT EXISTS syncOwner ON syncScopes(owner) WHERE owner IS NOT NULL;
-        CREATE TABLE IF NOT EXISTS syncQueue (
-          runId TEXT PRIMARY KEY REFERENCES runs(runId), scope TEXT NOT NULL REFERENCES syncScopes(scope)
-        );
-        CREATE INDEX IF NOT EXISTS syncQueueScope ON syncQueue(scope);
-        CREATE TABLE IF NOT EXISTS syncVersions (
-          scope TEXT, entity TEXT, version INTEGER NOT NULL, PRIMARY KEY(scope,entity)
-        );
-        CREATE TABLE IF NOT EXISTS syncWork (
-          child TEXT, item INTEGER, scope TEXT NOT NULL, entity TEXT NOT NULL, version INTEGER NOT NULL,
-          lifetime INTEGER NOT NULL, firstSend INTEGER, PRIMARY KEY(child,item)
-        );
-        CREATE TRIGGER IF NOT EXISTS releaseSyncWork AFTER UPDATE OF data ON recoveryPoints
-        WHEN OLD.data IS NOT NULL AND NEW.data IS NULL AND NEW.attempt IS NULL AND OLD.child IS NOT NULL
-        BEGIN
-          DELETE FROM syncWork WHERE child=OLD.child;
-        END;
-        CREATE TRIGGER IF NOT EXISTS releaseParallelSyncWork AFTER UPDATE OF data ON recoveryPoints
-        WHEN OLD.data IS NOT NULL AND NEW.data IS NULL AND NEW.attempt IS NULL
-        BEGIN
-          DELETE FROM syncWork WHERE child IN (SELECT json_extract(value,'$.child') FROM json_each(OLD.data,'$.wave'));
-        END;
-        CREATE TRIGGER IF NOT EXISTS syncApplied AFTER UPDATE OF state ON effects WHEN NEW.state='success'
-        BEGIN
-          INSERT INTO syncVersions SELECT scope,entity,version FROM syncWork WHERE child=NEW.runId AND item=NEW.item
-          ON CONFLICT(scope,entity) DO UPDATE SET version=max(version,excluded.version);
-        END;
-        CREATE TABLE IF NOT EXISTS canceledRuns (runId TEXT PRIMARY KEY REFERENCES runs(runId));
-        CREATE TABLE IF NOT EXISTS readyAfter (runId TEXT PRIMARY KEY REFERENCES runs(runId), cutoff INTEGER NOT NULL);
-        CREATE INDEX IF NOT EXISTS pageRetry ON pageRuns(retryAt) WHERE retryAt IS NOT NULL;
-        CREATE TABLE IF NOT EXISTS seenCursors (
-          runId TEXT, node TEXT, visit INTEGER, digest TEXT, PRIMARY KEY(runId,node,visit,digest)
-        );
-        CREATE TABLE IF NOT EXISTS transitions (
-          runId TEXT REFERENCES runs(runId), nodeId TEXT NOT NULL, at INTEGER NOT NULL, reason TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS transitionRun ON transitions(runId);
-        ${deliverySchema}
-        CREATE TABLE IF NOT EXISTS history (
-          workflowId TEXT, id TEXT, status TEXT NOT NULL, startedAt INTEGER NOT NULL,
-          summary TEXT NOT NULL, detail TEXT, PRIMARY KEY(workflowId, id)
-        );`);
-      if (!this.#prepare("SELECT 1 FROM pragma_table_info('pageRuns') WHERE name='skipped'").get()) {
-        this.#db.exec('ALTER TABLE pageRuns ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0');
-      }
-      if (!this.#prepare("SELECT 1 FROM pragma_table_info('deliveries') WHERE name='source'").get()) {
-        // Earlier ledgers reserved scheduled instants with noExpiry and used run mode for other deliveries.
-        this.#db.exec(`ALTER TABLE deliveries RENAME TO legacy_deliveries;
+        ${ledgerTables}
+        ${sqliteTriggers}`);
+        if (!this.#prepare("SELECT 1 FROM pragma_table_info('active') WHERE name='registration'").get()) {
+          this.#db.exec(
+            "ALTER TABLE active ADD COLUMN registration TEXT NOT NULL DEFAULT ''; UPDATE active SET registration=lower(hex(randomblob(16)))",
+          );
+        }
+        if (!this.#prepare("SELECT 1 FROM pragma_table_info('pageRuns') WHERE name='skipped'").get()) {
+          this.#db.exec('ALTER TABLE pageRuns ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0');
+        }
+        if (!this.#prepare("SELECT 1 FROM pragma_table_info('deliveries') WHERE name='source'").get()) {
+          // Earlier ledgers reserved scheduled instants with noExpiry and used run mode for other deliveries.
+          this.#db.exec(`ALTER TABLE deliveries RENAME TO legacy_deliveries;
           ${deliverySchema}
           INSERT INTO deliveries(workflowId,triggerNodeId,eventKey,source,expiresAt,runId)
           SELECT d.workflowId,d.triggerNodeId,d.eventKey,
             CASE WHEN d.expiresAt=${noExpiry} THEN 'schedule' ELSE r.mode END,d.expiresAt,d.runId
           FROM legacy_deliveries d JOIN runs r USING(runId);
           DROP TABLE legacy_deliveries;`);
+        }
+        this.#db.exec(
+          'CREATE TABLE IF NOT EXISTS ledgerOrganization(singleton INTEGER PRIMARY KEY CHECK(singleton=1), organization TEXT NOT NULL)',
+        );
+        if (organization)
+          this.#prepare('INSERT OR IGNORE INTO ledgerOrganization VALUES(1,?)').run(organization);
+        const bound = this.#prepare('SELECT organization FROM ledgerOrganization').get();
+        if (bound && bound.organization !== organization) throw Error('SQLite ledger organization mismatch');
+        this.#db.exec('COMMIT');
+      } catch (error) {
+        this.#db.close();
+        throw error;
       }
-      this.#db.exec('COMMIT');
-    } catch (error) {
-      this.#db.close();
-      throw error;
     }
     this.history = {
       append: async (summary, detail) => this.#append(summary, detail),
@@ -253,13 +152,15 @@ export class SqliteLedger {
   #prepare(sql: string) {
     type Row = Record<string, string | number | null>;
     type Bindings = Array<string | number | null>;
-    return this.#db.prepare(sql) as Omit<StatementSync, 'all' | 'get'> & {
+    return this.#db.prepare(sql) as {
+      run(...values: Bindings): { changes: number | bigint };
       all(...values: Bindings): Row[];
       get(...values: Bindings): Row | undefined;
     };
   }
 
   #transaction<T>(operation: () => T): T {
+    if (this.shared) return this.shared.atomic(operation);
     this.#db.exec('BEGIN IMMEDIATE');
     try {
       const result = operation();
@@ -410,7 +311,7 @@ export class SqliteLedger {
     this.#prepare(
       `INSERT INTO runs(runId,workflowId,revision,triggerNodeId,mode,payload,state,acceptedAt)
       VALUES(?,?,?,?,'subworkflow',?,'queued',?)`,
-    ).run(child, id, revision, entry.id, payload, Date.now());
+    ).run(child, id, revision, entry.id, payload, this.#now());
     return child;
   }
 
@@ -444,7 +345,10 @@ export class SqliteLedger {
 
   dispatchChild(parent: Receipt, node: WorkflowNode) {
     const entry = this.continuation(parent.runId)!.checkpoint.stack[0]!;
-    this.#transaction(() => this.#spawn(parent, node, entry.runIndex, 0, entry.input.main?.[0] ?? []));
+    this.#transaction(() => {
+      if (this.shared && this.canceled(parent.runId)) return this.#yieldPage(parent.runId);
+      this.#spawn(parent, node, entry.runIndex, 0, entry.input.main?.[0] ?? []);
+    });
   }
 
   #yieldPage(id: string) {
@@ -470,7 +374,7 @@ export class SqliteLedger {
         this.#prepare('INSERT OR IGNORE INTO canceledRuns VALUES(?)').run(run);
         this.#prepare('DELETE FROM syncQueue WHERE runId=?').run(run);
         this.#prepare('UPDATE pageRuns SET retryAt=NULL WHERE runId=?').run(run);
-        this.#prepare("INSERT INTO transitions VALUES(?, '', ?, 'cancelRequested')").run(run, Date.now());
+        this.#prepare("INSERT INTO transitions VALUES(?, '', ?, 'cancelRequested')").run(run, this.#now());
         if (row.state === 'waiting') this.#prepare("UPDATE runs SET state='queued' WHERE runId=?").run(run);
       }
       return rows.map((row) => String(row.runId));
@@ -491,7 +395,7 @@ export class SqliteLedger {
         workflowName: workflow.name,
         mode: r.mode,
         startedAt: r.startedAt!,
-        stoppedAt: Date.now(),
+        stoppedAt: this.#now(),
         status: 'canceled',
         executed: tasks.length,
         reused: 0,
@@ -519,6 +423,7 @@ export class SqliteLedger {
 
   waitForPage(id: string, nodeId: string, visit: number, attempt: number, due: number) {
     this.#transaction(() => {
+      if (this.shared && this.canceled(id)) return this.#yieldPage(id);
       this.#prepare('UPDATE pageRuns SET attempts=?,retryAt=? WHERE runId=? AND node=? AND visit=?').run(
         attempt,
         due,
@@ -531,7 +436,11 @@ export class SqliteLedger {
     });
   }
 
-  wakeRetries(now: number) {
+  wakeRetries(now: number): number {
+    if (this.shared) return this.shared.atomic(() => this.#wakeRetries(now));
+    return this.#wakeRetries(now);
+  }
+  #wakeRetries(now: number) {
     const due = this.#prepare('SELECT runId FROM pageRuns WHERE retryAt<=?').all(now);
     if (due.length)
       this.#transaction(() => {
@@ -641,7 +550,7 @@ export class SqliteLedger {
       visit,
       child?.runId ?? null,
       reason,
-      Date.now() + config.retention,
+      this.#now() + config.retention,
       JSON.stringify(snapshot),
     );
   }
@@ -668,7 +577,7 @@ export class SqliteLedger {
       node.id,
       entry.runIndex,
       detail.error?.message ?? 'Recorded HTTP failed',
-      Date.now() + Number(node.parameters.redriveRetentionMs ?? 604800000),
+      this.#now() + Number(node.parameters.redriveRetentionMs ?? 604800000),
       JSON.stringify({ point: point.checkpoint, effects }),
     );
   }
@@ -682,7 +591,7 @@ export class SqliteLedger {
   }
 
   #purgeRecovery() {
-    const cutoff = Date.now();
+    const cutoff = this.#now();
     this.#prepare('UPDATE recoveryPoints SET data=NULL WHERE data IS NOT NULL AND expires<=?').run(cutoff);
   }
 
@@ -770,10 +679,10 @@ export class SqliteLedger {
       const attempt = randomUUID();
       this.#prepare('UPDATE recoveryPoints SET data=NULL,attempt=?,accepted=? WHERE failure=?').run(
         attempt,
-        Date.now(),
+        this.#now(),
         failure,
       );
-      this.#prepare("INSERT INTO transitions VALUES(?,?,?,'redrive')").run(id, node.id, Date.now());
+      this.#prepare("INSERT INTO transitions VALUES(?,?,?,'redrive')").run(id, node.id, this.#now());
       return attempt;
     });
   }
@@ -848,6 +757,7 @@ export class SqliteLedger {
     const rows = JSON.parse(String(state.rows)) as JsonObject[];
     const offset = Number(state.offset);
     this.#transaction(() => {
+      if (this.shared && this.canceled(parent.runId)) return this.#yieldPage(parent.runId);
       if (offset === rows.length) this.#advancePage(parent.runId, node, visit);
       else if (pageConfig(node).concurrency > 1) {
         const { concurrency, batchSize, orderKey } = pageConfig(node);
@@ -989,8 +899,8 @@ export class SqliteLedger {
         return false;
       this.#prepare('DELETE FROM webhookRoutes WHERE workflowId=?').run(id);
       this.#prepare(
-        'INSERT INTO active VALUES(?,?) ON CONFLICT(workflowId) DO UPDATE SET revision=excluded.revision',
-      ).run(id, revision);
+        'INSERT INTO active(workflowId,revision,registration) VALUES(?,?,?) ON CONFLICT(workflowId) DO UPDATE SET revision=excluded.revision,registration=excluded.registration',
+      ).run(id, revision, randomUUID());
       this.#prepare('DELETE FROM schedules WHERE workflowId=?').run(id);
       for (const schedule of schedules) {
         this.#prepare('INSERT INTO schedules VALUES(?,?,?,?)').run(
@@ -1016,7 +926,7 @@ export class SqliteLedger {
       `SELECT MIN(t) AS time FROM (
       SELECT MIN(nextAt) t FROM schedules UNION ALL
       SELECT MIN(retryAt) FROM pageRuns UNION ALL
-      SELECT MIN(dueAt) FROM continuations WHERE mode IN ('event','time') AND response IS NULL)`,
+      SELECT MIN(dueAt) FROM continuations WHERE mode IN ('event','time') AND response IS NULL) AS times`,
     ).get()!.time;
     return value === null ? undefined : Number(value);
   }
@@ -1032,7 +942,24 @@ export class SqliteLedger {
       }));
   }
 
-  acceptSchedule(id: string, trigger: string, scheduledAt: number, nextAt: number, capacity: number) {
+  acceptSchedule(
+    id: string,
+    trigger: string,
+    scheduledAt: number,
+    nextAt: number,
+    capacity: number,
+    expected?: { nextAt: number; spec: Schedule },
+  ): string | undefined {
+    if (this.shared && expected !== undefined)
+      return this.shared.atomic(() => {
+        if (
+          this.#prepare(
+            'SELECT 1 FROM schedules WHERE workflowId=? AND triggerNodeId=? AND nextAt=? AND spec=?',
+          ).get(id, trigger, expected.nextAt, JSON.stringify(expected.spec)) === undefined
+        )
+          return;
+        return this.acceptSchedule(id, trigger, scheduledAt, nextAt, capacity);
+      });
     const stamp = new Date(scheduledAt).toISOString();
     return this.accept(
       id,
@@ -1059,7 +986,7 @@ export class SqliteLedger {
   ) {
     this.#transaction(() => {
       this.validateTargets(workflow);
-      this.#prepare('DELETE FROM testWebhooks WHERE expiresAt<=?').run(Date.now());
+      this.#prepare('DELETE FROM testWebhooks WHERE expiresAt<=?').run(this.#now());
       this.#prepare('INSERT INTO testWebhooks VALUES(?,?,1,?,?,?)').run(
         path,
         workflow.id,
@@ -1072,11 +999,12 @@ export class SqliteLedger {
 
   webhook(path: string) {
     const row = this.#prepare(
-      `SELECT workflowId,revision,triggerNodeId FROM webhookRoutes JOIN active USING(workflowId) WHERE path=?
-      UNION ALL SELECT workflowId,revision,triggerNodeId FROM testWebhooks WHERE path=? AND expiresAt>?`,
-    ).get(path, path, Date.now());
+      `SELECT workflowId,revision,triggerNodeId,registration FROM webhookRoutes JOIN active USING(workflowId) WHERE path=?
+      UNION ALL SELECT workflowId,revision,triggerNodeId,workflowId FROM testWebhooks WHERE path=? AND expiresAt>?`,
+    ).get(path, path, this.#now());
     return (
       row && {
+        registration: String(row.registration),
         workflowId: String(row.workflowId),
         revision: Number(row.revision),
         triggerNodeId: String(row.triggerNodeId),
@@ -1107,7 +1035,7 @@ export class SqliteLedger {
       if (selected == null) throw new Error(`Inactive workflow: ${id}`);
       const revision = Number(selected);
       validate(revision);
-      const now = Date.now();
+      const now = this.#now();
       const source: DeliverySource =
         ttl === null ? 'schedule' : event.mode === 'webhook' ? 'webhook' : 'trigger';
       if (event.key !== undefined) {
@@ -1187,8 +1115,17 @@ export class SqliteLedger {
     ).run(target, until);
   }
 
-  claim(allowParallel = true) {
+  claim(allowParallel = true, batchLimit = 4) {
     return this.#transaction(() => {
+      if (this.shared) {
+        const active = this.#prepare("SELECT count(*) AS n FROM runs WHERE state='running'").get()!;
+        if (Number(active.n) >= (this.shared.options.maxActiveRuns ?? 32)) return;
+        const batches = this.#prepare(
+          `SELECT count(*) AS n FROM calls c JOIN runs r ON r.runId=c.child
+          JOIN pageRuns p ON p.runId=c.parent AND p.node=c.node AND p.visit=c.visit WHERE r.state='running'`,
+        ).get()!;
+        allowParallel = allowParallel && Number(batches.n) < batchLimit;
+      }
       const next = this.#prepare(
         `SELECT r.runId,r.payload FROM runs r LEFT JOIN readyAfter y ON r.runId=y.runId
          WHERE r.state='queued' AND (? OR NOT EXISTS(
@@ -1202,7 +1139,7 @@ export class SqliteLedger {
       const id = String(next.runId);
       this.#prepare('DELETE FROM readyAfter WHERE runId=?').run(id);
       this.#prepare("UPDATE runs SET state='running',startedAt=COALESCE(startedAt,?) WHERE runId=?").run(
-        Date.now(),
+        this.#now(),
         id,
       );
       // Mark only new claims. Older running rows with a consumed wait could already
@@ -1210,7 +1147,11 @@ export class SqliteLedger {
       this.#prepare(
         "UPDATE continuations SET mode='dispatch' WHERE runId=? AND mode IN ('event','time') AND response IS NOT NULL",
       ).run(id);
-      return { receipt: this.get(id)!, items: JSON.parse(String(next.payload)) as TriggerEvent['items'] };
+      return {
+        generation: this.shared?.acquire(id),
+        receipt: this.get(id)!,
+        items: JSON.parse(String(next.payload)) as TriggerEvent['items'],
+      };
     });
   }
 
@@ -1282,7 +1223,7 @@ export class SqliteLedger {
             dispatch: () => {
               const recordDispatch = () => {
                 if (change) {
-                  const now = Date.now();
+                  const now = this.#now();
                   if (change.firstSend != null && now >= Number(change.firstSend) + Number(change.lifetime))
                     throw new Error('Receiver key expired; reconcile before retry');
                   if (change.firstSend == null)
@@ -1358,7 +1299,7 @@ export class SqliteLedger {
       if (
         decision === 'retryKeyed' &&
         change?.firstSend != null &&
-        Date.now() >= Number(change.firstSend) + Number(change.lifetime)
+        this.#now() >= Number(change.firstSend) + Number(change.lifetime)
       )
         return false;
       if (decision === 'notApplied' && change)
@@ -1372,7 +1313,7 @@ export class SqliteLedger {
         );
       }
       this.#prepare('INSERT INTO transitions SELECT runId,nodeId,?,? FROM effects WHERE key=?').run(
-        Date.now(),
+        this.#now(),
         'reconciled:' + decision,
         key,
       );
@@ -1406,7 +1347,7 @@ export class SqliteLedger {
       mode: r.mode,
       startNodeId: r.triggerNodeId,
       startedAt: r.startedAt!,
-      stoppedAt: Date.now(),
+      stoppedAt: this.#now(),
       status: 'waiting',
       reused: 0,
       executed: tasks.length,
@@ -1420,6 +1361,7 @@ export class SqliteLedger {
     const json = encodeCheckpoint(state);
     if (request.mode === 'child' || request.mode === 'return' || request.mode === 'pages') {
       this.#transaction(() => {
+        if (this.shared && this.canceled(state.runId)) return this.#yieldPage(state.runId);
         this.#prepare('INSERT OR REPLACE INTO continuations VALUES(?,?,?, ?,0,NULL)').run(
           state.runId,
           json,
@@ -1482,6 +1424,7 @@ export class SqliteLedger {
     )
       throw new Error('Invalid wait');
     this.#transaction(() => {
+      if (this.shared && this.canceled(state.runId)) return this.#yieldPage(state.runId);
       if (
         !this.#prepare("UPDATE runs SET state='waiting' WHERE runId=? AND state='running'").run(state.runId)
           .changes
@@ -1769,7 +1712,7 @@ export class SqliteLedger {
       }
       const update = this.#prepare(
         `UPDATE runs SET state=?,stoppedAt=?,outcome=?,payload=NULL WHERE runId=? AND state='running'`,
-      ).run(interrupted ? 'interrupted' : 'finished', Date.now(), summary.status, receipt.runId);
+      ).run(interrupted ? 'interrupted' : 'finished', this.#now(), summary.status, receipt.runId);
       if (!update.changes) throw new Error('Run no longer owned');
       this.#prepare(
         'UPDATE recoveryPoints SET outcome=? WHERE runId=? AND attempt IS NOT NULL AND outcome IS NULL',
@@ -1827,8 +1770,14 @@ export class SqliteLedger {
   }
 
   recover() {
+    if (this.shared) return this.shared.atomic(() => this.#recoverOwned());
+    this.#recoverOwned();
+  }
+
+  #recoverOwned() {
     this.#purgeRecovery();
     for (const row of this.#prepare("SELECT runId FROM runs WHERE state='running'").all()) {
+      if (this.shared && !this.shared.expired(String(row.runId))) continue;
       const r = this.get(String(row.runId))!;
       if (
         this.#prepare(
@@ -1860,7 +1809,7 @@ export class SqliteLedger {
           startNodeId: r.triggerNodeId,
           mode: r.mode,
           startedAt: r.startedAt!,
-          stoppedAt: Date.now(),
+          stoppedAt: this.#now(),
           status: 'error',
           interrupted: true,
           executed: 0,
@@ -1892,7 +1841,7 @@ export class SqliteLedger {
       queued: Number(row.queued),
       waiting: Number(row.waiting),
       review: Number(row.review),
-      oldestWaitMs: row.oldest === null ? 0 : Date.now() - Number(row.oldest),
+      oldestWaitMs: row.oldest === null ? 0 : this.#now() - Number(row.oldest),
       interrupted: Number(row.interrupted),
       failed: Number(row.failed),
     };
@@ -1902,3 +1851,6 @@ export class SqliteLedger {
     this.#db.close();
   }
 }
+
+// Compatibility for existing embedders and Phase 4–6 recovery tools.
+export { ExecutionLedger as SqliteLedger };

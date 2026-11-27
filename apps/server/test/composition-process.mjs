@@ -23,9 +23,18 @@ const accepted = new Set(
     : [],
 );
 const options = {
+  ...(process.env.DRAFLOW_TEST_SHARED && {
+    shared: {
+      connectionString: process.env.DRAFLOW_TEST_SHARED,
+      organization: db,
+      leaseMs: 1500,
+      pollMs: 75,
+    },
+  }),
   registry,
   ...(shape === 'redrive' && {
     httpAuth: {
+      organization: db,
       grants: [
         {
           id: 'service',
