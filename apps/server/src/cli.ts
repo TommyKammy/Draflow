@@ -68,6 +68,22 @@ try {
         case 'accept':
           result = host.accept(q.workflowId, q.triggerNodeId, q.event);
           break;
+        case 'effects':
+          result = host.effects(q.runId);
+          break;
+        case 'reconcile':
+          result = host.reconcile(q.runId, q.key, q.decision, q.result);
+          break;
+        case 'waitInfo':
+          result = host.waitInfo(q.runId);
+          break;
+        case 'transitions':
+          result = host.transitions(q.runId);
+          break;
+        case 'resume':
+        case 'cancelWait':
+          result = host.resolveWait(q.runId, q.token, q.op === 'resume' ? 'event' : 'canceled', q.data);
+          break;
         case 'receipt':
           result = host.receipt(q.runId);
           break;

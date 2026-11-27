@@ -20,9 +20,42 @@ Use `receipt` with a run ID, `detail` with workflow and run IDs, and `deactivate
 
 - A successful accept returns the run ID after the SQLite commit. A queued receipt contains its own work item, payload and publication revision. Switching or deactivating the publication affects subsequent intake. Active and queued publications must have their exact node versions installed on restart.
 - Defaults are 100 waiting jobs plus one running job, a 24-hour deduplication window from acceptance, and 4 MiB per history detail. Configure these with `capacity`, `dedupMs`, and `maxDetailBytes`. A matching workflow, trigger node, delivery source and key returns the existing ID even at capacity. Queued and running work retains its key through completion. Interrupted work keeps its key beyond expiry so that redelivery returns the original receipt while its external effects need reconciliation. Identical keyless events get separate IDs.
-- A restarted worker processes queued rows. A durable running claim becomes `interrupted` and requires reconciliation with the external destination. The error history identifies the interruption and the absence of recovered task data. Completed runs retain their outcome. Deleting browsing history leaves the receipt intact.
+- A restarted worker processes queued rows. A running claim outside a recorded HTTP node becomes `interrupted` and requires reconciliation with the external destination. The error history identifies the interruption and the absence of recovered task data. Completed runs retain their outcome. Deleting browsing history leaves the receipt intact.
 - Completion and history are committed together. If that transaction fails, the worker closes intake, reports the fault and leaves the claim for recovery. On EOF, SIGTERM or SIGINT, the CLI closes intake, leaves queued jobs for restart, and waits up to five seconds for the current job before exiting. Programmatic callers can set a deadline with `close(ms)`.
 - Receipts retain the acceptance, claim and completion timestamps. Stats expose waiting count, oldest wait, failed and interrupted counts. This first release retains receipt and publication metadata on disk. Detail size and the deduplication window can be tuned independently.
+
+## Durable waits and recorded HTTP
+
+The [approval example](../../examples/approval.json) accepts a signed application with an `applicationId` and an absolute `deadline` in the webhook body. Set the registration URL before publishing. An event Wait requires an absolute deadline and a time Wait requires an absolute wake-up time, expressed as epoch milliseconds or ISO time with a timezone. Waiting releases the worker. The host saves up to 8 MiB of execution state per checkpoint, retains the publication and excludes suspended time from the execution timeout. Completion removes the checkpoint. Deleting history leaves live waits intact.
+
+Use `{"op":"waitInfo","runId":"…"}` on the trusted CLI to obtain the current wait's token, mode and deadline. The application authenticates the approver and authorizes the decision before submitting it. Pass the token in the Authorization header when calling the webhook server, or use the trusted CLI commands below. Tokens are specific to one wait and grant authority to complete it. Keep them out of logs and use HTTPS for remote callbacks.
+
+```http
+POST /resume/<runId>
+Authorization: Bearer <wait token>
+Content-Type: application/json
+
+{"decision":"approved"}
+```
+
+An accepted callback returns HTTP 202 and the original run ID. The JSON object (up to 64 KiB) appears in each outgoing item's `json.wait.data`; `json.wait.reason` is `event`, `time` or `expired`. Cancellation terminates the run. Once the deadline is reached it takes precedence over a new decision. A consumed token cannot advance another wait.
+
+```jsonl
+{"op":"resume","runId":"…","token":"…","data":{"decision":"approved"}}
+{"op":"cancelWait","runId":"…","token":"…"}
+{"op":"transitions","runId":"…"}
+{"op":"effects","runId":"…"}
+```
+
+HTTP Request v2 offers optional recorded delivery. Use `keyed` only when the receiver honors the `Idempotency-Key` header throughout the recovery window. Use `manual` to require reconciliation after an uncertain send. Each input item in each visit gets its own operation key. After a crash the node reuses confirmed outputs. For a keyed operation it retries the same request with the same key. A changed request fingerprint or an uncertain manual operation requires review. Ordinary workflows keep their existing retry behavior.
+
+When a receipt is in `review`, inspect `effects` and check the destination. Confirm a successful external operation with its normalized response, or confirm that nothing was applied and authorize another send. For a receiver that honors idempotency keys, use `retryKeyed` to retry an uncertain operation with the same key and request fingerprint. The CLI returns whether the decision was accepted.
+
+```jsonl
+{"op":"reconcile","runId":"…","key":"…","decision":"applied","result":{"id":"external-id"}}
+{"op":"reconcile","runId":"…","key":"…","decision":"notApplied"}
+{"op":"reconcile","runId":"…","key":"…","decision":"retryKeyed"}
+```
 
 ## Verification and timing
 

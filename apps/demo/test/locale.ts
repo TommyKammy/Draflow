@@ -6,5 +6,6 @@ export async function setEnglish(page: Page) {
 
 export async function openEnglishDemo(page: Page) {
   await page.goto('/');
+  await page.locator('draflow-editor:not([hidden])').waitFor();
   await setEnglish(page);
 }

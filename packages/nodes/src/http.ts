@@ -112,23 +112,34 @@ export const httpRequestNode: NodeType = {
       if (required && !scopedFetch) {
         throw new Error('HTTP credential unavailable');
       }
-      const json = await withTimeout(
-        scopedFetch ?? ctx.helpers.fetch,
-        url,
-        init,
-        timeout,
-        ctx.signal,
-        async (response) => {
-          if (!response.ok) {
-            const text = await response.text().catch(() => '');
-            throw new Error(
-              `HTTP ${response.status} ${response.statusText}${text === '' ? '' : `: ${text.slice(0, 500)}`}`,
-            );
-          }
-          return readResponse(response, responseFormat);
-        },
-      );
-
+      const keyed = ctx.journalItem && ctx.param('delivery') === 'keyed';
+      if (keyed && Object.keys(headers).some(name => name.toLowerCase() === 'idempotency-key'))
+        throw new Error('Recorded delivery owns the Idempotency-Key header');
+      ctx.signal.throwIfAborted();
+      const send = (key?: string) => {
+        if (key && keyed) {
+          init.headers = { ...headers, 'Idempotency-Key': key };
+        }
+        return withTimeout(
+          scopedFetch ?? ctx.helpers.fetch,
+          url,
+          init,
+          timeout,
+          ctx.signal,
+          async (response) => {
+            if (!response.ok) {
+              const text = await response.text().catch(() => '');
+              throw new Error(
+                `HTTP ${response.status} ${response.statusText}${text === '' ? '' : `: ${text.slice(0, 500)}`}`,
+              );
+            }
+            return readResponse(response, responseFormat);
+          },
+        );
+      };
+      const json = ctx.journalItem
+        ? await ctx.journalItem(index, JSON.stringify([method, url, headers, init.body, responseFormat]), send)
+        : await send();
       output.push({ json, pairedItem: pairing(input, index) });
     });
 
@@ -139,8 +150,19 @@ export const httpRequestNode: NodeType = {
 export const httpRequestNodeV2: NodeType = {
   ...httpRequestNode,
   version: 2,
+  journalMode(node) {
+    const mode = node.parameters.delivery;
+    if (mode === undefined || mode === 'none') return;
+    if (mode !== 'keyed' && mode !== 'manual') throw new Error('Invalid recorded delivery mode');
+    return mode;
+  },
   credentials: [{ name: 'httpAuth', label: 'HTTP authentication' }],
   parameters: [
+    {
+      name: 'delivery', label: 'Recorded delivery', type: 'select', default: 'none', noExpression: true,
+      options: [{ label: 'Off', value: 'none' }, { label: 'Receiver supports idempotency keys', value: 'keyed' },
+        { label: 'Manually reconcile uncertain sends', value: 'manual' }],
+    },
     {
       name: 'authentication', label: 'Authentication', type: 'select', default: 'none',
       options: [{ label: 'None', value: 'none' }, { label: 'Server credential', value: 'credential' }],

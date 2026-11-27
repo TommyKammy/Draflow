@@ -1,0 +1,199 @@
+{
+  "schema": "draflow/v1",
+  "id": "approval",
+  "name": "Application approval",
+  "settings": {},
+  "nodes": [
+    {
+      "id": "start",
+      "name": "Application",
+      "type": "draflow.webhook",
+      "typeVersion": 1,
+      "position": {
+        "x": 0,
+        "y": 0
+      },
+      "parameters": {
+        "path": "application"
+      }
+    },
+    {
+      "id": "wait",
+      "name": "Wait for decision",
+      "type": "draflow.wait",
+      "typeVersion": 1,
+      "position": {
+        "x": 180,
+        "y": 0
+      },
+      "parameters": {
+        "mode": "event",
+        "dueAt": "={{ $json.body.deadline }}"
+      }
+    },
+    {
+      "id": "expired",
+      "name": "Deadline reached",
+      "type": "draflow.if",
+      "typeVersion": 1,
+      "position": {
+        "x": 360,
+        "y": 0
+      },
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "left": "={{ $json.wait.reason }}",
+              "operator": "equals",
+              "right": "expired"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "timeout",
+      "name": "Expired",
+      "type": "draflow.noOp",
+      "typeVersion": 1,
+      "position": {
+        "x": 540,
+        "y": -140
+      },
+      "parameters": {}
+    },
+    {
+      "id": "approved",
+      "name": "Approved",
+      "type": "draflow.if",
+      "typeVersion": 1,
+      "position": {
+        "x": 540,
+        "y": 0
+      },
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "left": "={{ $json.wait.data.decision }}",
+              "operator": "equals",
+              "right": "approved"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "register",
+      "name": "Register",
+      "type": "draflow.httpRequest",
+      "typeVersion": 2,
+      "position": {
+        "x": 720,
+        "y": 0
+      },
+      "parameters": {
+        "method": "POST",
+        "url": "https://registry.example.test/applications",
+        "body": {
+          "applicationId": "={{ $json.body.applicationId }}"
+        },
+        "delivery": "manual"
+      }
+    },
+    {
+      "id": "reject",
+      "name": "Rejected",
+      "type": "draflow.noOp",
+      "typeVersion": 1,
+      "position": {
+        "x": 720,
+        "y": 140
+      },
+      "parameters": {}
+    }
+  ],
+  "connections": [
+    {
+      "id": "start-wait",
+      "from": {
+        "node": "start",
+        "port": "main",
+        "index": 0
+      },
+      "to": {
+        "node": "wait",
+        "port": "main",
+        "index": 0
+      }
+    },
+    {
+      "id": "wait-expired",
+      "from": {
+        "node": "wait",
+        "port": "main",
+        "index": 0
+      },
+      "to": {
+        "node": "expired",
+        "port": "main",
+        "index": 0
+      }
+    },
+    {
+      "id": "expired-timeout",
+      "from": {
+        "node": "expired",
+        "port": "main",
+        "index": 0
+      },
+      "to": {
+        "node": "timeout",
+        "port": "main",
+        "index": 0
+      }
+    },
+    {
+      "id": "expired-approved",
+      "from": {
+        "node": "expired",
+        "port": "main",
+        "index": 1
+      },
+      "to": {
+        "node": "approved",
+        "port": "main",
+        "index": 0
+      }
+    },
+    {
+      "id": "approved-register",
+      "from": {
+        "node": "approved",
+        "port": "main",
+        "index": 0
+      },
+      "to": {
+        "node": "register",
+        "port": "main",
+        "index": 0
+      }
+    },
+    {
+      "id": "approved-reject",
+      "from": {
+        "node": "approved",
+        "port": "main",
+        "index": 1
+      },
+      "to": {
+        "node": "reject",
+        "port": "main",
+        "index": 0
+      }
+    }
+  ]
+}

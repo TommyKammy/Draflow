@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { setImmediate as yieldToHost } from 'node:timers/promises';
-import { isPlainObject, type ExecutionEngineOptions, type Workflow } from '@draflow/core';
+import { isPlainObject, type ExecutionEngineOptions, type JsonObject, type Workflow } from '@draflow/core';
 import { MemoryRuntime, type TriggerEvent } from '@draflow/runtime';
 import type { ExecutionSummary } from '@draflow/storage';
 import { serverHttp, type HttpAuth } from './http-auth.js';
 import { latestDue, nextTime, scheduleFor } from './schedule.js';
-import { QueueFull, SqliteLedger, type DeliverySource } from './sqlite.js';
+import { executionTasks, QueueFull, SqliteLedger, type DeliverySource, type Reconciliation } from './sqlite.js';
 
 interface HostOptions extends Omit<ExecutionEngineOptions, 'credentialFetch'> {
   scheduleClock?: {
@@ -82,6 +82,31 @@ export class NodeHost {
   }
   receipt(runId: string) {
     return this.#ledger.get(runId);
+  }
+  effects(runId: string) {
+    return this.#ledger.effects(runId);
+  }
+  reconcile(runId: string, key: string, decision: Reconciliation, result: JsonObject = {}) {
+    this.#ready();
+    if (!isPlainObject(result)) throw new Error('Expected a JSON object');
+    const changed = this.#ledger.reconcile(runId, key, decision, result);
+    if (changed) this.#wake();
+    return changed;
+  }
+  waitInfo(runId: string) {
+    return this.#ledger.waitInfo(runId);
+  }
+  transitions(runId: string) {
+    return this.#ledger.transitions(runId);
+  }
+  resolveWait(runId: string, token: string, reason: 'event' | 'canceled', data: JsonObject = {}) {
+    this.#ready();
+    if (!['event', 'canceled'].includes(reason) || !isPlainObject(data)) throw new Error('Invalid wait response');
+    const accepted = this.#ledger.resolveWait(runId, token, reason, data, this.#scheduleClock.now());
+    // Consuming a wait can only remove a deadline. The existing timer may wake
+    // early, but cannot miss an earlier deadline or invalidate a committed reply.
+    this.#wake();
+    return accepted;
   }
   byEvent(id: string, trigger: string, key: string, source?: DeliverySource) {
     return this.#ledger.byEvent(id, trigger, key, source);
@@ -247,6 +272,10 @@ export class NodeHost {
     if (this.#stopping || this.#fault) return;
     try {
       const now = this.#scheduleClock.now();
+      for (const row of this.#ledger.dueWaits(now)) {
+        this.#ledger.resolveWait(String(row.runId), String(row.token), 'timer', {}, now);
+        this.#wake();
+      }
       for (const row of this.#ledger.dueSchedules(now)) {
         const due = latestDue(row.spec, row.nextAt, now);
         this.#ledger.acceptSchedule(
@@ -292,7 +321,16 @@ export class NodeHost {
       const { receipt: r, items } = job;
       const publication = this.#ledger.publication(r.workflowId, r.revision);
       // Run the accepted revision even after a replacement or deactivation.
-      const runtime = new MemoryRuntime(this.#engine);
+      const runtime = new MemoryRuntime({
+        ...this.#engine,
+        persistence: {
+          ...this.#ledger.continuation(r.runId),
+          beginJournal: (state, mode) => this.#ledger.beginJournal(state, mode),
+          leaveCheckpoint: () => this.#ledger.leaveCheckpoint(r.runId),
+          endJournal: () => this.#ledger.endJournal(r.runId),
+          suspend: (state, request) => this.#ledger.suspend(state, request, this.#scheduleClock.now()),
+        },
+      });
       runtime.restore(publication);
       await runtime.activate(r.workflowId, r.revision);
       const { result } = await runtime.fire(r.workflowId, r.triggerNodeId, {
@@ -301,10 +339,11 @@ export class NodeHost {
         mode: r.mode,
         ...(r.eventKey !== null && { key: r.eventKey }),
       });
-      const tasks = Object.values(result.runData)
-        .flat()
-        .sort((a, b) => a.executionIndex - b.executionIndex)
-        .map((task) => ({ nodeId: task.nodeId, runIndex: task.runIndex, reused: false, task }));
+      if (result.status === 'waiting') {
+        this.#armSchedules();
+        continue;
+      }
+      const tasks = executionTasks(result.runData);
       const summary: ExecutionSummary = {
         id: result.id,
         workflowId: r.workflowId,

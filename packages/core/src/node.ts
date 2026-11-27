@@ -38,7 +38,22 @@ export interface CredentialSlot {
   required?: boolean;
 }
 
+export interface WaitRequest {
+  mode: 'time' | 'event';
+  dueAt: number;
+}
+
+export interface WaitResult {
+  reason: 'event' | 'time' | 'expired' | 'canceled';
+  data: JsonObject;
+}
+
+export type JournalItem = (index: number, fingerprint: string,
+  send: (key: string) => Promise<JsonObject>) => Promise<JsonObject>;
+
 export interface NodeType {
+  journalMode?: (node: WorkflowNode) => 'keyed' | 'manual' | undefined;
+  wait?: (ctx: NodeContext) => WaitRequest;
   type: string;
   version: number;
   meta: NodeMeta;
@@ -245,6 +260,8 @@ export type FilterOperator =
   | 'notExists';
 
 export interface NodeContext {
+  resume?: WaitResult;
+  journalItem?: JournalItem;
   /** All items of the primary input. */
   readonly items: readonly Item[];
   readonly itemCount: number;
