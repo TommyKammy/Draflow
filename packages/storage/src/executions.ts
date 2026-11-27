@@ -20,6 +20,12 @@ export interface ExecutionSummary {
 }
 
 export interface ExecutionDetail {
+  orchestration?: {
+    pages: Record<string,string|number|null>[];
+    calls: Record<string,string|number|null>[];
+    uncertain: Record<string,string|number|null>[];
+    canceled: boolean;
+  };
   transitions?: { nodeId: string; at: number; reason: string }[];
   workflow: Workflow;
   /** In visitation order, including cached tasks that participated in this run. */

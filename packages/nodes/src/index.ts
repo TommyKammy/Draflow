@@ -1,4 +1,5 @@
 import type { NodeType } from '@draflow/core';
+import { childInputNode, callNode, pagesNode, returnNode } from './call.js';
 import { waitNode } from './wait.js';
 import { aggregateNode } from './aggregate.js';
 import { splitOutNode } from './split-out.js';
@@ -28,6 +29,7 @@ export * from './helpers.js';
 export { waitNode } from './wait.js';
 
 export const standardNodes: NodeType[] = [
+  childInputNode, callNode, pagesNode, returnNode,
   waitNode,
   manualTriggerNode,
   webhookNode,

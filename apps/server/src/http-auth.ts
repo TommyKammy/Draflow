@@ -12,6 +12,15 @@ export interface HttpAuth {
   resolve(id: string): Promise<string | undefined> | string | undefined;
 }
 
+export class ReadThrottled extends Error {
+  constructor(
+    readonly status: number,
+    readonly retryAfter: string | null,
+  ) {
+    super('HTTP ' + status);
+  }
+}
+
 class ResponseLimit extends Error {
   constructor() {
     super('HTTP response exceeds host byte limit');
@@ -104,8 +113,10 @@ function grantFor(binding: CredentialBinding, url: string, auth?: HttpAuth) {
   );
   if (
     !grant ||
-    binding.type !== 'draflow.httpRequest' ||
-    binding.typeVersion !== 2 ||
+    !(
+      (binding.type === 'draflow.httpRequest' && binding.typeVersion === 2) ||
+      (binding.type === 'draflow.pages' && binding.typeVersion === 1)
+    ) ||
     binding.slot !== 'httpAuth'
   ) {
     throw new Error('HTTP credential not authorized');
@@ -136,9 +147,13 @@ export function serverHttp(fetchFn: FetchLike, limit: number, auth?: HttpAuth): 
     try {
       init?.signal?.throwIfAborted();
       response = await fetchFn(url, init);
+      if (binding.type === 'draflow.pages' && (response.status === 429 || response.status === 503)) {
+        void response.body?.cancel().catch(() => {});
+        throw new ReadThrottled(response.status, response.headers.get('retry-after'));
+      }
       bytes = await readBounded(response, limit, init?.signal);
     } catch (error) {
-      if (error instanceof ResponseLimit) throw error;
+      if (error instanceof ResponseLimit || error instanceof ReadThrottled) throw error;
       // Provider, transport and stream errors can contain request headers.
       throw new Error('HTTP request failed');
     }

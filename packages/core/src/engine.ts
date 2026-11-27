@@ -19,7 +19,7 @@ import type {
   NodeType,
   ItemContext,
   JournalItem,
-  WaitRequest,
+  SuspensionRequest,
   WaitResult,
   PortDef,
 } from './node.js';
@@ -92,7 +92,7 @@ export interface ExecutionPersistence {
   /** Drop the replay point immediately before entering an untracked node. */
   leaveCheckpoint?(): void;
   endJournal?(): 'complete' | 'review';
-  suspend(state: Checkpoint, request: WaitRequest): void;
+  suspend(state: Checkpoint, request: SuspensionRequest): void;
 }
 
 export interface ExecutionEngineOptions {
@@ -516,13 +516,13 @@ export class ExecutionEngine {
           throw new Error('Recorded HTTP delivery requires a durable host');
         const journalItem = journalMode && persistence!.beginJournal!(snapshot(), journalMode);
         if (journalItem) replayable = true;
-        else if (replayable && !prepareWait) {
+        else if (replayable && !prepareWait && resume?.reason !== 'result') {
           // Beyond this boundary arbitrary node code may already have produced an external effect.
           persistence?.leaveCheckpoint?.();
           replayable = false;
         }
         const task = await this.#runNode({ ...nodeInput, prepareWait, ...(resume && { resume }), ...(journalItem && { journalItem }) });
-        if ('dueAt' in task) {
+        if ('mode' in task) {
           // Commit only a validated request. Storage failures remain execution-level errors.
           persistence!.suspend(snapshot(), task);
           status = 'waiting';
@@ -532,6 +532,7 @@ export class ExecutionEngine {
           status = 'waiting';
           break;
         }
+        if (resume?.returnPairing) task.returnPairing = resume.returnPairing;
         resume = undefined;
         const limitError = outputLimitError(node.name, task.output, maxItems);
         if (limitError !== undefined) {
@@ -630,7 +631,7 @@ export class ExecutionEngine {
     executionIndex: number;
     currentRunIndices: Map<string, number>;
     itemSourcesByRun: Map<string, ItemSources>;
-  }): Promise<TaskData | WaitRequest> {
+  }): Promise<TaskData | SuspensionRequest> {
     const { node, nodeType, entry, runData, pinData, graph, workflow } = input;
     const settings = resolveNodeSettings(node);
     const startTime = this.#clock.now();
@@ -913,6 +914,26 @@ export class ExecutionEngine {
 
     const context: NodeContext = {
       items,
+      callablePairing: (index) => {
+        const start = workflow.nodes.find((n) => n.type === 'draflow.childInput' && !n.disabled);
+        const indices = new Set<number>();
+        if (start)
+          resolveItemLineage(
+            start.name,
+            index,
+            entry,
+            input.graph,
+            input.runData,
+            input.itemSourcesByRun,
+            'main',
+            0,
+            (origin) => {
+              const links = origin.pairedItem;
+              for (const link of Array.isArray(links) ? links : links ? [links] : []) indices.add(link.item);
+            },
+          );
+        return [...indices].map((item) => ({ item, input: 0 }));
+      },
       itemCount: items.length,
       runIndex: entry.runIndex,
       mode: input.mode,
@@ -924,7 +945,7 @@ export class ExecutionEngine {
         item: items[index] ?? { json: {} },
         itemIndex: index,
         param: <T = ParamValue>(name: string, fallback?: T) => param<T>(name, index, fallback),
-        resolve: <T,>(value: T) => resolveValue(value, index),
+        resolve: <T>(value: T) => resolveValue(value, index),
       }),
       each: async (fn) => {
         const snapshot = [...items];
@@ -1414,7 +1435,9 @@ function resolveItemLineage(
   graph: WorkflowGraph,
   runData: RunData,
   itemSourcesByRun: Map<string, ItemSources>,
-  port: string, slot: number,
+  port: string,
+  slot: number,
+  collect?: (item: Item) => void,
 ): Item | undefined {
   const target = graph.byName.get(targetName) ?? graph.nodes.get(targetName);
   if (target === undefined) return undefined;
@@ -1427,11 +1450,13 @@ function resolveItemLineage(
     if (item !== undefined) {
       return followLineage(
         item,
+        itemSource.itemIndex,
         itemSource.source,
         target.id,
         runData,
         itemSourcesByRun,
         0,
+        collect,
       );
     }
   }
@@ -1444,19 +1469,32 @@ function resolveItemLineage(
   const item = items[itemIndex];
   if (item === undefined) return undefined;
 
-  return followLineage(item, source, target.id, runData, itemSourcesByRun, 0);
+  return followLineage(item, itemIndex, source, target.id, runData, itemSourcesByRun, 0, collect);
 }
 
 function followLineage(
   item: Item,
+  itemIndex: number,
   source: SourceRef | null,
   targetId: string,
   runData: RunData,
   itemSourcesByRun: Map<string, ItemSources>,
   depth: number,
+  collect?: (item: Item) => void,
+  visited = collect && new Map<string, number>(),
 ): Item | undefined {
   if (source === null || depth > 64) return undefined;
-  if (source.node === targetId) return item;
+  if (visited) {
+    // A shorter path can still reach ancestors beyond the first path's depth limit.
+    const key = JSON.stringify([source.node, source.runIndex, source.port, source.index, itemIndex]);
+    if ((visited.get(key) ?? Infinity) <= depth) return undefined;
+    visited.set(key, depth);
+  }
+  if (source.node === targetId) {
+    if (!collect) return item;
+    collect(item);
+    return undefined;
+  }
 
   const task = runData[source.node]?.[source.runIndex];
   if (task === undefined) return undefined;
@@ -1480,11 +1518,14 @@ function followLineage(
       if (nextItem !== undefined) {
         const found = followLineage(
           nextItem,
+          perItem.itemIndex,
           perItem.source,
           targetId,
           runData,
           itemSourcesByRun,
           depth + 1,
+          collect,
+          visited,
         );
         if (found !== undefined) return found;
       }
@@ -1500,11 +1541,14 @@ function followLineage(
     const nextSource = task.source?.[inputIndex] ?? null;
     const found = followLineage(
       nextItem,
+      pairing.item,
       nextSource,
       targetId,
       runData,
       itemSourcesByRun,
       depth + 1,
+      collect,
+      visited,
     );
     if (found !== undefined) return found;
   }

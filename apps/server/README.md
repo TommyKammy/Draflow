@@ -127,3 +127,37 @@ Add a `draflow.schedule` v1 node and activate its published workflow. The Node h
 Cron v1 accepts a numeric minute (0–59); each other field accepts one number or `*`. Choose either a day of month or a weekday when restricting the day. Use interval mode for recurring sub-hour periods. A named IANA zone is required. A nonexistent local minute is skipped at a forward clock change; a repeated local minute has one firing at its first occurrence. Invalid schedules reject activation and preserve the previous revision.
 
 Scheduled delivery keys stay reserved with their receipts across deactivation and restart, including when the wall clock moves backwards. The deduplication window for ordinary incoming events still applies to those events. The next due instant is persistent. Advancing it and admitting work share one SQLite transaction. After downtime, each active schedule admits only the **latest** missed occurrence and resumes its original cadence. A full queue retains the cursor and retries, coalescing newly missed times by the same rule. Repeating activation of the same revision preserves its schedule. Switching revisions or reactivating after deactivation starts a new schedule from that activation time. Previously accepted jobs keep their original revision.
+
+## Published subworkflows
+
+Publish the child first. Give it one enabled `draflow.childInput` with the permitted parent workflow IDs in its `callers` array, and connect that entry to a terminal `draflow.return`. In the parent, configure `draflow.call` with the child’s literal `workflowId` and numeric published `revision`. The host validates permission, return path, nesting depth (default 8) and recursion at parent publication. Each child uses its own HTTP credential grants. Publishing a new child revision takes effect when a new parent revision references it.
+
+The parent waits while the child runs or awaits an event. Its call output contains the returned rows in order with their input lineage. Empty upstream output skips the call under the normal flow rules. A child that filters out all rows returns an empty output. Child errors follow the call node’s error policy. The SQLite ledger records the parent and child run IDs independently of saved execution details.
+
+## Cursor paging and batches
+
+Publish [the order batch child](../../examples/process-order-batch.json), then publish and activate [the scheduled order import](../../examples/order-import.json) with its exact child revision. Replace the example source and destination URLs, configure their credential grants where needed, and use a destination that honors the idempotency key on registration.
+
+The `draflow.pages` node takes the same child target as a call. It sends GET to a fixed URL with `limit` and, after the first page, an opaque `cursor`. The response must contain an `items` array of JSON objects and a `nextCursor` string or null. A null cursor completes the scan. An empty page with a new cursor continues. Use a stable snapshot at the source when the job must account for every row while the source changes.
+
+| Parameter | Default | Meaning |
+| --- | ---: | --- |
+| pageSize | 100 | Maximum number of rows in one response |
+| batchSize | 25 | Maximum number of rows per sequential child run |
+| maxPages / maxItems | 10,000 / 1,000,000 | Limits for the entire scan |
+| maxBytes | 268,435,456 | Cumulative response byte limit (the server also limits each response) |
+| maxAttempts | 5 | Maximum attempts for a throttled page read |
+| deadlineMs | 86,400,000 | Time budget checked at page dispatch and when scheduling retries |
+| sumField | empty | Optional numeric source field to total over successful batches |
+
+The host saves the current page before starting a batch. Each successful child advances the confirmed count and optional total. The last batch releases the page and commits its next cursor in the same transaction. The parent receives one item with `pages`, `batches`, `items` and `total`. A repeated or expired cursor fails the scan at its last confirmed position. HTTP 429 and 503 use Retry-After or exponential backoff capped at 60 seconds. Other jobs can run between batches and while the scan awaits its retry time.
+
+The trusted JSON-lines CLI accepts the following requests. Use `progress` to inspect counts, retry time, child relations and uncertain effect keys, and `relations` on a child to find its parent. History replay also exposes the progress and related run IDs.
+
+```jsonl
+{"op":"progress","runId":"<parent-run-id>"}
+{"op":"relations","runId":"<child-run-id>"}
+{"op":"cancel","runId":"<parent-run-id>"}
+```
+
+Cancellation applies to the run and its unfinished descendants. Confirmed external writes remain effective. An outstanding write with an unknown outcome stays available for reconciliation on the child run. A canceled tree cannot initiate another page or batch after restart.

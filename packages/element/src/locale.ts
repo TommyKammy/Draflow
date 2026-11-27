@@ -1,5 +1,7 @@
 export type Locale = 'en' | 'ja';
 const japanese: Record<string, string> = {
+  'Pages completed': '確定ページ', 'Batches completed': '完了バッチ', 'Items completed': '処理済み明細',
+  'Next retry': '次回試行', 'Related runs and reconciliation': '親子の実行と要照合の操作',
   Replay: 'リプレイ', 'Execution replay': '実行リプレイ', 'Recorded task': '記録時のタスク', 'Recorded workflow': '記録時のワークフロー',
   'Previous task': '前のタスク', 'Next task': '次のタスク', 'No recorded tasks': '記録されたタスクはありません',
   'Not visited': '未実行', Interrupted: '中断', 'Detail unavailable': '詳細を取得できません', 'Copy to editor': 'エディタへコピー',

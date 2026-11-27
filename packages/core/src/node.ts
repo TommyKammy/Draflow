@@ -6,6 +6,7 @@ import type {
   JsonValue,
   NodeSettings,
   ParamValue,
+  PairedItem,
   PortData,
   WorkflowNode,
 } from './types.js';
@@ -43,8 +44,16 @@ export interface WaitRequest {
   dueAt: number;
 }
 
+export type SuspensionRequest =
+  | WaitRequest
+  | { mode: 'child' | 'pages' }
+  | { mode: 'return'; pairing: PairedItem[][] };
+
 export interface WaitResult {
-  reason: 'event' | 'time' | 'expired' | 'canceled';
+  reason: 'event' | 'time' | 'expired' | 'canceled' | 'result';
+  items?: Item[];
+  returnPairing?: PairedItem[][];
+  failure?: string;
   data: JsonObject;
 }
 
@@ -53,7 +62,7 @@ export type JournalItem = (index: number, fingerprint: string,
 
 export interface NodeType {
   journalMode?: (node: WorkflowNode) => 'keyed' | 'manual' | undefined;
-  wait?: (ctx: NodeContext) => WaitRequest;
+  wait?: (ctx: NodeContext) => SuspensionRequest;
   type: string;
   version: number;
   meta: NodeMeta;
@@ -260,6 +269,8 @@ export type FilterOperator =
   | 'notExists';
 
 export interface NodeContext {
+  /** Input row of the callable entry associated with this output row. */
+  callablePairing?(index: number): PairedItem[];
   resume?: WaitResult;
   journalItem?: JournalItem;
   /** All items of the primary input. */

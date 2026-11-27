@@ -38,3 +38,44 @@ for (const phase of ['running', 'finished']) {
     }
   });
 }
+
+test('replay shows batch progress and discloses related runs with the keyboard', async ({ page }) => {
+  await page.goto('/');
+  await page.locator('draflow-editor:not([hidden])').evaluate(async (editor) => {
+    editor.setAttribute('locale', 'en');
+    const workflow = editor.workflow;
+    await editor.ports.executions.append(
+      {
+        id: 'progress',
+        workflowId: workflow.id,
+        workflowName: workflow.name,
+        mode: 'trigger',
+        startedAt: 1,
+        stoppedAt: 2,
+        status: 'waiting',
+        executed: 0,
+        reused: 0,
+      },
+      {
+        workflow,
+        tasks: [],
+        orchestration: {
+          pages: [{ node: 'pages', pages: 6, batches: 24, items: 600, retryAt: Date.now() + 30000 }],
+          calls: [{ child: 'child-run-24', parent: 'progress', childRevision: 1 }],
+          uncertain: [],
+          canceled: false,
+        },
+      },
+    );
+  });
+  await page.getByRole('button', { name: 'Execution history' }).click();
+  await page.getByRole('button', { name: 'Replay' }).click();
+  const replay = page.getByRole('region', { name: 'Execution replay' });
+  await expect(
+    replay.getByText(/Pages completed 6.*Batches completed 24.*Items completed 600.*Next retry/),
+  ).toBeVisible();
+  const summary = replay.getByText('Related runs and reconciliation (1 / 0)');
+  await summary.focus();
+  await page.keyboard.press('Enter');
+  await expect(replay.getByText(/child-run-24/)).toBeVisible();
+});

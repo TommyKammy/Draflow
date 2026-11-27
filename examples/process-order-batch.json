@@ -1,0 +1,78 @@
+{
+  "schema": "draflow/v1",
+  "id": "process-order-batch",
+  "name": "process-order-batch",
+  "nodes": [
+    {
+      "id": "input",
+      "name": "input",
+      "type": "draflow.childInput",
+      "typeVersion": 1,
+      "position": {
+        "x": 0,
+        "y": 0
+      },
+      "parameters": {
+        "callers": [
+          "order-import"
+        ]
+      }
+    },
+    {
+      "id": "register",
+      "name": "register",
+      "type": "draflow.httpRequest",
+      "typeVersion": 2,
+      "position": {
+        "x": 220,
+        "y": 0
+      },
+      "parameters": {
+        "url": "https://sink.example.test/orders",
+        "method": "POST",
+        "body": "={{ $json }}",
+        "delivery": "keyed"
+      }
+    },
+    {
+      "id": "return",
+      "name": "return",
+      "type": "draflow.return",
+      "typeVersion": 1,
+      "position": {
+        "x": 440,
+        "y": 0
+      },
+      "parameters": {}
+    }
+  ],
+  "settings": {},
+  "connections": [
+    {
+      "id": "input-register",
+      "from": {
+        "node": "input",
+        "port": "main",
+        "index": 0
+      },
+      "to": {
+        "node": "register",
+        "port": "main",
+        "index": 0
+      }
+    },
+    {
+      "id": "register-return",
+      "from": {
+        "node": "register",
+        "port": "main",
+        "index": 0
+      },
+      "to": {
+        "node": "return",
+        "port": "main",
+        "index": 0
+      }
+    }
+  ]
+}
