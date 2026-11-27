@@ -505,28 +505,29 @@ export class ExecutionEngine {
           nextIndices: [...nextRunIndices], currentIndices: [...currentRunIndices],
           sources: [...runItemSources], executions: executions - 1,
         });
-        if (nodeType.wait && activeNode && !resume && !Object.hasOwn(pinData, node.id)) {
-          if (!persistence) throw new Error('This node requires a durable host');
-          const request = nodeType.wait(this.#createContext({ ...nodeInput, input: entry.input }));
-          persistence.suspend(snapshot(), request);
-          status = 'waiting';
-          break;
-        }
+        const prepareWait = activeNode && !resume && !Object.hasOwn(pinData, node.id) ? nodeType.wait : undefined;
+        if (prepareWait && !persistence) throw new Error('This node requires a durable host');
         if (resume?.reason === 'canceled') {
           status = 'canceled';
           break;
         }
-        const journalMode = activeNode && !Object.hasOwn(pinData, node.id) ? nodeType.journalMode?.(node) : undefined;
+        const journalMode = !prepareWait && activeNode && !Object.hasOwn(pinData, node.id) ? nodeType.journalMode?.(node) : undefined;
         if (journalMode && (!persistence?.beginJournal || !persistence.endJournal))
           throw new Error('Recorded HTTP delivery requires a durable host');
         const journalItem = journalMode && persistence!.beginJournal!(snapshot(), journalMode);
         if (journalItem) replayable = true;
-        else if (replayable) {
+        else if (replayable && !prepareWait) {
           // Beyond this boundary arbitrary node code may already have produced an external effect.
           persistence?.leaveCheckpoint?.();
           replayable = false;
         }
-        const task = await this.#runNode({ ...nodeInput, ...(resume && { resume }), ...(journalItem && { journalItem }) });
+        const task = await this.#runNode({ ...nodeInput, prepareWait, ...(resume && { resume }), ...(journalItem && { journalItem }) });
+        if ('dueAt' in task) {
+          // Commit only a validated request. Storage failures remain execution-level errors.
+          persistence!.suspend(snapshot(), task);
+          status = 'waiting';
+          break;
+        }
         if (journalItem && persistence!.endJournal!() === 'review') {
           status = 'waiting';
           break;
@@ -611,6 +612,7 @@ export class ExecutionEngine {
   }
 
   async #runNode(input: {
+    prepareWait: NodeType['wait'];
     resume?: WaitResult;
     journalItem?: JournalItem;
     workflow: Workflow;
@@ -628,7 +630,7 @@ export class ExecutionEngine {
     executionIndex: number;
     currentRunIndices: Map<string, number>;
     itemSourcesByRun: Map<string, ItemSources>;
-  }): Promise<TaskData> {
+  }): Promise<TaskData | WaitRequest> {
     const { node, nodeType, entry, runData, pinData, graph, workflow } = input;
     const settings = resolveNodeSettings(node);
     const startTime = this.#clock.now();
@@ -703,7 +705,7 @@ export class ExecutionEngine {
     if (input.journalItem) context.journalItem = input.journalItem;
     if (input.resume) context.resume = input.resume;
     const execute = nodeType.execute;
-    if (execute === undefined) {
+    if (!input.prepareWait && execute === undefined) {
       return {
         nodeId: node.id,
         runIndex: entry.runIndex,
@@ -735,10 +737,12 @@ export class ExecutionEngine {
       }
 
       try {
+        if (input.signal.aborted) throw abortReason(input.signal);
+        if (input.prepareWait) return input.prepareWait.call(nodeType, context);
         const result = await raceWithAbort(
           Promise.resolve().then(() => {
             if (input.signal.aborted) throw abortReason(input.signal);
-            return execute.call(nodeType, context);
+            return execute!.call(nodeType, context);
           }),
           input.signal,
         );

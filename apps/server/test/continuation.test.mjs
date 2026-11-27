@@ -282,3 +282,30 @@ test('a token consumed at the first wait cannot resolve the next wait in the sam
   await state(host, id, 'finished');
   assert.equal(host.receipt(id).outcome, 'canceled');
 });
+
+for (const onError of ['stop', 'continue', 'errorOutput']) {
+  test('invalid expression deadline honors Wait onError=' + onError, async (t) => {
+    const db = setup(t);
+    const host = db.open();
+    const doc = workflow();
+    const wait = node('wait', 'draflow.wait', { dueAt: '={{ $json.deadline }}' });
+    wait.settings = { onError };
+    doc.nodes.push(wait);
+    const route = edge('wait', 'sink');
+    if (onError === 'errorOutput') route.from.port = 'error';
+    doc.connections = [edge('a', 'wait'), route];
+    host.activate(doc.id, host.publish(doc));
+    const id = host.accept(doc.id, 'a', { items: [{ json: { deadline: 'invalid' } }] });
+    await state(host, id, 'finished');
+    const detail = await host.history.get(doc.id, id);
+    const failed = detail.tasks.find(row => row.nodeId === 'wait')?.task;
+    assert.equal(failed?.status, 'error');
+    assert.match(failed.error.message, /absolute deadline/);
+    assert.equal(host.receipt(id).outcome, onError === 'stop' ? 'error' : 'success');
+    const sink = detail.tasks.find(row => row.nodeId === 'sink')?.task;
+    if (onError === 'stop') assert.equal(sink, undefined);
+    if (onError === 'continue') assert.deepEqual(sink.input.main[0][0].json, { deadline: 'invalid' });
+    if (onError === 'errorOutput') assert.equal(sink.input.main[0][0].json.error, failed.error.message);
+    assert.deepEqual(host.transitions(id), []);
+  });
+}
