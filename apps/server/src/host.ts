@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { setImmediate as yieldToHost } from 'node:timers/promises';
 import { isPlainObject, type ExecutionEngineOptions, type JsonObject, type Workflow } from '@draflow/core';
-import { MemoryRuntime, type TriggerEvent } from '@draflow/runtime';
+import { MemoryRuntime, type PublishedWorkflow, type TriggerEvent } from '@draflow/runtime';
 import type { ExecutionSummary } from '@draflow/storage';
-import { serverHttp, type HttpAuth } from './http-auth.js';
+import { ReadThrottled, serverHttp, type HttpAuth } from './http-auth.js';
+import { pageConfig, readPage } from './pages.js';
 import { latestDue, nextTime, scheduleFor } from './schedule.js';
 import { executionTasks, QueueFull, SqliteLedger, type DeliverySource, type Reconciliation } from './sqlite.js';
 
@@ -14,6 +15,7 @@ interface HostOptions extends Omit<ExecutionEngineOptions, 'credentialFetch'> {
   };
   httpAuth?: HttpAuth;
   maxHttpResponseBytes?: number;
+  maxCallDepth?: number;
   capacity?: number;
   dedupMs?: number;
   maxDetailBytes?: number;
@@ -33,6 +35,7 @@ export class NodeHost {
   #cancelSchedule: (() => void) | undefined;
   #stopping = false;
   #closed = false;
+  #active: { id: string; controller: AbortController } | undefined;
   #worker: Promise<void> | undefined;
   #fault: Error | undefined;
 
@@ -50,7 +53,7 @@ export class NodeHost {
     this.#capacity = options.capacity ?? 100;
     this.#ttl = options.dedupMs ?? 86_400_000;
     const budget = options.maxDetailBytes ?? 4 * 1024 * 1024;
-    for (const n of [this.#capacity, this.#ttl, budget]) {
+    for (const n of [this.#capacity, this.#ttl, budget, options.maxCallDepth ?? 8]) {
       if (!Number.isSafeInteger(n) || n < 0) throw new RangeError('Invalid host limit');
     }
     this.#engine = {
@@ -61,12 +64,13 @@ export class NodeHost {
         options.httpAuth,
       ),
     };
-    this.#ledger = new SqliteLedger(path, budget);
+    this.#ledger = new SqliteLedger(path, budget, options.maxCallDepth ?? 8);
     try {
       this.#ledger.recover();
+      const checked = new Set<string>();
       for (const row of this.#ledger.requiredPublications()) {
-        new MemoryRuntime(this.#engine).restore(
-          this.#ledger.publication(String(row.workflowId), Number(row.revision)),
+        this.#checkPublication(
+          this.#ledger.publication(String(row.workflowId), Number(row.revision)), checked,
         );
       }
       this.#armSchedules();
@@ -82,6 +86,22 @@ export class NodeHost {
   }
   receipt(runId: string) {
     return this.#ledger.get(runId);
+  }
+  cancel(runId: string) {
+    this.#ready();
+    const ids = this.#ledger.cancelTree(runId);
+    if (this.#active && ids.includes(this.#active.id)) this.#active.controller.abort();
+    if (ids.length) this.#wake();
+    return ids.length > 0;
+  }
+  inspect(runId: string) {
+    return this.#ledger.inspect(runId);
+  }
+  progress(runId: string) {
+    return this.#ledger.progress(runId);
+  }
+  relations(runId: string) {
+    return this.#ledger.relations(runId);
   }
   effects(runId: string) {
     return this.#ledger.effects(runId);
@@ -101,7 +121,8 @@ export class NodeHost {
   }
   resolveWait(runId: string, token: string, reason: 'event' | 'canceled', data: JsonObject = {}) {
     this.#ready();
-    if (!['event', 'canceled'].includes(reason) || !isPlainObject(data)) throw new Error('Invalid wait response');
+    if (!['event', 'canceled'].includes(reason) || !isPlainObject(data))
+      throw new Error('Invalid wait response');
     const accepted = this.#ledger.resolveWait(runId, token, reason, data, this.#scheduleClock.now());
     // Consuming a wait can only remove a deadline. The existing timer may wake
     // early, but cannot miss an earlier deadline or invalidate a committed reply.
@@ -127,10 +148,22 @@ export class NodeHost {
     return this.#ledger.publish(runtime.publish(workflow.id).workflow);
   }
 
+  #checkPublication(publication: PublishedWorkflow, checked = new Set<string>()) {
+    const key = JSON.stringify([publication.workflow.id, publication.revision]);
+    if (checked.has(key)) return;
+    new MemoryRuntime(this.#engine).restore(publication);
+    checked.add(key);
+    for (const node of publication.workflow.nodes) {
+      if (node.disabled || (node.type !== 'draflow.call' && node.type !== 'draflow.pages')) continue;
+      const { workflowId, revision } = node.parameters;
+      this.#checkPublication(this.#ledger.publication(String(workflowId), Number(revision)), checked);
+    }
+  }
+
   activate(id: string, revision: number) {
     this.#ready();
     const publication = this.#ledger.publication(id, revision);
-    new MemoryRuntime(this.#engine).restore(publication);
+    this.#checkPublication(publication);
     const routes = publication.workflow.nodes
       .filter((n) => !n.disabled && n.type === 'draflow.webhook')
       .map((node) => {
@@ -146,7 +179,7 @@ export class NodeHost {
         const spec = scheduleFor(node);
         return { triggerNodeId: node.id, spec, nextAt: nextTime(spec, now) };
       });
-    this.#updateRegistration(prepare => this.#ledger.activate(id, revision, routes, schedules, prepare));
+    this.#updateRegistration((prepare) => this.#ledger.activate(id, revision, routes, schedules, prepare));
     if (this.#webhookActivations.get(id)?.revision !== revision) this.#webhookActivations.delete(id);
   }
 
@@ -210,7 +243,7 @@ export class NodeHost {
 
   deactivate(id: string) {
     this.#ready();
-    this.#updateRegistration(prepare => this.#ledger.deactivate(id, prepare));
+    this.#updateRegistration((prepare) => this.#ledger.deactivate(id, prepare));
     this.#webhookActivations.delete(id);
   }
 
@@ -231,6 +264,7 @@ export class NodeHost {
       const node = workflow.nodes.find((node) => node.id === trigger);
       if (
         !node ||
+        node.type === 'draflow.childInput' ||
         node.disabled ||
         this.options.registry.require(node.type, node.typeVersion).meta.category !== 'trigger'
       ) {
@@ -245,7 +279,12 @@ export class NodeHost {
     let cancelPrepared: (() => void) | undefined;
     try {
       // Read the transaction's schedule and keep the current timer live until COMMIT.
-      if (!change(() => { cancelPrepared = this.#prepareScheduleTimer(); })) return;
+      if (
+        !change(() => {
+          cancelPrepared = this.#prepareScheduleTimer();
+        })
+      )
+        return;
     } catch (error) {
       cancelPrepared?.();
       throw error;
@@ -272,6 +311,7 @@ export class NodeHost {
     if (this.#stopping || this.#fault) return;
     try {
       const now = this.#scheduleClock.now();
+      if (this.#ledger.wakeRetries(now)) this.#wake();
       for (const row of this.#ledger.dueWaits(now)) {
         this.#ledger.resolveWait(String(row.runId), String(row.token), 'timer', {}, now);
         this.#wake();
@@ -311,6 +351,7 @@ export class NodeHost {
 
   async #drain() {
     while (true) {
+      this.#active = undefined;
       await yieldToHost();
       if (this.#stopping || this.#fault) return;
       const job = this.#ledger.claim();
@@ -319,7 +360,79 @@ export class NodeHost {
         return;
       }
       const { receipt: r, items } = job;
+      if (this.#ledger.canceled(r.runId)) {
+        this.#ledger.finishCanceled(r);
+        continue;
+      }
+      const controller = new AbortController();
+      this.#active = { id: r.runId, controller };
       const publication = this.#ledger.publication(r.workflowId, r.revision);
+      const operation = this.#ledger.pendingMode(r.runId);
+      if (operation === 'pages') {
+        const entry = this.#ledger.continuation(r.runId)!.checkpoint.stack[0]!;
+        const node = publication.workflow.nodes.find((n) => n.id === entry.nodeId)!;
+        const state = this.#ledger.pageState(r.runId, node.id, entry.runIndex);
+        const now = this.#scheduleClock.now();
+        if (now >= Number(state.created) + pageConfig(node).deadlineMs) {
+          this.#ledger.pageFailure(r.runId, node.id, entry.runIndex, 'Page sync deadline exceeded');
+          continue;
+        }
+        if (state.rows === null) {
+          let page;
+          try {
+            if (Number(state.pages) >= pageConfig(node).maxPages)
+              throw new Error('Page count limit exceeded');
+            page = await readPage(
+              this.#engine.credentialFetch!,
+              r.workflowId,
+              node,
+              state.cursor as string | null,
+              AbortSignal.any([
+                controller.signal,
+                AbortSignal.timeout(
+                  Math.min(30000, Number(state.created) + pageConfig(node).deadlineMs - now),
+                ),
+              ]),
+            );
+            if (controller.signal.aborted) {
+              this.#ledger.finishCanceled(r);
+              continue;
+            }
+          } catch (err) {
+            if (controller.signal.aborted) {
+              this.#ledger.finishCanceled(r);
+              continue;
+            }
+            if (err instanceof ReadThrottled) {
+              this.#ledger.throttle(
+                r.runId,
+                node,
+                entry.runIndex,
+                err.status,
+                err.retryAfter,
+                this.#scheduleClock.now(),
+              );
+              this.#armSchedules();
+              continue;
+            }
+            this.#ledger.pageFailure(
+              r.runId,
+              node.id,
+              entry.runIndex,
+              err instanceof Error ? err.message : 'Page read failed',
+            );
+            continue;
+          }
+          this.#ledger.savePage(r, node, entry.runIndex, page);
+        }
+        if (this.#ledger.pendingMode(r.runId) === 'pages') this.#ledger.batch(r, node, entry.runIndex);
+        continue;
+      }
+      if (operation === 'child') {
+        const entry = this.#ledger.continuation(r.runId)!.checkpoint.stack[0]!;
+        this.#ledger.dispatchChild(r, publication.workflow.nodes.find((n) => n.id === entry.nodeId)!);
+        continue;
+      }
       // Run the accepted revision even after a replacement or deactivation.
       const runtime = new MemoryRuntime({
         ...this.#engine,
@@ -333,12 +446,17 @@ export class NodeHost {
       });
       runtime.restore(publication);
       await runtime.activate(r.workflowId, r.revision);
-      const { result } = await runtime.fire(r.workflowId, r.triggerNodeId, {
-        items,
-        runId: r.runId,
-        mode: r.mode,
-        ...(r.eventKey !== null && { key: r.eventKey }),
-      });
+      const { result } = await runtime.fire(
+        r.workflowId,
+        r.triggerNodeId,
+        {
+          items,
+          runId: r.runId,
+          mode: r.mode,
+          ...(r.eventKey !== null && { key: r.eventKey }),
+        },
+        controller.signal,
+      );
       if (result.status === 'waiting') {
         this.#armSchedules();
         continue;

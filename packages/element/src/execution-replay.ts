@@ -56,6 +56,35 @@ export function executionReplay(detail: ExecutionDetail, summary: ExecutionSumma
   const visited = new Set(tasks.map(entry => entry.nodeId));
   const skipped = workflow.nodes.filter(node => !visited.has(node.id));
   root.append(title, graph, topology);
+  const info = detail.orchestration;
+  if (info) {
+    for (const page of info.pages) {
+      const line = document.createElement('p');
+      const fields = [
+        String(page.node),
+        t('Pages completed') + ' ' + page.pages,
+        t('Batches completed') + ' ' + page.batches,
+        t('Items completed') + ' ' + page.items,
+      ];
+      if (typeof page.retryAt === 'number')
+        fields.push(t('Next retry') + ' ' + new Date(page.retryAt).toLocaleString(locale));
+      if (page.error) fields.push(String(page.error));
+      line.textContent = fields.join(' · ');
+      root.append(line);
+    }
+    const detail = document.createElement('details'),
+      label = document.createElement('summary');
+    label.textContent =
+      t('Related runs and reconciliation') + ' (' + info.calls.length + ' / ' + info.uncertain.length + ')';
+    const data = document.createElement('pre');
+    detail.ontoggle = () => {
+      data.textContent = detail.open
+        ? JSON.stringify({ calls: info.calls, uncertain: info.uncertain }, null, 2)
+        : '';
+    };
+    detail.append(label, data);
+    root.append(detail);
+  }
   for (const line of [detail.error?.message, !summary.interrupted && skipped.length && t('Not visited') + ' · ' + skipped.map(n => n.name).join(', ')]) {
     if (line) { const p = document.createElement('p'); p.textContent = line; root.append(p); }
   }

@@ -113,6 +113,8 @@ export interface SourceRef {
 export type TaskStatus = 'success' | 'error' | 'waiting' | 'canceled';
 
 export interface TaskData {
+  /** Callable entry rows corresponding to each explicit return item. */
+  returnPairing?: PairedItem[][];
   nodeId: string;
   runIndex: number;
   startTime: number;

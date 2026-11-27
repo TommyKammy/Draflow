@@ -68,6 +68,15 @@ try {
         case 'accept':
           result = host.accept(q.workflowId, q.triggerNodeId, q.event);
           break;
+        case 'cancel':
+          result = host.cancel(q.runId);
+          break;
+        case 'progress':
+          result = host.inspect(q.runId);
+          break;
+        case 'relations':
+          result = host.relations(q.runId);
+          break;
         case 'effects':
           result = host.effects(q.runId);
           break;

@@ -13,7 +13,7 @@ export interface TriggerEvent {
   items: Item[];
   key?: string;
   runId?: string;
-  mode?: 'trigger' | 'webhook';
+  mode?: 'trigger' | 'webhook' | 'subworkflow';
 }
 
 export interface RuntimeExecution {
@@ -136,13 +136,13 @@ export class MemoryRuntime {
     });
   }
 
-  async fire(id: string, triggerNodeId: string, event: TriggerEvent): Promise<RuntimeExecution> {
+  async fire(id: string, triggerNodeId: string, event: TriggerEvent, signal?: AbortSignal): Promise<RuntimeExecution> {
     const active = this.#active.get(id);
     if (!active) throw new Error(`Inactive workflow: ${id}`);
-    return this.#dispatch(active, triggerNodeId, event);
+    return this.#dispatch(active, triggerNodeId, event, signal);
   }
 
-  async #dispatch(active: ActivePublication, triggerNodeId: string, event: TriggerEvent): Promise<RuntimeExecution> {
+  async #dispatch(active: ActivePublication, triggerNodeId: string, event: TriggerEvent, signal?: AbortSignal): Promise<RuntimeExecution> {
     const { workflow, revision } = active.publication;
     if (this.#active.get(workflow.id) !== active) throw new Error('Inactive trigger registration');
     if (!active.triggers.has(triggerNodeId)) throw new Error(`Unknown active trigger: ${triggerNodeId}`);
@@ -150,6 +150,7 @@ export class MemoryRuntime {
     // Expressions can expose parameter objects to nodes, and the engine starts asynchronously.
     const run = this.#engine.run(structuredClone(workflow), {
       ...(runId !== undefined && { runId }),
+      ...(signal && { signal }),
       mode,
       startNodeId: triggerNodeId,
       triggerData: { main: [structuredClone(event.items)] },

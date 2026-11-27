@@ -1,0 +1,55 @@
+{
+  "schema": "draflow/v1",
+  "id": "order-import",
+  "name": "order-import",
+  "nodes": [
+    {
+      "id": "schedule",
+      "name": "schedule",
+      "type": "draflow.schedule",
+      "typeVersion": 1,
+      "position": {
+        "x": 0,
+        "y": 0
+      },
+      "parameters": {
+        "mode": "interval",
+        "intervalSeconds": 3600
+      }
+    },
+    {
+      "id": "pages",
+      "name": "pages",
+      "type": "draflow.pages",
+      "typeVersion": 1,
+      "position": {
+        "x": 220,
+        "y": 0
+      },
+      "parameters": {
+        "workflowId": "process-order-batch",
+        "revision": 1,
+        "url": "https://source.example.test/orders",
+        "pageSize": 100,
+        "batchSize": 25,
+        "sumField": "amount"
+      }
+    }
+  ],
+  "settings": {},
+  "connections": [
+    {
+      "id": "schedule-pages",
+      "from": {
+        "node": "schedule",
+        "port": "main",
+        "index": 0
+      },
+      "to": {
+        "node": "pages",
+        "port": "main",
+        "index": 0
+      }
+    }
+  ]
+}
