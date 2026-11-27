@@ -77,3 +77,16 @@ const response = await fetch(origin + path, {
 Use the returned test path verbatim when signing test requests. The optional delivery ID is 1–256 printable non-space ASCII characters. To send an independent event, omit its header and sign with an empty delivery field. The workflow receives a single item with `json.body` containing the verified JSON value. Signatures and HTTP headers are excluded from the workflow.
 
 A committed acceptance returns HTTP 202 and `{"runId":"…"}`. Redelivery of a signed event ID follows the host's deduplication window. Both intake modes share the bounded worker queue and use independent deduplication scopes. Invalid JSON or delivery headers return 400, failed signatures 401, unknown or expired routes 404, unsupported methods 405 and oversized bodies 413. The raw body limit defaults to 1 MiB and can be changed with `DRAFLOW_WEBHOOK_MAX_BODY_BYTES`. Queue or storage unavailability returns 503.
+
+## Scheduled triggers
+
+Add a `draflow.schedule` v1 node and activate its published workflow. The Node host starts the timer automatically. Each accepted run starts at its own schedule node with one item, `{ "scheduledAt": "<UTC ISO timestamp>" }` in `item.json`. The timestamp is also the delivery key used by `byEvent`.
+
+| Mode | Literal node parameters | Timing |
+| --- | --- | --- |
+| Interval | `{"mode":"interval","intervalSeconds":60}` | Whole seconds from 1 to 31536000. The first occurrence is one interval after activation; later occurrences retain that phase. |
+| Cron | `{"mode":"cron","cron":"30 9 * * 1","timezone":"Asia/Tokyo"}` | Every Monday at 09:30 in Tokyo. The five fields are minute, hour, day of month, month and weekday (Sunday = 0). |
+
+Cron v1 accepts a numeric minute (0–59); each other field accepts one number or `*`. Choose either a day of month or a weekday when restricting the day. Use interval mode for recurring sub-hour periods. A named IANA zone is required. A nonexistent local minute is skipped at a forward clock change; a repeated local minute has one firing at its first occurrence. Invalid schedules reject activation and preserve the previous revision.
+
+Scheduled delivery keys stay reserved with their receipts across deactivation and restart, including when the wall clock moves backwards. The deduplication window for ordinary incoming events still applies to those events. The next due instant is persistent. Advancing it and admitting work share one SQLite transaction. After downtime, each active schedule admits only the **latest** missed occurrence and resumes its original cadence. A full queue retains the cursor and retries, coalescing newly missed times by the same rule. Repeating activation of the same revision preserves its schedule. Switching revisions or reactivating after deactivation starts a new schedule from that activation time. Previously accepted jobs keep their original revision.

@@ -4,9 +4,14 @@ import { isPlainObject, type ExecutionEngineOptions, type Workflow } from '@draf
 import { MemoryRuntime, type TriggerEvent } from '@draflow/runtime';
 import type { ExecutionSummary } from '@draflow/storage';
 import { serverHttp, type HttpAuth } from './http-auth.js';
-import { SqliteLedger } from './sqlite.js';
+import { latestDue, nextTime, scheduleFor } from './schedule.js';
+import { QueueFull, SqliteLedger } from './sqlite.js';
 
 interface HostOptions extends Omit<ExecutionEngineOptions, 'credentialFetch'> {
+  scheduleClock?: {
+    now(): number;
+    arm(callback: () => void, delayMs: number): () => void;
+  };
   httpAuth?: HttpAuth;
   maxHttpResponseBytes?: number;
   capacity?: number;
@@ -24,6 +29,8 @@ export class NodeHost {
   readonly #webhookActivations = new Map<string, { revision: number; token: symbol }>();
   readonly #capacity: number;
   readonly #ttl: number;
+  readonly #scheduleClock: NonNullable<HostOptions['scheduleClock']>;
+  #cancelSchedule: (() => void) | undefined;
   #stopping = false;
   #closed = false;
   #worker: Promise<void> | undefined;
@@ -33,6 +40,13 @@ export class NodeHost {
     path: string,
     private readonly options: HostOptions,
   ) {
+    this.#scheduleClock = options.scheduleClock ?? {
+      now: Date.now,
+      arm(callback, delay) {
+        const timer = setTimeout(callback, delay);
+        return () => clearTimeout(timer);
+      },
+    };
     this.#capacity = options.capacity ?? 100;
     this.#ttl = options.dedupMs ?? 86_400_000;
     const budget = options.maxDetailBytes ?? 4 * 1024 * 1024;
@@ -55,6 +69,7 @@ export class NodeHost {
           this.#ledger.publication(String(row.workflowId), Number(row.revision)),
         );
       }
+      this.#armSchedules();
       this.#wake();
     } catch (error) {
       this.#ledger.close();
@@ -99,7 +114,15 @@ export class NodeHost {
           throw new Error('Invalid Webhook path');
         return { path: '/webhook/' + path, triggerNodeId: node.id };
       });
-    this.#ledger.activate(id, revision, routes);
+    const now = this.#scheduleClock.now();
+    const schedules = publication.workflow.nodes
+      .filter((n) => !n.disabled && n.type === 'draflow.schedule')
+      .map((node) => {
+        const spec = scheduleFor(node);
+        return { triggerNodeId: node.id, spec, nextAt: nextTime(spec, now) };
+      });
+    this.#ledger.activate(id, revision, routes, schedules);
+    this.#armSchedules();
     if (this.#webhookActivations.get(id)?.revision !== revision) this.#webhookActivations.delete(id);
   }
 
@@ -135,11 +158,7 @@ export class NodeHost {
     return { ...route, registration: activation.token };
   }
 
-  acceptWebhook(
-    path: string,
-    target: NonNullable<ReturnType<NodeHost['webhook']>>,
-    event: TriggerEvent,
-  ) {
+  acceptWebhook(path: string, target: NonNullable<ReturnType<NodeHost['webhook']>>, event: TriggerEvent) {
     this.#ready();
     const runId = this.#ledger.accept(
       target.workflowId,
@@ -168,6 +187,7 @@ export class NodeHost {
   deactivate(id: string) {
     this.#ready();
     this.#ledger.deactivate(id);
+    this.#armSchedules();
     this.#webhookActivations.delete(id);
   }
 
@@ -198,19 +218,57 @@ export class NodeHost {
     return runId;
   }
 
+  #armSchedules(minDelay = 0) {
+    this.#cancelSchedule?.();
+    this.#cancelSchedule = undefined;
+    const next = this.#ledger.nextScheduleTime();
+    if (next === undefined) return;
+    // Recheck long waits periodically in case the wall clock moves.
+    const delay = Math.max(minDelay, Math.min(60_000, next - this.#scheduleClock.now()));
+    this.#cancelSchedule = this.#scheduleClock.arm(() => this.#tickSchedules(), delay);
+  }
+
+  #tickSchedules() {
+    if (this.#stopping || this.#fault) return;
+    try {
+      const now = this.#scheduleClock.now();
+      for (const row of this.#ledger.dueSchedules(now)) {
+        const due = latestDue(row.spec, row.nextAt, now);
+        this.#ledger.acceptSchedule(
+          row.workflowId,
+          row.triggerNodeId,
+          due,
+          nextTime(row.spec, due),
+          this.#capacity,
+        );
+        this.#wake();
+      }
+      this.#armSchedules();
+    } catch (error) {
+      if (error instanceof QueueFull) this.#armSchedules(1000);
+      else this.#workerFailed(error);
+    }
+  }
+
+  #workerFailed(error: unknown) {
+    if (this.#fault) return;
+    this.#cancelSchedule?.();
+    this.#fault = new Error('Worker stopped', { cause: error });
+    this.options.onWorkerError?.(this.#fault);
+  }
+
   #wake() {
     if (this.#worker) return;
     this.#worker = this.#drain().catch((error) => {
       // A failed completion commit leaves the durable claim intact for recovery.
-      this.#fault = new Error('Worker stopped', { cause: error });
-      this.options.onWorkerError?.(this.#fault);
+      this.#workerFailed(error);
     });
   }
 
   async #drain() {
     while (true) {
       await yieldToHost();
-      if (this.#stopping) return;
+      if (this.#stopping || this.#fault) return;
       const job = this.#ledger.claim();
       if (!job) {
         this.#worker = undefined;
@@ -256,6 +314,7 @@ export class NodeHost {
   async close(deadlineMs = 5000) {
     if (this.#closed) return;
     this.#stopping = true;
+    this.#cancelSchedule?.();
     let timer: NodeJS.Timeout | undefined;
     try {
       await Promise.race([
