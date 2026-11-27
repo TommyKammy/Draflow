@@ -131,17 +131,17 @@ export class NodeHost {
         const shared = this.#ledger.shared!;
         const every = Math.min(options.shared.pollMs ?? 250, Math.floor(shared.leaseMs / 3));
         this.#poll = setInterval(() => {
-          if (this.#stopping || this.#fault) return;
+          if (this.#fault || (this.#stopping && !this.#active.size)) return;
           try {
             if (this.#executes()) {
               shared.heartbeat();
-              this.#ledger.recover();
+              if (!this.#stopping) this.#ledger.recover();
               for (const [id, controller] of this.#active) {
                 if (this.#ledger.canceled(id) || !shared.ownsLiveRun(id)) controller.abort();
               }
-              this.#wake();
+              if (!this.#stopping) this.#wake();
             }
-            if (this.#schedules()) this.#tickSchedules();
+            if (!this.#stopping && this.#schedules()) this.#tickSchedules();
           } catch (error) {
             this.#workerFailed(error);
           }
@@ -687,7 +687,6 @@ export class NodeHost {
   async close(deadlineMs = 5000) {
     if (this.#closed) return;
     this.#stopping = true;
-    clearInterval(this.#poll);
     this.#cancelSchedule?.();
     let timer: NodeJS.Timeout | undefined;
     try {
@@ -697,6 +696,7 @@ export class NodeHost {
           timer = setTimeout(() => reject(new Error('Worker shutdown deadline exceeded')), deadlineMs);
         }),
       ]);
+      clearInterval(this.#poll);
       if (!this.#closed) this.#ledger.close();
       this.#closed = true;
     } finally {

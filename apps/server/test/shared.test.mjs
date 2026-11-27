@@ -514,3 +514,67 @@ test(
     assert.ok(a.acceptWebhook(path, current, event));
   },
 );
+
+for (const delivery of ['keyed', 'manual']) {
+  test(
+    'graceful shutdown retains the in-flight ' + delivery + ' delivery lease',
+    { skip: !url },
+    async (t) => {
+      const shared = {
+        connectionString: url,
+        organization: dir(t),
+        role: 'worker',
+        leaseMs: 500,
+        pollMs: 50,
+      };
+      let ownerSends = 0;
+      let peerSends = 0;
+      let release;
+      const response = new Promise((resolve) => {
+        release = resolve;
+      });
+      const owner = new NodeHost('', {
+        shared,
+        registry,
+        fetch: async () => {
+          ownerSends++;
+          await response;
+          return Response.json({});
+        },
+      });
+      let peer;
+      t.after(async () => {
+        release();
+        await owner.close();
+        await peer?.close();
+      });
+      const write = {
+        ...example.nodes[1],
+        type: 'draflow.httpRequest',
+        typeVersion: 2,
+        parameters: { url: 'https://shutdown.test/write', method: 'POST', delivery },
+      };
+      const flow = { ...example, nodes: [example.nodes[0], write], connections: [example.connections[0]] };
+      owner.activate(flow.id, owner.publish(flow));
+      const id = owner.accept(flow.id, 'schedule', { items: [{ json: {} }] });
+      await until(() => ownerSends === 1);
+      const closing = delivery === 'manual' ? assert.rejects(owner.close(10), /deadline/) : owner.close();
+      if (delivery === 'manual') await closing;
+      peer = new NodeHost('', {
+        shared,
+        registry,
+        fetch: async () => {
+          peerSends++;
+          return Response.json({});
+        },
+      });
+      await delay(shared.leaseMs * 2);
+      release();
+      await closing;
+      await owner.close();
+      assert.equal(peer.receipt(id).outcome, 'success');
+      assert.equal(ownerSends, 1);
+      assert.equal(peerSends, 0);
+    },
+  );
+}
