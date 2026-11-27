@@ -47,6 +47,7 @@ async function setup(t, options = {}) {
       signingKey: options.signingKey ?? signingKey,
       maxBodyBytes: options.maxBodyBytes ?? 1024,
     });
+    if (options.onRequest) server.on('request', options.onRequest);
     server.listen(0, '127.0.0.1');
     await once(server, 'listening');
     origin = 'http://127.0.0.1:' + server.address().port;
@@ -194,17 +195,14 @@ test('test URL runs its draft with independent deduplication; expiry and restart
   assert.equal(f.calls.length, 2);
 });
 
-for (const kind of ['replacement', 'expiry']) {
+for (const kind of ['replacement', 'reactivation', 'rollback', 'expiry']) {
   test('rejects ' + kind + ' during a slow upload before recording the delivery', async (t) => {
     let entered;
     const reading = new Promise((resolve) => {
       entered = resolve;
     });
     const f = await setup(t, {
-      signingKey() {
-        entered();
-        return signingKey;
-      },
+      onRequest: entered,
     });
     f.host.activate('flow', f.host.publish(document()));
     const temp = kind === 'expiry' ? f.host.listenTest(document('draft'), 'a', 500) : undefined;
@@ -219,7 +217,13 @@ for (const kind of ['replacement', 'expiry']) {
       }),
     ]);
     if (temp) await until(() => Date.now() >= temp.expiresAt);
-    else f.host.activate('flow', f.host.publish(document('replacement')));
+    else if (kind === 'reactivation') {
+      f.host.deactivate('flow');
+      f.host.activate('flow', 1);
+    } else {
+      f.host.activate('flow', f.host.publish(document('replacement')));
+      if (kind === 'rollback') f.host.activate('flow', 1);
+    }
     req.end(raw.subarray(1));
     const [res] = await response;
     assert.equal(res.statusCode, 404);
@@ -291,4 +295,27 @@ test('separate deliveries without IDs can carry identical signed JSON', async (t
     second = await two.json();
   assert.notEqual(first.runId, second.runId);
   await until(() => f.calls.length === 2);
+});
+
+test('verifies a complete delivery with the current signing key after rotation', async (t) => {
+  let key = 'previous-test-key';
+  let entered;
+  const reading = new Promise((resolve) => {
+    entered = resolve;
+  });
+  const f = await setup(t, { signingKey: () => key, onRequest: entered });
+  f.host.activate('flow', f.host.publish(document()));
+  const req = request(f.origin + path, { method: 'POST', headers: headers(path, raw, 'rotated') });
+  const response = once(req, 'response');
+  req.write(raw.subarray(0, 1));
+  await reading;
+  key = signingKey;
+  // An idempotent activate leaves the live registration serving the upload.
+  f.host.activate('flow', 1);
+  req.end(raw.subarray(1));
+  const [res] = await response;
+  res.resume();
+  assert.equal(res.statusCode, 202);
+  await until(() => f.calls.length === 1);
+  assert.equal(f.host.byEvent('flow', 'a', 'rotated').runId, f.calls[0].id);
 });

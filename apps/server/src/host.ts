@@ -20,6 +20,8 @@ export class WebhookGone extends Error {}
 export class NodeHost {
   readonly #ledger: SqliteLedger;
   readonly #engine: ExecutionEngineOptions;
+  // Only in-flight uploads need to distinguish successive activations of the same revision.
+  readonly #webhookActivations = new Map<string, { revision: number; token: symbol }>();
   readonly #capacity: number;
   readonly #ttl: number;
   #stopping = false;
@@ -98,6 +100,7 @@ export class NodeHost {
         return { path: '/webhook/' + path, triggerNodeId: node.id };
       });
     this.#ledger.activate(id, revision, routes);
+    if (this.#webhookActivations.get(id)?.revision !== revision) this.#webhookActivations.delete(id);
   }
 
   listenTest(workflow: Workflow, triggerNodeId: string, ttlMs = 60_000) {
@@ -120,12 +123,21 @@ export class NodeHost {
 
   webhook(path: string) {
     this.#ready();
-    return this.#ledger.webhook(path);
+    const route = this.#ledger.webhook(path);
+    if (!route) return undefined;
+    // A test URL already has a unique, non-reusable session ID.
+    if (path.startsWith('/webhook-test/')) return { ...route, registration: route.workflowId };
+    let activation = this.#webhookActivations.get(route.workflowId);
+    if (!activation) {
+      activation = { revision: route.revision, token: Symbol() };
+      this.#webhookActivations.set(route.workflowId, activation);
+    }
+    return { ...route, registration: activation.token };
   }
 
   acceptWebhook(
     path: string,
-    target: { workflowId: string; revision: number; triggerNodeId: string },
+    target: NonNullable<ReturnType<NodeHost['webhook']>>,
     event: TriggerEvent,
   ) {
     this.#ready();
@@ -136,9 +148,10 @@ export class NodeHost {
       this.#capacity,
       this.#ttl,
       () => {
-        const current = this.#ledger.webhook(path);
+        const current = this.webhook(path);
         if (
           !current ||
+          current.registration !== target.registration ||
           current.workflowId !== target.workflowId ||
           current.revision !== target.revision ||
           current.triggerNodeId !== target.triggerNodeId
@@ -155,6 +168,7 @@ export class NodeHost {
   deactivate(id: string) {
     this.#ready();
     this.#ledger.deactivate(id);
+    this.#webhookActivations.delete(id);
   }
 
   accept(id: string, trigger: string, event: Omit<TriggerEvent, 'runId'>): string {

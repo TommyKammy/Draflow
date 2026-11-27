@@ -42,12 +42,13 @@ export function createWebhookServer(host: NodeHost, options: WebhookOptions) {
     const path = request.url ?? '';
     const target = host.webhook(path);
     if (!target) throw new Rejected(404);
-    const key = typeof options.signingKey === 'function' ? options.signingKey(path) : options.signingKey;
     const signature = singleHeader(request, 'x-draflow-signature');
-    if (!key || !signature || !/^sha256=[0-9a-f]{64}$/.test(signature)) throw new Rejected(401);
+    if (!signature || !/^sha256=[0-9a-f]{64}$/.test(signature)) throw new Rejected(401);
     const delivery = singleHeader(request, 'x-draflow-delivery');
     if (delivery !== undefined && !/^[!-~]{1,256}$/.test(delivery)) throw new Rejected(400);
     const bytes = await bodyBytes(request, limit);
+    const key = typeof options.signingKey === 'function' ? options.signingKey(path) : options.signingKey;
+    if (!key) throw new Rejected(401);
     const digest = createHmac('sha256', key)
       .update(path + '\n' + (delivery ?? '') + '\n')
       .update(bytes)
