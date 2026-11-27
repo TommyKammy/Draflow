@@ -5,7 +5,7 @@ import { MemoryRuntime, type TriggerEvent } from '@draflow/runtime';
 import type { ExecutionSummary } from '@draflow/storage';
 import { serverHttp, type HttpAuth } from './http-auth.js';
 import { latestDue, nextTime, scheduleFor } from './schedule.js';
-import { QueueFull, SqliteLedger } from './sqlite.js';
+import { QueueFull, SqliteLedger, type DeliverySource } from './sqlite.js';
 
 interface HostOptions extends Omit<ExecutionEngineOptions, 'credentialFetch'> {
   scheduleClock?: {
@@ -83,8 +83,8 @@ export class NodeHost {
   receipt(runId: string) {
     return this.#ledger.get(runId);
   }
-  byEvent(id: string, trigger: string, key: string) {
-    return this.#ledger.byEvent(id, trigger, key);
+  byEvent(id: string, trigger: string, key: string, source?: DeliverySource) {
+    return this.#ledger.byEvent(id, trigger, key, source);
   }
   stats() {
     return this.#ledger.stats();
@@ -121,8 +121,7 @@ export class NodeHost {
         const spec = scheduleFor(node);
         return { triggerNodeId: node.id, spec, nextAt: nextTime(spec, now) };
       });
-    this.#ledger.activate(id, revision, routes, schedules);
-    this.#armSchedules();
+    this.#updateRegistration(prepare => this.#ledger.activate(id, revision, routes, schedules, prepare));
     if (this.#webhookActivations.get(id)?.revision !== revision) this.#webhookActivations.delete(id);
   }
 
@@ -186,8 +185,7 @@ export class NodeHost {
 
   deactivate(id: string) {
     this.#ready();
-    this.#ledger.deactivate(id);
-    this.#armSchedules();
+    this.#updateRegistration(prepare => this.#ledger.deactivate(id, prepare));
     this.#webhookActivations.delete(id);
   }
 
@@ -218,14 +216,31 @@ export class NodeHost {
     return runId;
   }
 
-  #armSchedules(minDelay = 0) {
+  #updateRegistration(change: (prepare: () => void) => boolean) {
+    let cancelPrepared: (() => void) | undefined;
+    try {
+      // Read the transaction's schedule and keep the current timer live until COMMIT.
+      if (!change(() => { cancelPrepared = this.#prepareScheduleTimer(); })) return;
+    } catch (error) {
+      cancelPrepared?.();
+      throw error;
+    }
     this.#cancelSchedule?.();
-    this.#cancelSchedule = undefined;
+    this.#cancelSchedule = cancelPrepared;
+  }
+
+  #prepareScheduleTimer(minDelay = 0) {
     const next = this.#ledger.nextScheduleTime();
     if (next === undefined) return;
     // Recheck long waits periodically in case the wall clock moves.
     const delay = Math.max(minDelay, Math.min(60_000, next - this.#scheduleClock.now()));
-    this.#cancelSchedule = this.#scheduleClock.arm(() => this.#tickSchedules(), delay);
+    return this.#scheduleClock.arm(() => this.#tickSchedules(), delay);
+  }
+
+  #armSchedules(minDelay = 0) {
+    const cancel = this.#prepareScheduleTimer(minDelay);
+    this.#cancelSchedule?.();
+    this.#cancelSchedule = cancel;
   }
 
   #tickSchedules() {

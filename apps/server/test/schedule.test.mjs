@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { scheduleNode } from '@draflow/nodes';
+import { scheduleNode, webhookNode } from '@draflow/nodes';
 import { NodeHost } from '../dist/host.js';
 import { registry, until, workflow } from './fixture.mjs';
 
@@ -35,7 +35,7 @@ function setup(t, start, options = {}) {
     return new NodeHost(db, {
       registry: registry((runId, label) => {
         calls.push({ runId, label });
-      }).register(scheduleNode),
+      }).register(scheduleNode).register(webhookNode),
       onWorkerError: (err) => faults.push(err),
       scheduleClock,
       ...options,
@@ -283,4 +283,137 @@ test('simultaneously overdue schedules recover independently when only one queue
   assert.notEqual(second.runId, first.runId);
   await until(() => f.host.receipt(second.runId).state === 'finished');
   assert.deepEqual(f.calls.map(call => call.runId), [first.runId, second.runId]);
+});
+
+test('a scheduled instant and webhook delivery with the same node and key survive migration independently', async (t) => {
+  const f = setup(t, '2024-01-01T00:00:00Z');
+  const scheduleRev = f.install({ intervalSeconds: 10 });
+  const key = '2024-01-01T00:00:10.000Z';
+  f.advance(key);
+  const scheduled = f.receipt(key).runId;
+  await until(() => f.host.receipt(scheduled).state === 'finished');
+  const generic = f.host.accept('flow', 'b', { key: 'retained', items: [{ json: {} }] });
+  const historicHook = f.host.accept('flow', 'b', { key: 'old-hook', mode: 'webhook', items: [{ json: {} }] });
+  await until(() => f.host.receipt(historicHook).state === 'finished');
+  await f.host.close();
+  // Recreate the pre-scope deliveries table around a real accepted scheduled run.
+  const db = new DatabaseSync(f.db);
+  db.exec(`ALTER TABLE deliveries RENAME TO current_deliveries;
+    CREATE TABLE deliveries(workflowId TEXT,triggerNodeId TEXT,eventKey TEXT,expiresAt INTEGER NOT NULL,
+      runId TEXT NOT NULL REFERENCES runs(runId), PRIMARY KEY(workflowId,triggerNodeId,eventKey));
+    INSERT INTO deliveries SELECT workflowId,triggerNodeId,eventKey,expiresAt,runId FROM current_deliveries;
+    DROP TABLE current_deliveries;`);
+  db.close();
+  f.reopen();
+  assert.equal(f.host.byEvent('flow', 'b', 'retained', 'trigger').runId, generic);
+  assert.equal(f.host.byEvent('flow', 'b', 'old-hook', 'webhook').runId, historicHook);
+  const hook = workflow();
+  Object.assign(hook.nodes[0], {type: webhookNode.type, parameters: {path: 'orders'}});
+  const hookRev = f.host.publish(hook);
+  f.host.activate('flow', hookRev);
+  const path = '/webhook/orders';
+  const deliver = (deliveryKey = key) => f.host.acceptWebhook(path, f.host.webhook(path), {
+    key: deliveryKey, items: [{ json: {} }],
+  });
+  const delivered = deliver();
+  assert.notEqual(delivered, scheduled);
+  assert.equal(deliver(), delivered);
+  await until(() => f.host.receipt(delivered).state === 'finished');
+  await f.host.close();
+  f.advance('2024-01-01T00:00:00Z');
+  f.reopen();
+  assert.equal(deliver(), delivered);
+  const nextSlot = '2024-01-01T00:00:20.000Z';
+  const hookBeforeTimer = deliver(nextSlot);
+  await until(() => f.host.receipt(hookBeforeTimer).state === 'finished');
+  f.host.activate('flow', scheduleRev);
+  f.advance(key);
+  assert.equal(f.host.byEvent('flow', 'a', key, 'schedule').runId, scheduled);
+  assert.equal(f.host.byEvent('flow', 'a', key, 'webhook').runId, delivered);
+  assert.equal(f.host.stats().queued, 0);
+  assert.equal(f.host.byEvent('flow', 'a', key).runId, delivered);
+  f.advance(nextSlot);
+  const timerAfterHook = f.host.byEvent('flow', 'a', nextSlot, 'schedule').runId;
+  assert.notEqual(timerAfterHook, hookBeforeTimer);
+  await until(() => f.host.receipt(timerAfterHook).state === 'finished');
+  assert.deepEqual(f.calls.map(call => call.runId), [scheduled, generic, historicHook, delivered, hookBeforeTimer, timerAfterHook]);
+});
+
+test('failed timer registration retains the previous route, registration and live timer', async (t) => {
+  let now = 0, fail = false;
+  const timers = new Set();
+  const calls = [];
+  const host = new NodeHost(':memory:', {
+    registry: registry(id => calls.push(id)).register(scheduleNode).register(webhookNode),
+    scheduleClock: {
+      now: () => now,
+      arm(callback) {
+        if (fail) throw Error('timer unavailable');
+        timers.add(callback);
+        return () => timers.delete(callback);
+      },
+    },
+  });
+  t.after(() => host.close());
+  const doc = document({intervalSeconds: 10});
+  Object.assign(doc.nodes[1], {type: webhookNode.type, parameters: {path: 'old'}});
+  const old = host.publish(doc);
+  host.activate('flow', old);
+  const registration = host.webhook('/webhook/old').registration;
+  doc.nodes[1].parameters.path = 'new';
+  const replacement = host.publish(doc);
+  const independent = document({ intervalSeconds: 60 });
+  independent.id = 'other';
+  host.activate('other', host.publish(independent));
+  fail = true;
+  assert.throws(() => host.deactivate('flow'), /timer unavailable/);
+  assert.throws(() => host.activate('flow', replacement), /timer unavailable/);
+  assert.equal(host.webhook('/webhook/new'), undefined);
+  assert.equal(host.webhook('/webhook/old').registration, registration);
+  assert.equal(timers.size, 1);
+  fail = false;
+  now = 10_000;
+  [...timers][0]();
+  const receipt = host.byEvent('flow', 'a', new Date(now).toISOString());
+  assert.equal(receipt.revision, old);
+  await until(() => calls.length === 1);
+  host.activate('flow', replacement);
+  assert.equal(host.webhook('/webhook/new').revision, replacement);
+  assert.equal(timers.size, 1);
+});
+
+test('a failed publication commit cancels only the newly prepared timer', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'draflow-activation-'));
+  const path = join(dir, 'db');
+  const timers = new Set();
+  const options = {
+    registry: registry().register(scheduleNode).register(webhookNode),
+    scheduleClock: {
+      now: () => 0,
+      arm(callback) {
+        timers.add(callback);
+        return () => timers.delete(callback);
+      },
+    },
+  };
+  let host = new NodeHost(path, options);
+  t.after(async () => { await host.close(); rmSync(dir, { recursive: true, force: true }); });
+  const doc = document({ intervalSeconds: 10 });
+  Object.assign(doc.nodes[1], { type: webhookNode.type, parameters: { path: 'old' } });
+  const old = host.publish(doc);
+  host.activate('flow', old);
+  doc.nodes[1].parameters.path = 'replacement';
+  const replacement = host.publish(doc);
+  await host.close();
+  const db = new DatabaseSync(path);
+  db.exec(`CREATE TABLE fault(runId TEXT REFERENCES runs(runId) DEFERRABLE INITIALLY DEFERRED);
+    CREATE TRIGGER fail_activation AFTER INSERT ON schedules BEGIN INSERT INTO fault VALUES('missing'); END;`);
+  db.close();
+  host = new NodeHost(path, options);
+  const [originalTimer] = timers;
+  const registration = host.webhook('/webhook/old').registration;
+  assert.throws(() => host.activate('flow', replacement), /FOREIGN KEY/);
+  assert.equal(host.webhook('/webhook/old').registration, registration);
+  assert.equal(host.webhook('/webhook/replacement'), undefined);
+  assert.deepEqual([...timers], [originalTimer]);
 });

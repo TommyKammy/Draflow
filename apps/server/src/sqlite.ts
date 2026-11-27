@@ -11,6 +11,7 @@ export class QueueFull extends Error {
   }
 }
 
+export type DeliverySource = 'trigger' | 'webhook' | 'schedule';
 export type RunState = 'queued' | 'running' | 'finished' | 'interrupted';
 export interface Receipt {
   runId: string;
@@ -28,6 +29,11 @@ export interface Receipt {
 
 // Scheduled instants stay reserved for the lifetime of the receipt, including after reactivation.
 const noExpiry = -1;
+
+const deliverySchema = `CREATE TABLE IF NOT EXISTS deliveries (
+  workflowId TEXT, triggerNodeId TEXT, eventKey TEXT, source TEXT NOT NULL, expiresAt INTEGER NOT NULL,
+  runId TEXT NOT NULL REFERENCES runs(runId), PRIMARY KEY(workflowId, triggerNodeId, eventKey, source)
+);`;
 
 const fields =
   'runId, workflowId, revision, triggerNodeId, eventKey, mode, state, acceptedAt, startedAt, stoppedAt, outcome';
@@ -77,15 +83,22 @@ export class SqliteLedger {
           FOREIGN KEY(workflowId, revision) REFERENCES publications
         );
         CREATE INDEX IF NOT EXISTS queue ON runs(state);
-        CREATE TABLE IF NOT EXISTS deliveries (
-          workflowId TEXT, triggerNodeId TEXT, eventKey TEXT, expiresAt INTEGER NOT NULL,
-          runId TEXT NOT NULL REFERENCES runs(runId), PRIMARY KEY(workflowId, triggerNodeId, eventKey)
-        );
+        ${deliverySchema}
         CREATE TABLE IF NOT EXISTS history (
           workflowId TEXT, id TEXT, status TEXT NOT NULL, startedAt INTEGER NOT NULL,
           summary TEXT NOT NULL, detail TEXT, PRIMARY KEY(workflowId, id)
-        );
-        COMMIT;`);
+        );`);
+      if (!this.#prepare("SELECT 1 FROM pragma_table_info('deliveries') WHERE name='source'").get()) {
+        // Earlier ledgers reserved scheduled instants with noExpiry and used run mode for other deliveries.
+        this.#db.exec(`ALTER TABLE deliveries RENAME TO legacy_deliveries;
+          ${deliverySchema}
+          INSERT INTO deliveries(workflowId,triggerNodeId,eventKey,source,expiresAt,runId)
+          SELECT d.workflowId,d.triggerNodeId,d.eventKey,
+            CASE WHEN d.expiresAt=${noExpiry} THEN 'schedule' ELSE r.mode END,d.expiresAt,d.runId
+          FROM legacy_deliveries d JOIN runs r USING(runId);
+          DROP TABLE legacy_deliveries;`);
+      }
+      this.#db.exec('COMMIT');
     } catch (error) {
       this.#db.close();
       throw error;
@@ -176,12 +189,13 @@ export class SqliteLedger {
     revision: number,
     routes: { path: string; triggerNodeId: string }[],
     schedules: { triggerNodeId: string; spec: Schedule; nextAt: number }[],
+    prepareTimer: () => void,
   ) {
-    this.#transaction(() => {
+    return this.#transaction(() => {
       if (this.#prepare('SELECT 1 FROM webhookTestDocuments WHERE workflowId=?').get(id))
         throw new Error('Cannot activate a test snapshot');
       if (this.#prepare('SELECT revision FROM active WHERE workflowId=?').get(id)?.revision === revision)
-        return;
+        return false;
       this.#prepare('DELETE FROM webhookRoutes WHERE workflowId=?').run(id);
       this.#prepare(
         'INSERT INTO active VALUES(?,?) ON CONFLICT(workflowId) DO UPDATE SET revision=excluded.revision',
@@ -201,6 +215,8 @@ export class SqliteLedger {
         }
         this.#prepare('INSERT INTO webhookRoutes VALUES(?,?,?)').run(route.path, id, route.triggerNodeId);
       }
+      prepareTimer();
+      return true;
     });
   }
 
@@ -276,8 +292,13 @@ export class SqliteLedger {
       }
     );
   }
-  deactivate(id: string) {
-    this.#prepare('DELETE FROM active WHERE workflowId=?').run(id);
+  deactivate(id: string, prepareTimer: () => void) {
+    return this.#transaction(() => {
+      const deleted = this.#prepare('DELETE FROM active WHERE workflowId=?').run(id);
+      if (!deleted.changes) return false;
+      prepareTimer();
+      return true;
+    });
   }
 
   accept(
@@ -296,12 +317,13 @@ export class SqliteLedger {
       const revision = Number(selected);
       validate(revision);
       const now = Date.now();
+      const source: DeliverySource = ttl === null ? 'schedule' : event.mode ?? 'trigger';
       if (event.key !== undefined) {
         const existing = this.#prepare(
           `SELECT d.runId FROM deliveries d JOIN runs USING(runId)
-          WHERE d.workflowId=? AND d.triggerNodeId=? AND d.eventKey=?
+          WHERE d.workflowId=? AND d.triggerNodeId=? AND d.eventKey=? AND d.source=?
           AND (d.expiresAt=? OR d.expiresAt>? OR runs.state IN ('queued','running','interrupted'))`,
-        ).get(id, trigger, event.key, noExpiry, now);
+        ).get(id, trigger, event.key, source, noExpiry, now);
         if (existing) return String(existing.runId);
       }
       if (Number(this.#prepare("SELECT COUNT(*) AS n FROM runs WHERE state='queued'").get()!.n) >= capacity) {
@@ -323,10 +345,13 @@ export class SqliteLedger {
         now,
       );
       if (event.key !== undefined) {
-        this.#prepare('INSERT OR REPLACE INTO deliveries VALUES(?,?,?,?,?)').run(
+        this.#prepare(
+          'INSERT OR REPLACE INTO deliveries(workflowId,triggerNodeId,eventKey,source,expiresAt,runId) VALUES(?,?,?,?,?,?)',
+        ).run(
           id,
           trigger,
           event.key,
+          source,
           ttl === null ? noExpiry : now + ttl,
           runId,
         );
@@ -341,10 +366,11 @@ export class SqliteLedger {
       | undefined;
   }
 
-  byEvent(workflowId: string, triggerNodeId: string, eventKey: string) {
+  byEvent(workflowId: string, triggerNodeId: string, eventKey: string, source?: DeliverySource) {
     const delivery = this.#prepare(
-      'SELECT runId FROM deliveries WHERE workflowId=? AND triggerNodeId=? AND eventKey=?',
-    ).get(workflowId, triggerNodeId, eventKey);
+      `SELECT runId FROM deliveries WHERE workflowId=? AND triggerNodeId=? AND eventKey=?
+        AND (? IS NULL OR source=?) ORDER BY rowid DESC LIMIT 1`,
+    ).get(workflowId, triggerNodeId, eventKey, source ?? null, source ?? null);
     return delivery && this.get(String(delivery.runId));
   }
 
