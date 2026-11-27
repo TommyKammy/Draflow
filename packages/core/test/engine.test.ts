@@ -190,6 +190,20 @@ describe('ExecutionEngine', () => {
     expect(result.runData.no).toBeUndefined();
   });
 
+  it('chooses partial run starts within the destination component', async () => {
+    const wf = workflow([
+      node('isolated', 'test.trigger', 'Other trigger', 0),
+      node('source', 'test.echo', 'Source', 100),
+      node('dest', 'test.echo', 'Destination', 200),
+    ], [connect('source', 'dest')]);
+    const engine = new ExecutionEngine({ registry });
+    const full = await engine.run(wf).done;
+    expect(Object.keys(full.runData)).toEqual(['isolated']);
+    const partial = await engine.run(wf, { destinationNodeId: 'dest' }).done;
+    expect(partial.status).toBe('success');
+    expect(Object.keys(partial.runData)).toEqual(['source', 'dest']);
+  });
+
   it('waits for both merge inputs', async () => {
     const wf = workflow(
       [

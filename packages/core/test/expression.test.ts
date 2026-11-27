@@ -229,6 +229,24 @@ describe('ExpressionEngine', () => {
     ).toBe('2026-01-15T09:00:00.000+09:00');
   });
 
+  it('rounds within the same occurrence of a repeated local hour', () => {
+    const ny = { ...context, timezone: 'America/New_York' };
+    for (const offset of ['-04:00', '-05:00']) {
+      const local = '2026-11-01T01:30:05.789' + offset;
+      for (const [unit, time] of [['second', '01:30:05'], ['minute', '01:30:00'], ['hour', '01:00:00']]) {
+        expect(engine.resolve(`={{ DateTime.fromISO("${local}").beginningOf("${unit}").toISO() }}`, ny))
+          .toBe('2026-11-01T' + time + '.000' + offset);
+      }
+    }
+  });
+
+  it('preserves month and year across the ISO year zero boundary', () => {
+    expect(evaluate('={{ DateTime.fromISO("0000-01-10").minus({ months: 1 }).toISO() }}'))
+      .toBe('-000001-12-10T00:00:00.000Z');
+    expect(evaluate('={{ DateTime.fromISO("-000001-01-31").plus({ months: 1 }).toISO() }}'))
+      .toBe('-000001-02-28T00:00:00.000Z');
+  });
+
   it('starts local weeks on Monday across DST transitions', () => {
     const newYork = new ExpressionEngine({ timezone: 'America/New_York' });
     const newYorkContext = { ...context, timezone: 'America/New_York' };

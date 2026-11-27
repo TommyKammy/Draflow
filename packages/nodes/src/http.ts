@@ -170,7 +170,7 @@ async function readResponse(response: Response, format: string): Promise<JsonObj
   }
 
   const text = await response.text();
-  if (text.trim() === '') {
+  if (text === '' || (format !== 'text' && text.trim() === '')) {
     return {};
   }
 

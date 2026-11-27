@@ -1037,15 +1037,14 @@ function buildStartStack(
     ];
   }
 
-  const candidates = graph.startNodes.filter((node) => {
+  const roots = graph.startNodes.filter(node => allowed === undefined || allowed.has(node.id));
+  const candidates = roots.filter((node) => {
     const nodeType = registry.get(node.type, node.typeVersion);
     if (nodeType === undefined) return true;
     return nodeType.ports.inputs.length === 0 || nodeType.meta.category === 'trigger';
   });
 
-  const starts = (candidates.length > 0 ? candidates : graph.startNodes).filter(
-    (node) => allowed === undefined || allowed.has(node.id),
-  );
+  const starts = candidates.length > 0 ? candidates : roots;
 
   if (starts.length === 0) {
     if (allowed !== undefined && allowed.size === 0) return [];

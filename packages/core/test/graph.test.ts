@@ -50,6 +50,17 @@ describe('graph', () => {
     expect(findCycles(cyclic).length).toBeGreaterThan(0);
   });
 
+  it('includes a cycle origin only when requested', () => {
+    const wf = workflow();
+    wf.connections.push(createConnection({ node: 'd', port: 'main', index: 0 }, { node: 'a', port: 'main', index: 0 }));
+    const graph = buildGraph(wf);
+    for (const walk of [upstreamOf, downstreamOf]) {
+      expect(walk(graph, 'a', { includeSelf: false })).toEqual(new Set(['b', 'c', 'd']));
+      expect(walk(graph, 'a')).toEqual(new Set(['b', 'c', 'd']));
+      expect(walk(graph, 'a', { includeSelf: true })).toEqual(new Set(['a', 'b', 'c', 'd']));
+    }
+  });
+
   it('rejects connections to unknown nodes', () => {
     const wf = workflow();
     wf.connections.push(

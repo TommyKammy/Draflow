@@ -251,7 +251,9 @@ export class DraflowDateTime {
     } else if (unit === 'second') {
       parts.millisecond = 0;
     }
-    return new DraflowDateTime(zonedTimeToUtc(parts, this.timeZone), this.timeZone);
+    // A sub-day boundary can occur twice during a backward clock change.
+    const offset = unit === 'hour' || unit === 'minute' || unit === 'second' ? this.offset : undefined;
+    return new DraflowDateTime(zonedTimeToUtc(parts, this.timeZone, offset), this.timeZone);
   }
 
   endOfMonth(): DraflowDateTime {
@@ -388,14 +390,14 @@ export function getParts(millis: number, timeZone: string): DateTimeParts {
   };
 }
 
-export function zonedTimeToUtc(parts: DateTimeParts, timeZone: string): number {
+export function zonedTimeToUtc(parts: DateTimeParts, timeZone: string, preferredOffset?: number): number {
   const date = new Date(0);
   date.setUTCFullYear(parts.year, parts.month - 1, parts.day);
   date.setUTCHours(parts.hour, parts.minute, parts.second, parts.millisecond);
   const naive = date.getTime();
   if (!Number.isFinite(naive)) return NaN;
 
-  let offset = getOffsetMinutes(naive, timeZone);
+  let offset = preferredOffset ?? getOffsetMinutes(naive, timeZone);
   let result = naive - offset * 60_000;
   if (!Number.isFinite(new Date(result).getTime())) return NaN;
   const corrected = getOffsetMinutes(result, timeZone);
@@ -420,7 +422,7 @@ export function addDuration(
     const parts = getParts(millis, timeZone);
     const totalMonths = parts.year * 12 + (parts.month - 1) + years * 12 + months;
     const year = Math.floor(totalMonths / 12);
-    const month = (totalMonths % 12) + 1;
+    const month = totalMonths - year * 12 + 1;
     const maxDay = daysInMonth(year, month);
     parts.year = year;
     parts.month = month;
