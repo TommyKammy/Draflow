@@ -137,7 +137,10 @@ test('paged reads and nested calls dispatch to the previewed pinned revisions an
   // A host may customize the label without changing the built-in page reader.
   options.registry = new NodeRegistry().registerAll(standardNodes.map((n) => n.type === 'draflow.pages'
     ? { ...n, meta: { ...n.meta, label: 'Order pages', externalEffect: 'none' } } : n));
-  const { h } = setup(t, options), other = setup(t).h;
+  const resolutions = [];
+  options.httpAuth.versions = { sink: ['current'] };
+  options.httpAuth.resolve = (id) => { resolutions.push(id); return 'token-' + id; };
+  const { h, operate } = setup(t, options), other = setup(t).h;
   assert.throws(() => h.previewPublication(parent), /Unknown publication/);
   h.publish(leaf);
   h.publish(wrapper);
@@ -155,18 +158,34 @@ test('paged reads and nested calls dispatch to the previewed pinned revisions an
   assert.equal(h.checkHttpGrants(parent).triggers[0].effects[1].grantStatus, 'noGrant');
   options.httpAuth.grants[1].workflowId = leaf.id;
   assert.throws(() => other.previewPublication(parent), /Unknown publication/);
-  assert.deepEqual(requests, []);
+  assert.deepEqual([requests, resolutions], [[], []]);
   h.activate(parent.id, h.publish(parent));
   const run = h.accept(parent.id, 'schedule', { items: [{ json: {} }] });
   await until(() => h.receipt(run).state === 'finished');
   assert.equal(h.receipt(run).outcome, 'success');
-  assert.deepEqual(requests, effects.map(expectedRequest));
+  assert.deepEqual(requests.splice(0), effects.map(expectedRequest));
+  assert.deepEqual(resolutions.splice(0), ['source', 'sink']);
+  operate('admin', { op: 'credentials', target: 'sink', enabled: true, credentialVersion: 'current',
+    request: randomUUID(), reason: 'access-change' });
+  options.httpAuth.versions.sink.pop();
+  assert.deepEqual(h.checkHttpGrants(parent).triggers[0].effects.map((e) => e.grantStatus), ['matched', 'unavailable']);
+  assert.deepEqual([requests, resolutions], [[], []]);
+  const denied = h.accept(parent.id, 'schedule', { items: [{ json: {} }] });
+  await until(() => {
+    const wrapperRun = h.relations(denied)[0]?.child;
+    return wrapperRun && h.relations(wrapperRun).some((r) => r.parent === wrapperRun && r.childState === 'review');
+  });
+  assert.equal(h.receipt(denied).state, 'waiting');
+  assert.deepEqual(requests, [expectedRequest(effects[0])]);
+  assert.deepEqual(resolutions, ['source']);
 });
 
 test('forward writes and the pinned compensations match their actual requests', async (t) => {
   const { requests, options } = receiver([['order-import', 'ship'], ['release', 'register']].map(([workflowId, nodeId]) =>
     ({ id: workflowId, workflowId, nodeId, origin: 'https://sink.example.test', kind: 'bearer' })), () => ({ id: 'receipt' }));
-  const { h } = setup(t, options);
+  const resolutions = [];
+  options.httpAuth.resolve = (id) => { resolutions.push(id); return 'token-' + id; };
+  const { h, operate } = setup(t, options);
   let draft;
   publishCompensations(h, false, false, (flow) => { draft = structuredClone(flow); });
   const replacement = fixture('process-order-batch');
@@ -185,9 +204,25 @@ test('forward writes and the pinned compensations match their actual requests', 
   await until(() => h.receipt(run).state === 'finished');
   assert.equal(h.receipt(run).outcome, 'success');
   assert.deepEqual(requests.splice(0), forward.map(expectedRequest));
+  assert.deepEqual(resolutions.splice(0), [draft.id]);
+  const setReleaseAccess = (enabled) => operate('admin', { op: 'credentials', target: 'release',
+    enabled, request: randomUUID(), reason: 'access-change' });
+  setReleaseAccess(false);
+  const releaseStatus = () => h.checkHttpGrants(draft).triggers[0].effects.find((e) => e.workflowId === 'release').grantStatus;
+  assert.equal(releaseStatus(), 'unavailable');
+  assert.deepEqual([requests, resolutions], [[], []]);
   h.compensate(run);
+  await until(() => h.compensationInfo(run).state === 'manual');
+  const expected = undo.reverse().map(expectedRequest);
+  assert.deepEqual(requests, expected.slice(0, 2));
+  assert.deepEqual(resolutions, []);
+  setReleaseAccess(true);
+  assert.equal(releaseStatus(), 'matched');
+  assert.deepEqual(resolutions, []);
+  h.retryCompensation(run, h.compensationInfo(run).steps.find((s) => s.status === 'failed').failure);
   await until(() => h.compensationInfo(run).state === 'compensated');
-  assert.deepEqual(requests, undo.reverse().map(expectedRequest));
+  assert.deepEqual(requests, expected);
+  assert.deepEqual(resolutions, ['release']);
 });
 
 function singleRequest() {
@@ -196,6 +231,32 @@ function singleRequest() {
   flow.connections = flow.connections.filter((c) => c.id === 'hook-read');
   return flow;
 }
+
+test('host HTTP schema defaults produce the same grant, destination and method as dispatch', async (t) => {
+  const flow = singleRequest(), read = flow.nodes[1];
+  const origin = 'https://orders.example.test';
+  const defaults = { authentication: 'credential', method: 'POST', url: origin + '/defaults' };
+  const registry = new NodeRegistry().registerAll(standardNodes.map((n) =>
+    n.type === read.type && n.version === read.typeVersion
+      ? { ...n, parameters: n.parameters.map((p) => Object.hasOwn(defaults, p.name) ? { ...p, default: defaults[p.name] } : p) }
+      : n));
+  const { requests, options } = receiver([
+    { id: 'orders-read', workflowId: flow.id, nodeId: read.id, origin, kind: 'bearer' },
+  ], () => ({}));
+  const resolutions = [];
+  options.httpAuth.resolve = (id) => { resolutions.push(id); return 'token-' + id; };
+  const { h } = setup(t, { ...options, registry });
+  for (const key of Object.keys(defaults)) delete read.parameters[key];
+  const [effect] = h.checkHttpGrants(flow).triggers[0].effects;
+  assert.deepEqual([requests, resolutions], [[], []]);
+  h.activate(flow.id, h.publish(flow));
+  const run = h.accept(flow.id, 'hook', { items: [{ json: {} }] });
+  await until(() => h.receipt(run).state === 'finished');
+  assert.equal(h.receipt(run).outcome, 'success');
+  assert.deepEqual(requests, [['POST', defaults.url, 'Bearer token-orders-read']]);
+  assert.equal(effect.grantStatus, 'matched');
+  assert.deepEqual(requests, [expectedRequest(effect)]);
+});
 
 test('conflicting or missing credential references block dispatch', async (t) => {
   const { requests, options } = receiver([], () => ({}));

@@ -38,11 +38,17 @@ function literal(value: unknown): unknown {
 
 type Effect = Pick<PublicationImpact, 'kind' | 'method' | 'destination' | 'credentialRefs' | 'mayRedirect' | 'grantStatus'>;
 
-function httpEffect(node: WorkflowNode, page: boolean, workflowId: string, check?: CheckGrant): Effect {
-  const params = node.parameters;
+function httpEffect(node: WorkflowNode, installed: NodeType, workflowId: string, check?: CheckGrant): Effect {
+  const page = installed.type === 'draflow.pages';
+  function httpParameter(name: string, fallback: string) {
+    const value = node.parameters[name];
+    if (value !== undefined) return literal(value);
+    const schemaDefault = installed.parameters.find((p) => p.name === name)?.default;
+    return literal(schemaDefault === undefined ? fallback : schemaDefault);
+  }
   const ref = node.credentials?.httpAuth;
-  const auth = page ? undefined : literal(params.authentication === undefined ? 'none' : params.authentication);
-  const endpoint = page ? params.url : literal(params.url);
+  const auth = page ? undefined : httpParameter('authentication', 'none');
+  const endpoint = page ? node.parameters.url : httpParameter('url', '');
   const url = typeof endpoint === 'string' ? URL.parse(endpoint) : null;
   if (ref && endpoint !== dynamic && (!url || !permitsCredentialDestination(url)))
     return { kind: 'blocked', credentialRefs: [], ...(check && { grantStatus: 'invalidDestination' }) };
@@ -51,7 +57,7 @@ function httpEffect(node: WorkflowNode, page: boolean, workflowId: string, check
     (auth === 'credential' && !ref) ||
     (ref !== undefined && (!ref || auth === 'none' || node.typeVersion !== 2));
   if (blocked) return { kind: 'blocked', credentialRefs: [], ...(check && { grantStatus: 'invalidBinding' }) };
-  const raw = page ? 'GET' : literal(params.method === undefined ? 'GET' : params.method);
+  const raw = page ? 'GET' : httpParameter('method', 'GET');
   const method = typeof raw === 'string' && /^[a-z0-9!#$%&'*+.^_`|~-]+$/i.test(raw) ? raw.toUpperCase() : null;
   let grantStatus: GrantStatus | undefined;
   if (check) {
@@ -73,11 +79,11 @@ function httpEffect(node: WorkflowNode, page: boolean, workflowId: string, check
 function* impacts(node: WorkflowNode, installed: NodeType, workflowId: string, check?: CheckGrant): Generator<Effect> {
   if (localNodes.has(installed)) return;
   if (node.type === 'draflow.pages' && installed.wait === pages.wait) {
-    yield httpEffect(node, true, workflowId, check);
+    yield httpEffect(node, installed, workflowId, check);
     if (installed.execute === pages.execute) return;
   }
   if (node.type === 'draflow.httpRequest' && installed.execute === httpRequestNode.execute && !installed.wait) {
-    yield httpEffect(node, false, workflowId, check);
+    yield httpEffect(node, installed, workflowId, check);
     return;
   }
   const declared = installed.meta.externalEffect;
