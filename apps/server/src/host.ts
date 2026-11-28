@@ -276,6 +276,9 @@ export class NodeHost {
   effects(runId: string) {
     return this.#ledger.effects(runId);
   }
+  withinKeyedRetryWindow(runId: string, item: number) {
+    return this.#ledger.withinKeyedRetryWindow(runId, item);
+  }
   redrive(runId: string, failureId: string) {
     this.#ready();
     const point = this.#ledger.recoveryInfo(runId).find((p) => p.failure === failureId);

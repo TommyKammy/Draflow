@@ -29,6 +29,17 @@ const actions = {
   retryCompensation: '補償を再試行',
   reconcile: '配送結果を照合',
 };
+const explanations = {
+  awaitingEvent: '外部イベントの到着を待っています。',
+  awaitingTime: '指定した再開時刻を待っています。',
+  review: '外部操作の結果が不明です。受信先の記録を確認してください。',
+  throttled: '受信先の制限により再試行時刻を待っています。',
+  waiting: '実行の続きが処理されるのを待っています。',
+  cancelRequested: '取消要求を受け付けました。',
+  manual: '補償に失敗しました。補償の試行を確認してください。',
+  error: '実行が失敗しました。',
+  recoverableFailure: '実行が失敗しました。失敗位置から再開するためのデータが保存されています。',
+};
 const attention = {
   heartbeat: 'ワーカーのハートビート停止',
   queue: 'キュー待ち時間が閾値を超過',
@@ -230,16 +241,14 @@ function control(form, caption, el) {
   form.append(l);
   return el;
 }
-function action(parent, d, op, extra = {}) {
-  if (!session.allowed.includes(op === 'retryCompensation' ? 'compensate' : op)) return;
+function action(parent, d, candidate) {
+  const { op, key, failure, decisions } = candidate;
   const form = node('form');
   let decision, result;
   if (op === 'reconcile') {
     decision = control(form, '受信先の確認結果', node('select'));
-    decision.add(new Option('適用済み', 'applied'));
-    decision.add(new Option('未適用', 'notApplied'));
-    if (d.effects.some((x) => x.key === extra.key && x.mode === 'keyed'))
-      decision.add(new Option('同じキーで再試行', 'retryKeyed'));
+    const labels = { applied: '適用済み', notApplied: '未適用', retryKeyed: '同じキーで再試行' };
+    for (const value of decisions) decision.add(new Option(labels[value], value));
     result = control(form, '受信先の結果（任意の JSON）', node('input'));
   }
   const reason = control(form, '操作理由', node('select'));
@@ -268,7 +277,7 @@ function action(parent, d, op, extra = {}) {
     if (button.disabled) return;
     button.disabled = true;
     try {
-      const body = { op, target: d.run.runId, request, version: d.version, reason: reason.value, ...extra };
+      const body = { op, target: d.run.runId, request, version: d.version, reason: reason.value, key, failure };
       if (decision) {
         body.decision = decision.value;
         if (result.value) body.result = JSON.parse(result.value);
@@ -295,6 +304,13 @@ async function detail(id) {
   $('detail').hidden = false;
   line(box, r.workflowId + ' · v' + r.revision, r.runId);
   line(box, '現在の状態', name(r.status));
+  const guidance = d.guidance;
+  if (explanations[guidance.reason]) line(box, '状況', explanations[guidance.reason]);
+  entries(box, '現在できる操作', guidance.actions, (li, candidate) => {
+    if (candidate.node) li.append(node('span', candidate.node));
+    if (candidate.key || candidate.failure) li.append(node('small', candidate.key ?? candidate.failure));
+    action(li, d, candidate);
+  });
   if (d.history)
     line(
       box,
@@ -313,25 +329,19 @@ async function detail(id) {
   );
   entries(box, '外部操作', d.effects, (li, x) => {
     li.append(node('strong', x.nodeId + ' · ' + x.state), node('small', x.key));
-    if (x.state === 'unknown' && r.state === 'review') action(li, d, 'reconcile', { key: x.key });
   });
   entries(box, '再実行', d.recovery, (li, p) => {
     li.append(node('span', p.node + ' · ' + p.failure));
     if (p.attempt) li.append(' ', link(p.attempt));
-    else if (p.retained) action(li, d, 'redrive', { failure: p.failure });
   });
   entries(box, '補償の試行', d.compensation.steps, (li, s) => {
     li.append(node('span', s.priority + ' · ' + s.status));
     if (s.child) li.append(' ', link(s.child));
-    if (s.failure) action(li, d, 'retryCompensation', { failure: s.failure });
   });
   if (d.compensation.id) line(box, '補償 ID', link(d.compensation.id));
   entries(box, '補償の再試行', d.compensation.retries, (li, s) =>
     li.append(s.failure + ' · ', link(s.attempt)),
   );
-  if (d.waitingForEvent) action(box, d, 'resume');
-  if (!['finished', 'interrupted'].includes(r.state)) action(box, d, 'cancel');
-  if (d.compensation.steps.length && d.compensation.state === 'idle') action(box, d, 'compensate');
   entries(
     box,
     '状態の変更',
@@ -347,10 +357,9 @@ $('login').onsubmit = async (e) => {
   e.preventDefault();
   clearTimeout(timer);
   const org = $('org').value.trim();
-  session = { org, token: $('token').value, allowed: [] };
+  session = { org, token: $('token').value };
   try {
     const me = await api({ op: 'session' });
-    session.allowed = me.allowed;
     $('token').value = '';
     $('login').hidden = true;
     $('work').hidden = $('logout').hidden = false;

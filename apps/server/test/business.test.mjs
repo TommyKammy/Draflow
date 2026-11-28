@@ -304,6 +304,10 @@ test('cancellation of an uncertain business effect keeps receipt lookup availabl
   await until(() => host.receipt(run).state === 'review');
   assert.equal(host.cancel(run), true);
   await until(() => canceledLookups === 1 && host.receipt(run).state === 'review');
+  const guidance = (id) => host.operate({ organization, actor: 'admin', role: 'admin' }, { op: 'detail', id }).guidance;
+  assert.deepEqual(guidance(run).actions, [
+    { op: 'reconcile', key: run, node: 'event', decisions: ['applied', 'notApplied'] },
+  ]);
   assert.equal(host.reconcile(run, run, 'retryKeyed'), false);
   recovered = true;
   assert.equal(host.reconcile(run, run, 'applied'), true);
@@ -316,6 +320,7 @@ test('cancellation of an uncertain business effect keeps receipt lookup availabl
     proposal: { definition: { apply: true } },
   });
   await until(() => host.receipt(next).state === 'review');
+  assert.ok(guidance(next).actions.find((a) => a.op === 'reconcile').decisions.includes('retryKeyed'));
   assert.equal(host.reconcile(next, next, 'retryKeyed'), true);
   assert.equal(host.cancel(next), true);
   await until(() => host.receipt(next).outcome === 'success');

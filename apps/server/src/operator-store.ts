@@ -133,9 +133,9 @@ export class OperatorStore {
         .relations(id)
         .map(({ parent, child, node, batch, childState }) => ({ parent, child, node, batch, childState }));
     const recovery = this.sql(
-      'SELECT failure,node,attempt,outcome,data IS NOT NULL AS retained FROM recoveryPoints WHERE runId=? OR attempt=? ORDER BY rowid',
+      'SELECT failure,node,attempt,outcome,(data IS NOT NULL AND expires>?) AS retained FROM recoveryPoints WHERE runId=? OR attempt=? ORDER BY rowid',
     )
-      .all(id, id)
+      .all(this.now(), id, id)
       .map(({ failure, node, attempt, outcome, retained }) => ({
         failure,
         node,
@@ -169,7 +169,57 @@ export class OperatorStore {
       history,
       version,
       waitingForEvent: wait?.mode === 'event',
+      waitMode: wait?.mode,
     };
+  }
+  private guidance(host: NodeHost, detail: ReturnType<OperatorStore['detail']>, allowed: string[]) {
+    const { run, effects, compensation, recovery, transitions, waitMode } = detail;
+    const id = String(run.runId);
+    const canceled = transitions.some((entry) => entry.reason === 'cancelRequested');
+    const actions: (
+      | { op: 'resume' | 'cancel' | 'compensate' }
+      | { op: 'reconcile'; key: string; node: string; decisions: string[] }
+      | { op: 'redrive'; failure: string; node: string }
+      | { op: 'retryCompensation'; failure: string }
+    )[] = [];
+    let reason = String(run.status);
+    if (run.state === 'finished' && run.status === 'finished') reason = String(run.outcome ?? 'finished');
+    if (run.state === 'waiting' && waitMode) reason = waitMode === 'event' ? 'awaitingEvent' : 'awaitingTime';
+    const failed = run.state === 'finished' && run.outcome === 'error';
+    const redrivePoints = failed && !canceled && !compensation.id
+      ? recovery.filter((point) => point.retained && !point.attempt)
+      : [];
+    if (redrivePoints.length) reason = 'recoverableFailure';
+    if (canceled && run.state !== 'finished' && run.state !== 'review') reason = 'cancelRequested';
+
+    if (run.state === 'waiting' && waitMode === 'event' && !canceled && allowed.includes('resume'))
+      actions.push({ op: 'resume' });
+    if (run.state === 'review' && allowed.includes('reconcile')) {
+      for (const effect of effects) {
+        if (effect.state !== 'unknown') continue;
+        const decisions = ['applied', 'notApplied'];
+        if (effect.mode === 'keyed' && !canceled && host.withinKeyedRetryWindow(id, Number(effect.item)))
+          decisions.push('retryKeyed');
+        actions.push({ op: 'reconcile', key: String(effect.key), node: String(effect.nodeId), decisions });
+      }
+    }
+    if (allowed.includes('redrive')) {
+      for (const point of redrivePoints)
+        actions.push({ op: 'redrive', failure: String(point.failure), node: String(point.node) });
+    }
+    if (allowed.includes('compensate')) {
+      const canStart = run.state === 'finished' && compensation.steps.length > 0 && !compensation.id;
+      if (canStart && !host.inspect(id).uncertain.length)
+        actions.push({ op: 'compensate' });
+      for (const step of compensation.steps) {
+        if (step.status !== 'failed' || !step.failure) continue;
+        if (!compensation.retries.some((retry) => retry.failure === step.failure))
+          actions.push({ op: 'retryCompensation', failure: String(step.failure) });
+      }
+    }
+    if (run.state !== 'finished' && run.state !== 'interrupted' && !canceled && allowed.includes('cancel'))
+      actions.push({ op: 'cancel' });
+    return { reason, actions };
   }
   recordAlerts(
     org: string,
@@ -290,7 +340,10 @@ export class OperatorStore {
         if (op === 'session')
           return { actor, organization: principal.organization, role: policy.role, allowed };
         if (op === 'list') return this.list(q);
-        if (op === 'detail') return this.detail(host, field(q.id));
+        if (op === 'detail') {
+          const detail = this.detail(host, field(q.id));
+          return { ...detail, guidance: this.guidance(host, detail, allowed) };
+        }
         if (op === 'metrics') return this.metrics();
         if (op === 'history')
           return this.sql(

@@ -162,12 +162,25 @@ test('reconciliation and compensation requests are durable and apply once', asyn
   const run = invoke(command('start', reconciliation.id, { trigger: 'schedule' }));
   await until(() => h.receipt(run).state === 'review');
   const detail = invoke({ op: 'detail', id: run });
+  assert.equal(detail.guidance.reason, 'review');
+  assert.deepEqual(detail.guidance.actions, [
+    { op: 'reconcile', key: detail.effects[0].key, node: n.id, decisions: ['applied', 'notApplied'] },
+    { op: 'cancel' },
+  ]);
+  assert.deepEqual(h.operate(identity(h, 'viewer'), { op: 'detail', id: run }).guidance,
+    { reason: 'review', actions: [] });
   const action = command('reconcile', run, {
     version: detail.version,
     key: detail.effects[0].key,
     decision: 'applied',
     reason: 'receiver-confirmed',
   });
+  const operator = identity(h, 'operator');
+  invoke(command('membership', operator.actor, { policy: { role: 'operator', grants: ['reconcile'] } }));
+  assert.deepEqual(h.operate(operator, { op: 'detail', id: run }).guidance, detail.guidance);
+  invoke(command('membership', operator.actor, { policy: { role: 'operator' } }));
+  assert.throws(() => h.operate(operator, action), (error) => error.status === 403);
+  assert.deepEqual(h.operate(operator, { op: 'detail', id: run }).guidance.actions, [{ op: 'cancel' }]);
   assert.ok(invoke(action));
   assert.ok(invoke(action));
   assert.throws(
@@ -175,6 +188,7 @@ test('reconciliation and compensation requests are durable and apply once', asyn
     (e) => e.status === 409,
   );
   await until(() => h.receipt(run).outcome === 'success');
+  assert.deepEqual(invoke({ op: 'detail', id: run }).guidance, { reason: 'success', actions: [] });
   compensationFlow(h);
   const root = accept(h);
   await until(() => h.receipt(root).outcome === 'error');
@@ -409,6 +423,9 @@ test('audit write failure rolls back publication and an accepted redrive survive
   const run = accept(h);
   await until(() => h.receipt(run).outcome === 'error');
   const before = h.operate(identity(h), { op: 'detail', id: run });
+  assert.equal(before.guidance.reason, 'recoverableFailure');
+  assert.ok(before.guidance.actions.some((a) => a.op === 'redrive' &&
+    a.failure === before.recovery[0].failure && a.node === before.recovery[0].node));
   const retry = command('redrive', run, { version: before.version, failure: before.recovery[0].failure });
   available = true;
   const attempt = h.operate(identity(h), retry);
@@ -517,6 +534,9 @@ test('a publisher pins children locally and an operator resumes or cancels only 
     h.operate(identity(h, 'publisher'), command('activate', wait.id, { revision: publish(wait) }));
     const id = h.operate(identity(h, 'operator'), command('start', wait.id, { trigger: 'schedule' }));
     await until(() => h.receipt(id).state === 'waiting');
+    assert.deepEqual(h.operate(identity(h, 'operator'), { op: 'detail', id }).guidance, {
+      reason: 'awaitingEvent', actions: [{ op: 'resume' }, { op: 'cancel' }],
+    });
     runs.push(id);
   }
   assert.equal(sends.length, 2);
@@ -629,6 +649,7 @@ test('status filters distinguish a throttled page and expose compensation failur
     })[0].runId,
     throttled,
   );
+  assert.deepEqual(read({ op: 'detail', id: throttled }).guidance, { reason: 'throttled', actions: [] });
   assert.equal(read({ op: 'list', status: 'waiting' }).length, 0);
   h.cancel(throttled);
   compensationFlow(h);
@@ -646,6 +667,9 @@ test('status filters distinguish a throttled page and expose compensation failur
   await until(() => h.compensationInfo(root).state === 'manual');
   assert.equal(read({ op: 'list', status: 'manual' })[0].outcome, 'error');
   assert.equal(read({ op: 'metrics' }).compensationFailures, 1);
+  const manual = h.operate(identity(h), { op: 'detail', id: root });
+  const failure = manual.compensation.steps.find((step) => step.status === 'failed').failure;
+  assert.deepEqual(manual.guidance, { reason: 'manual', actions: [{ op: 'retryCompensation', failure }] });
 });
 
 test('operator start and trigger deliveries have separate idempotency domains', async (t) => {

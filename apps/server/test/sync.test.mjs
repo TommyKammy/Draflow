@@ -317,12 +317,15 @@ test('expired receiver keys and canceled unknown sends require reconciliation be
     (_, p) => {
       p.nodes[1].parameters.keyLifetimeMs = 1;
     },
+    process.env.DRAFLOW_TEST_SHARED ? {} : { organization: 'expiry-test' },
   );
   const id = start(h, 'cancel');
   await until(() => h.relations(id)[0]?.childState === 'review');
   const k = h.relations(id)[0].child,
     key = h.effects(k)[0].key;
   await new Promise((resolve) => setTimeout(resolve, 5));
+  const detail = h.operate({ actor: 'reviewer', role: 'admin', organization: h.organization }, { op: 'detail', id: k });
+  assert.deepEqual(detail.guidance.actions.find((action) => action.key === key).decisions, ['applied', 'notApplied']);
   assert.equal(h.reconcile(k, key, 'retryKeyed'), false);
   assert.ok(h.cancel(id));
   assert.equal(await outcome(h, id), 'canceled');

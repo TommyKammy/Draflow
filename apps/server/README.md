@@ -335,6 +335,19 @@ An operator can additionally receive `reconcile`, `compensate` (including retry)
 
 Use `Authorization: Bearer <token>` on `/operator/<encoded-organization>/api`. Read via GET query parameters. Supported read operations are `session`, `list`, `detail` (id), `history` (workflow), `audit`, and `metrics`. The list accepts exact workflow/run IDs, revision, status and inclusive `from`/`to` epoch milliseconds. It returns up to 50 rows ordered by admission time and run ID. Supply the last row's `acceptedAt` as `before` and its run ID as `afterId` for the next page. History and execution details expose metadata; request bodies, upstream results, secret values and wait tokens are omitted. External operation keys are visible for looking up upstream receipts.
 
+Run detail includes `guidance: { reason, actions }` for the authenticated caller.
+The reason is independent of permission. Event and timer waits use `awaitingEvent` and
+`awaitingTime`, pending cancellation uses `cancelRequested`, a retained redrive point uses
+`recoverableFailure`, and other reasons use
+the operator status or the finished outcome. Each action names an existing mutation
+in `op`. A redrive carries its `node` and `failure`, a compensation retry its
+`failure`, and reconciliation its `node`, `key`, and available `decisions`.
+For example, a viewer and an operator can both see `reason: "awaitingEvent"`;
+only the operator can receive resume and cancel actions. A successful detail read
+performs no recovery. Use the returned run ID and version when submitting a
+decision. Authorization, retention and receiver retry windows are checked again
+at submission. Reload detail after a conflict.
+
 Use POST with `Content-Type: application/json` for mutations. Supply a unique `request` (a UUID is suitable), `target`, and a structured `reason` chosen from `receiver-confirmed`, `receiver-absent`, `incident-recovery`, `release`, `access-change`, or `operator-request`. Recovery commands require the `version` returned by a fresh detail read. A repeated identical request from the same authorized actor returns its committed result. A stale or conflicting decision returns HTTP 409; reload detail and inspect the current state. The console does this automatically. An accepted mutation and its organization, actor, reason, target, timestamp and result commit together. Audit rows survive execution-history deletion. Query audit by optional exact `target`. The latest 100 entries are returned. For older entries pass the final row's `stamp` as `before` and its `request` as `afterRequest`. Rejected authenticated ledger mutations record an error status separately from accepted requests. Unknown targets in rejected requests are hashed.
 
 | Operation | Target and additional fields |

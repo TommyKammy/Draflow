@@ -69,12 +69,14 @@ test('operators reconcile the same delivery in two tabs; a viewer can inspect th
     const [first, second, viewer] = pages;
     await expect(viewer.getByRole('region', { name: '稼働状況' })).toContainText('最終ハートビート');
     await expect(viewer.locator('#monitorError')).toBeHidden();
+    await expect(viewer.locator('#record')).toContainText('外部操作の結果が不明');
     await expect(viewer.getByRole('button', { name: '配送結果を照合' })).toHaveCount(0);
     await second.getByRole('combobox', { name: '受信先の確認結果' }).selectOption('notApplied');
     await first.getByRole('button', { name: '配送結果を照合' }).press('Enter');
     await expect(first.getByRole('status')).toContainText('操作を記録');
     await second.getByRole('button', { name: '配送結果を照合' }).press('Enter');
     await expect(second.getByRole('status')).toContainText('最新の状態');
+    await expect(second.getByRole('button', { name: '配送結果を照合' })).toHaveCount(0);
     await expect.poll(() => h.receipt(id).outcome).toBe('success');
     await viewer.getByRole('button', { name: '詳細を更新' }).press('Enter');
     await expect(viewer.locator('#record')).toContainText('成功');
