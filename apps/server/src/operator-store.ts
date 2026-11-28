@@ -346,6 +346,10 @@ export class OperatorStore {
       if (!validPolicy(policy) || policy.role === 'disabled') return deny(403);
       const allowed = [...permissions[policy.role], ...(policy.grants ?? [])];
       const op = field(q.op);
+      if (op === 'preview') {
+        if (!allowed.includes('publish')) return deny(403);
+        return host.previewPublication(q.workflow);
+      }
       if (['session', 'list', 'detail', 'metrics', 'audit', 'history'].includes(op)) {
         if (op === 'session')
           return { actor, organization: principal.organization, role: policy.role, allowed };

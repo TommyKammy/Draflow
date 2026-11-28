@@ -229,7 +229,7 @@ export class ExecutionLedger {
     return { revision, workflow: JSON.parse(String(row.document)) };
   }
 
-  private validateTargets(root: Workflow) {
+  validateTargets(root: Workflow) {
     validateCompensations(root, (id, rev) => this.publication(id, rev).workflow);
     const visit = (workflow: Workflow, ancestors: string[]) => {
       for (const node of workflow.nodes) {

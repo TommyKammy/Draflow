@@ -331,6 +331,34 @@ The account file is a JSON array. For each person and organization, provision a 
 
 An operator can additionally receive `reconcile`, `compensate` (including retry), and `credentials` independently. `membership` sets the policy for an actor in the local ledger and takes precedence over the account's initial policy. Credentials continue to use the host's workflow/node/origin grants. The `credentials` operation enables/disables a granted ID or selects a preconfigured version. To rotate a secret, provision the version on every worker first. The optional `versions` object in `DRAFLOW_HTTP_AUTH_FILE` maps credential IDs to version names to environment variable names, for example `{"orders-key":{"rotation-2":"ORDERS_KEY_V2"}}`. Send `credentialVersion:"rotation-2"` with `enabled:true` to select it, or `credentialVersion:null` to restore the default. The worker rechecks the active credential version and destination grant after lookup and rate-limit waits, just before dispatch. An already dispatched request cannot be recalled. The same ID can resolve to different values in different organizations. Configure separate webhook signing keys for each organization's listener.
 
+### Preview a draft before publication
+
+In Operator Console, sign in as a publisher or admin, open **公開前の影響を確認**,
+choose a workflow JSON file and select **影響を確認**. For `examples/order-sync.json`,
+both the orders webhook and the 60-second schedule can read `GET /orders`
+with `orders-read` and send `POST /totals` with `orders-send`. Conditions and empty
+inputs can skip the write. The receipt and execution history describe what actually ran.
+
+Hosts can call `host.previewPublication(workflow)`. The trusted local CLI and authenticated
+operator HTTP POST accept `{"op":"preview","workflow":...}`. HTTP requires the current
+organization's publish permission. Preview validates the draft using publication-time node
+resolution and target checks. It allocates no revision, registers no trigger, resolves no
+credential and performs no I/O to the workflow's destinations.
+
+Each trigger reports possible effects, including the owning workflow, pinned revision
+(`null` for the draft), node, execution or compensation phase, operation kind, and credential
+references. For HTTP, `destination` contains origin and path only. A dynamic URL or method
+is `null`; headers, bodies, URL query, fragment, userinfo and expression source are omitted.
+Read/write describes the requested HTTP method. The receiver defines its behavior and the
+host checks its credential grants at dispatch. Pinned child workflows are resolved in the
+current organization's ledger. Preview follows all reachable branches and disabled-node
+pass-through without evaluating data or simulating a run.
+
+For a host-defined node, optionally declare `meta.externalEffect` as `read`, `write`, or
+`none` on the registered node type. Omission produces `undeclared`; the workflow document
+cannot override this declaration. Large previews fail as a whole at 50,000 node visits
+or 1 MiB of effect records.
+
 ### Requests and recovery
 
 Use `Authorization: Bearer <token>` on `/operator/<encoded-organization>/api`. Read via GET query parameters. Supported read operations are `session`, `list`, `detail` (id), `history` (workflow), `audit`, and `metrics`. The list accepts exact workflow/run IDs, revision, status and inclusive `from`/`to` epoch milliseconds. It returns up to 50 rows ordered by admission time and run ID. Supply the last row's `acceptedAt` as `before` and its run ID as `afterId` for the next page. History and execution details expose metadata; request bodies, upstream results, secret values and wait tokens are omitted. External operation keys are visible for looking up upstream receipts.

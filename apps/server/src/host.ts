@@ -3,7 +3,7 @@ import type { Identity } from './operator-store.js';
 import { type SharedOptions, OwnershipLost } from './postgres.js';
 import { randomUUID } from 'node:crypto';
 import { setImmediate as yieldToHost } from 'node:timers/promises';
-import { isPlainObject, type ExecutionEngineOptions, type JsonObject, type Workflow } from '@draflow/core';
+import { isPlainObject, parseWorkflow, type ExecutionEngineOptions, type JsonObject, type Workflow } from '@draflow/core';
 import { MemoryRuntime, type PublishedWorkflow, type TriggerEvent } from '@draflow/runtime';
 import type { ExecutionSummary } from '@draflow/storage';
 import {
@@ -15,6 +15,7 @@ import {
   type HttpAuth,
 } from './http-auth.js';
 import { compensationSpec } from './compensation.js';
+import { previewWorkflow, webhookPath } from './preview.js';
 import { pageConfig, readPage, retryTime } from './pages.js';
 import { latestDue, nextTime, scheduleFor } from './schedule.js';
 import {
@@ -360,11 +361,22 @@ export class NodeHost {
     if (this.#stopping) throw new Error('Host stopping');
   }
 
-  publish(workflow: Workflow): number {
-    this.#ready();
+  private publicationDraft(workflow: Workflow) {
     const runtime = new MemoryRuntime(this.#engine);
     runtime.saveDraft(workflow);
-    return this.#ledger.publish(runtime.publish(workflow.id).workflow);
+    return runtime.publish(workflow.id).workflow;
+  }
+
+  previewPublication(workflow: unknown) {
+    this.#ready();
+    const draft = this.publicationDraft(parseWorkflow(workflow));
+    this.#ledger.validateTargets(draft);
+    return previewWorkflow(draft, this.options.registry, (id, revision) => this.#ledger.publication(id, revision).workflow);
+  }
+
+  publish(workflow: Workflow): number {
+    this.#ready();
+    return this.#ledger.publish(this.publicationDraft(workflow));
   }
 
   canRestorePublication(workflowId: string, revision: number) {
@@ -406,12 +418,7 @@ export class NodeHost {
     this.#checkPublication(publication);
     const routes = publication.workflow.nodes
       .filter((n) => !n.disabled && n.type === 'draflow.webhook')
-      .map((node) => {
-        const path = node.parameters.path;
-        if (typeof path !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(path))
-          throw new Error('Invalid Webhook path');
-        return { path: '/webhook/' + path, triggerNodeId: node.id };
-      });
+      .map((node) => ({ path: webhookPath(node), triggerNodeId: node.id }));
     const now = this.#scheduleClock.now();
     const schedules = publication.workflow.nodes
       .filter((n) => !n.disabled && n.type === 'draflow.schedule')

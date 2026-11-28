@@ -94,6 +94,9 @@ try {
       const q = JSON.parse(line);
       let result: unknown;
       switch (q.op) {
+        case 'preview':
+          result = host.previewPublication(q.workflow);
+          break;
         case 'publish':
           result = host.publish(q.workflow);
           break;
