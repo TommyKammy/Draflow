@@ -42,8 +42,8 @@ const permissions: Record<Role, string[]> = {
   disabled: [],
   viewer: ['read'],
   operator: ['read', 'resume', 'cancel', 'redrive', 'start'],
-  publisher: ['read', 'publish', 'activate', 'release'],
-  admin: ['read', 'resume', 'cancel', 'redrive', 'start', 'publish', 'activate', 'release', 'membership', ...grants],
+  publisher: ['read', 'publish', 'activate', 'release', 'releaseWithHttpGrants'],
+  admin: ['read', 'resume', 'cancel', 'redrive', 'start', 'publish', 'activate', 'release', 'releaseWithHttpGrants', 'membership', ...grants],
 };
 const reasons = [
   'receiver-confirmed',
@@ -307,6 +307,7 @@ export class OperatorStore {
           'publish',
           'activate',
           'release',
+          'releaseWithHttpGrants',
           'start',
           'membership',
           'credentials',
@@ -429,12 +430,19 @@ export class OperatorStore {
           change = { enabled: q.enabled, version };
           break;
         }
-        case 'release': {
+        case 'release':
+        case 'releaseWithHttpGrants': {
           if (typeof q.review !== 'string' || !/^[a-f0-9]{64}$/.test(q.review)) return deny(400);
           const workflow = parseWorkflow(q.workflow);
           if (workflow.id !== target) return deny(400);
           const current = host.comparePublication(workflow);
           if (current.review !== q.review) return deny(409);
+          if (op === 'releaseWithHttpGrants') {
+            const { triggers } = host.checkHttpGrants(workflow);
+            const blocked = triggers.some(({ effects }) => effects.some(({ grantStatus }) =>
+              grantStatus !== undefined && grantStatus !== 'matched' && grantStatus !== 'anonymous'));
+            if (blocked) return deny(422);
+          }
           result = host.publish(workflow);
           host.activate(target, result);
           change = { previousRevision: current.activeRevision, revision: result };

@@ -84,6 +84,7 @@ function clear() {
   $('login').hidden = false;
   $('token').value = '';
   resetPreview();
+  requireDraftHttpGrants = false;
   $('previewForm').reset();
   $('previewPanel').open = false;
   $('previewPanel').hidden = true;
@@ -465,13 +466,19 @@ function showCall(box, site, prefix) {
 function showRelease(box, workflow, preview, generation) {
   const button = node('button', '比較した下書きを公開・有効化');
   button.type = 'button';
-  box.append(button);
+  const check = node('input');
+  check.type = 'checkbox';
+  check.checked = requireDraftHttpGrants;
+  check.onchange = () => { requireDraftHttpGrants = check.checked; };
+  const label = node('label');
+  label.append(check, ' 公開時にこのホストの組み込みHTTP送信許可を必須にする');
+  box.append(label, button);
   let request;
   button.onclick = async () => {
-    button.disabled = true;
+    button.disabled = check.disabled = true;
     try {
       request ??= crypto.randomUUID();
-      const revision = await api({ op: 'release', target: preview.workflowId, workflow,
+      const revision = await api({ op: check.checked ? 'releaseWithHttpGrants' : 'release', target: preview.workflowId, workflow,
         review: preview.review, request, reason: 'release' }, true);
       if (generation !== previewRequest) return;
       resetPreview();
@@ -483,6 +490,10 @@ function showRelease(box, workflow, preview, generation) {
         resetPreview();
         announce('比較結果が古くなりました。もう一度「影響を確認」を選んでください。');
         $('compareActive').focus();
+      } else if (error.status === 422) {
+        button.disabled = check.disabled = false;
+        announce('公開を中止しました。「稼働版と比較」を外して「下書きの送信許可を確認」から、許可不足や実行時判定の項目を確認してください。');
+        $('compareActive').focus();
       } else {
         button.disabled = false;
         report(error);
@@ -491,12 +502,16 @@ function showRelease(box, workflow, preview, generation) {
   };
 }
 
+let requireDraftHttpGrants = false;
 let previewRequest = 0;
 function resetPreview() {
   previewRequest++;
   $('previewResult').replaceChildren();
 }
-$('draftFile').onchange = resetPreview;
+$('draftFile').onchange = () => {
+  requireDraftHttpGrants = false;
+  resetPreview();
+};
 $('compareActive').onchange = resetPreview;
 $('previewForm').onsubmit = async (event) => {
   event.preventDefault();

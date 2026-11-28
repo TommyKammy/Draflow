@@ -152,8 +152,8 @@ test('an operator refreshing an expired event wait sees the deadline and can sti
 
 test('publisher previews an order draft before publication', async ({ page }) => {
   const organization = randomUUID(), token = randomUUID();
-  const h = new NodeHost(':memory:', { ...hostOptions(organization), httpAuth: { organization,
-    grants: [{ workflowId: 'order-sync', nodeId: 'read', id: 'orders-read', origin: 'https://orders.example.test', kind: 'bearer' }],
+  const grants = [{ workflowId: 'order-sync', nodeId: 'read', id: 'orders-read', origin: 'https://orders.example.test', kind: 'bearer' }];
+  const h = new NodeHost(':memory:', { ...hostOptions(organization), httpAuth: { organization, grants,
     resolve() { throw Error('unexpected secret resolution'); },
   } });
   const srv = createOperatorServer([h], () => [{
@@ -219,6 +219,12 @@ test('publisher previews an order draft before publication', async ({ page }) =>
     await page.getByRole('button', { name: '影響を確認' }).press('Enter');
     await expect(result).toContainText('表示対象の差分はありません。');
     const release = page.getByRole('button', { name: '比較した下書きを公開・有効化' });
+    const requireGrants = page.getByRole('checkbox', { name: '公開時にこのホストの組み込みHTTP送信許可を必須にする' });
+    await requireGrants.check();
+    await release.press('Enter');
+    await expect(page.getByRole('status')).toContainText('公開を中止しました');
+    await expect(compare).toBeFocused();
+    expect(h.webhook('/webhook/orders').revision).toBe(1);
     h.activate(changed.id, h.publish(changed)); // Another publisher switches the baseline.
     await release.click();
     await expect(page.getByRole('status')).toContainText('比較結果が古くなりました');
@@ -226,13 +232,25 @@ test('publisher previews an order draft before publication', async ({ page }) =>
     await page.getByRole('button', { name: '影響を確認' }).click();
     await expect(result).toContainText('比較元：稼働版 v2');
     await release.click();
+    await expect(page.getByRole('status')).toContainText('公開を中止しました');
+    expect(h.webhook('/webhook/orders').revision).toBe(2);
+    await expect(requireGrants).toBeChecked();
+    grants.push({ ...grants[0], id: 'orders-send', nodeId: 'send' });
+    await release.click();
     await expect(page.getByRole('status')).toContainText('v3 を公開し、有効化しました');
     expect(h.webhook('/webhook/orders').revision).toBe(3);
+    const audit = h.operate({ organization, actor: 'publisher', role: 'publisher' }, { op: 'audit' });
+    expect(audit.filter((row) => row.action === 'release')).toHaveLength(0);
+    expect(audit.filter((row) => row.action === 'releaseWithHttpGrants').map((row) => {
+      const result = JSON.parse(row.result);
+      return result.status ?? result;
+    }).sort((a, b) => a - b)).toEqual([3, 409, 422, 422]);
     let compensationDraft;
     publishCompensations(h, false, false, (flow) => { compensationDraft = structuredClone(flow); });
     compensationDraft.nodes[1].parameters.compensation.onFailure = true;
     await input.setInputFiles({ name: 'undo.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(compensationDraft)) });
     await page.getByRole('button', { name: '影響を確認' }).press('Enter');
+    await expect(requireGrants).not.toBeChecked();
     await expect(result).toContainText('削除 · 補償 · order-import / reserve');
     await expect(result).toContainText('自動開始なし');
     await expect(result).toContainText('追加 · 補償 · order-import / reserve');

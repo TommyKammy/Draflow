@@ -429,6 +429,17 @@ baseline revision at the time of the request.
 
 #### Publish and activate the reviewed draft
 
+For an optional release-time check, select **公開時にこのホストの組み込みHTTP送信許可を必須にする**
+on the publication comparison or send `op: "releaseWithHttpGrants"` with the same fields as
+`release`. After validating the review token, the host checks every reachable built-in HTTP
+Request and Pages effect in the draft, including unchanged steps, pinned children and
+compensations. Only matched or anonymous HTTP effects pass. Runtime-dependent bindings,
+missing grants, unavailable selected versions and invalid configurations return HTTP 422.
+The revision, routes and success receipt commit together only on success. Replaying a
+successful request returns its original receipt. The audit action records the selected
+release mode. Custom effects are outside this HTTP check. Each worker still checks its
+own grants and resolves credentials when executing.
+
 After comparing a draft, select **比較した下書きを公開・有効化** to switch incoming
 events to the new revision. Runs already admitted finish on their pinned revision.
 Publisher and admin accounts can also submit this operator command, using the
