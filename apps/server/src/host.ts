@@ -12,6 +12,7 @@ import {
   sharedRateLimit,
   previewGrantCheck,
   serverHttp,
+  type CheckGrant,
   type RateGate,
   type HttpAuth,
 } from './http-auth.js';
@@ -386,16 +387,25 @@ export class NodeHost {
       (id, revision) => this.#ledger.publication(id, revision).workflow, undefined, previewGrantCheck(this.#httpAuth));
   }
 
-  comparePublication(workflow: unknown) {
+  private publicationComparison(workflow: unknown, check?: CheckGrant) {
     const draft = this.previewDraft(workflow);
     const { revision, registration } = this.#ledger.reviewBaseline(draft.id);
     const load = (id: string, rev: number) => this.#ledger.publication(id, rev).workflow;
     const active = revision === null ? null : load(draft.id, revision);
-    const changes = compareWorkflows(active, draft, this.options.registry, load);
+    const changes = compareWorkflows(active, draft, this.options.registry, load, check);
+    return { draft, registration, report: { workflowId: draft.id, workflowName: draft.name, activeRevision: revision, changes } };
+  }
+
+  compareHttpGrants(workflow: unknown) {
+    return this.publicationComparison(workflow, previewGrantCheck(this.#httpAuth)).report;
+  }
+
+  comparePublication(workflow: unknown) {
+    const { draft, registration, report } = this.publicationComparison(workflow);
     const review = createHash('sha256')
-      .update(JSON.stringify([this.organization, revision, registration, draft, changes]))
+      .update(JSON.stringify([this.organization, report.activeRevision, registration, draft, report.changes]))
       .digest('hex');
-    return { workflowId: draft.id, workflowName: draft.name, activeRevision: revision, changes, review };
+    return { ...report, review };
   }
 
   publish(workflow: Workflow): number {

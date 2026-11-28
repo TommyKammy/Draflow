@@ -212,7 +212,7 @@ type Trigger = Preview['triggers'][number];
 
 function effectKey(e: PublicationImpact) {
   return JSON.stringify([e.workflowId, e.revision, e.nodeId, e.phase, e.kind, e.method,
-    e.destination, e.mayRedirect, [...e.credentialRefs].sort()]);
+    e.destination, e.mayRedirect, e.grantStatus, [...e.credentialRefs].sort()]);
 }
 
 function triggerCondition(trigger: Trigger | undefined) {
@@ -225,10 +225,10 @@ function difference<T>(left: Map<string, T> | undefined, right: Map<string, T> |
   return Array.from(left ?? []).filter(([key]) => !right?.has(key)).map(([, value]) => value);
 }
 
-export function compareWorkflows(active: Workflow | null, proposed: Workflow, registry: NodeRegistry, load: Load) {
+export function compareWorkflows(active: Workflow | null, proposed: Workflow, registry: NodeRegistry, load: Load, check?: CheckGrant) {
   const previousSites: CallSites = new Map(), nextSites: CallSites = new Map();
-  const activePreview = active && previewWorkflow(active, registry, load, previousSites);
-  const draft = previewWorkflow(proposed, registry, load, nextSites);
+  const activePreview = active && previewWorkflow(active, registry, load, previousSites, check);
+  const draft = previewWorkflow(proposed, registry, load, nextSites, check);
   const before = new Map(activePreview?.triggers.map((t) => [t.nodeId, t]));
   const after = new Map(draft.triggers.map((t) => [t.nodeId, t]));
   const changes = [];

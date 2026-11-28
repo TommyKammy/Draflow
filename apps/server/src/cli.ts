@@ -95,7 +95,7 @@ try {
       let result: unknown;
       switch (q.op) {
         case 'checkHttpGrants':
-          result = host.checkHttpGrants(q.workflow);
+          result = q.compareActive === true ? host.compareHttpGrants(q.workflow) : host.checkHttpGrants(q.workflow);
           break;
         case 'preview':
           result = q.compareActive === true ? host.comparePublication(q.workflow) : host.previewPublication(q.workflow);
