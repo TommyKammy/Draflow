@@ -219,6 +219,12 @@ test('publisher previews an order draft before publication', async ({ page }) =>
     await page.getByRole('button', { name: '影響を確認' }).press('Enter');
     await expect(result).toContainText('表示対象の差分はありません。');
     const release = page.getByRole('button', { name: '比較した下書きを公開・有効化' });
+    const requireGrants = page.getByRole('checkbox', { name: '公開時にこのホストの組み込みHTTP送信許可を必須にする' });
+    await requireGrants.check();
+    await release.press('Enter');
+    await expect(page.getByRole('status')).toContainText('公開を中止しました');
+    await expect(compare).toBeFocused();
+    expect(h.webhook('/webhook/orders').revision).toBe(1);
     h.activate(changed.id, h.publish(changed)); // Another publisher switches the baseline.
     await release.click();
     await expect(page.getByRole('status')).toContainText('比較結果が古くなりました');

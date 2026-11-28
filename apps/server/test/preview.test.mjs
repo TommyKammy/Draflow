@@ -712,6 +712,82 @@ test('reviewed order release switches the exact draft once, with scoped credenti
   assert.ok(!JSON.stringify(audit).includes('PRIVATE'));
 });
 
+test('checked order release enforces live grants on the whole draft and replays its receipt', async (t) => {
+  const flow = fixture('order-sync'), origin = 'https://orders.example.test';
+  const grants = ['read', 'send'].map((nodeId) => ({ id: 'orders-' + nodeId, nodeId, workflowId: flow.id, origin, kind: 'bearer' }));
+  const { options, requests } = receiver(grants, () => [{ approved: true, amount: 7 }]);
+  const resolutions = [];
+  options.httpAuth.resolve = (id) => { resolutions.push(id); return 'token-' + id; };
+  const versions = ['blue'];
+  options.httpAuth.versions = { 'orders-send': versions };
+  const { h, operate } = setup(t, options);
+  h.activate(flow.id, h.publish(flow));
+  const draft = structuredClone(flow);
+  draft.nodes.find((n) => n.id === 'hook').parameters.path = 'orders-v2';
+  const command = (workflow) => ({ op: 'releaseWithHttpGrants', reason: 'release', request: randomUUID(),
+    target: workflow.id, workflow, review: h.comparePublication(workflow).review });
+  const release = command(draft);
+  const submit = (q) => operate('publisher', q);
+  const status = (code) => (e) => e.status === code;
+  for (const role of ['operator', 'viewer']) assert.throws(() => operate(role, release), status(403));
+  assert.throws(() => submit({ ...release, review: '0'.repeat(64) }), status(409));
+  const setAccess = (enabled) => operate('admin', { op: 'credentials', target: 'orders-send', enabled,
+    credentialVersion: 'blue', reason: 'access-change', request: randomUUID() });
+  setAccess(false);
+  assert.throws(() => submit(release), status(422));
+  setAccess(true);
+  versions.pop();
+  assert.throws(() => submit(release), status(422));
+  versions.push('blue');
+  const send = structuredClone(draft);
+  send.nodes.find((n) => n.id === 'send').parameters.url = '={{ $json.destination }}';
+  assert.throws(() => submit(command(send)), status(422));
+  assert.equal(h.webhook('/webhook/orders').revision, 1);
+  assert.ok(!h.webhook('/webhook/orders-v2'));
+  assert.equal(submit(release), 2);
+  setAccess(false);
+  assert.equal(submit(release), 2);
+  assert.throws(() => submit({ ...release, op: 'release' }), status(409));
+  assert.deepEqual([requests, resolutions], [[], []]);
+  assert.ok(!h.webhook('/webhook/orders'));
+  const denied = h.acceptWebhook('/webhook/orders-v2', h.webhook('/webhook/orders-v2'), { items: [{ json: {} }] });
+  await until(() => h.receipt(denied).state === 'finished');
+  assert.equal(h.receipt(denied).outcome, 'error');
+  assert.deepEqual(requests.splice(0), [['GET', origin + '/orders', 'Bearer token-orders-read']]);
+  setAccess(true);
+  for (const trigger of ['hook', 'timer']) {
+    const run = h.accept(flow.id, trigger, { items: [{ json: {} }] });
+    await until(() => h.receipt(run).state === 'finished');
+    assert.equal(h.receipt(run).outcome, 'success');
+    assert.deepEqual(requests.splice(0), [['GET', origin + '/orders', 'Bearer token-orders-read'],
+      ['POST', origin + '/totals', 'Bearer token-orders-send']]);
+  }
+  const audit = operate('publisher', { op: 'audit' }).filter((r) => r.action === release.op);
+  assert.equal(audit.filter((r) => r.request === release.request).length, 1);
+  assert.equal(audit.filter((r) => JSON.parse(r.result).status === 422).length, 3);
+});
+
+test('checked release follows pinned child and compensation grants', (t) => {
+  const grants = [{ workflowId: 'order-import', nodeId: 'ship', id: 'order-import', origin: 'https://sink.example.test', kind: 'bearer' }];
+  const { h, operate } = setup(t, { httpAuth: { grants, resolve() { assert.fail('secret lookup'); } },
+    fetch() { assert.fail('dispatch'); } });
+  const release = (workflow) => operate('publisher', { op: 'releaseWithHttpGrants', workflow,
+    target: workflow.id, review: h.comparePublication(workflow).review, reason: 'release', request: randomUUID() });
+  const child = fixture('process-order-batch'), parent = fixture('order-import');
+  child.nodes[1].parameters.authentication = 'credential';
+  child.nodes[1].credentials = { httpAuth: 'sink' };
+  h.publish(child);
+  assert.throws(() => release(parent), (e) => e.status === 422);
+  grants.push({ ...grants[0], workflowId: child.id, nodeId: 'register', id: 'sink' });
+  assert.equal(release(parent), 1);
+  let draft;
+  publishCompensations(h, false, false, (root) => { draft = structuredClone(root); });
+  assert.deepEqual(h.compareHttpGrants(draft).changes, []);
+  assert.throws(() => release(draft), (e) => e.status === 422);
+  grants.push({ ...grants[0], workflowId: 'release', nodeId: 'register', id: 'release' });
+  assert.equal(release(draft), 3);
+});
+
 test('failed reviewed activation rolls publication and routes back together', (t) => {
   const { h, operate } = setup(t);
   const flow = fixture('order-sync');
