@@ -456,6 +456,35 @@ function showCall(box, site, prefix) {
   line(box, prefix + kind + ' · ' + source, fields.join(' · '));
 }
 
+function showRelease(box, workflow, preview, generation) {
+  const button = node('button', '比較した下書きを公開・有効化');
+  button.type = 'button';
+  box.append(button);
+  let request;
+  button.onclick = async () => {
+    button.disabled = true;
+    try {
+      request ??= crypto.randomUUID();
+      const revision = await api({ op: 'release', target: preview.workflowId, workflow,
+        review: preview.review, request, reason: 'release' }, true);
+      if (generation !== previewRequest) return;
+      resetPreview();
+      announce(preview.workflowName + ' の v' + revision + ' を公開し、有効化しました。');
+      $('compareActive').focus();
+    } catch (error) {
+      if (generation !== previewRequest && error.status !== 401 && error.status !== 403) return;
+      if (error.status === 409) {
+        resetPreview();
+        announce('比較結果が古くなりました。もう一度「影響を確認」を選んでください。');
+        $('compareActive').focus();
+      } else {
+        button.disabled = false;
+        report(error);
+      }
+    }
+  };
+}
+
 let previewRequest = 0;
 function resetPreview() {
   previewRequest++;
@@ -499,6 +528,7 @@ $('previewForm').onsubmit = async (event) => {
         for (const effect of change.removed) showEffect(box, effect, '削除 · ');
         for (const effect of change.added) showEffect(box, effect, '追加 · ');
       }
+      showRelease(box, workflow, preview, request);
       announce('稼働版との差分を表示しました。');
       return;
     }

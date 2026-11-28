@@ -202,6 +202,16 @@ test('publisher previews an order draft before publication', async ({ page }) =>
     await input.setInputFiles({ name: 'original.json', mimeType: 'application/json', buffer: file });
     await page.getByRole('button', { name: '影響を確認' }).press('Enter');
     await expect(result).toContainText('表示対象の差分はありません。');
+    const release = page.getByRole('button', { name: '比較した下書きを公開・有効化' });
+    h.activate(changed.id, h.publish(changed)); // Another publisher switches the baseline.
+    await release.click();
+    await expect(page.getByRole('status')).toContainText('比較結果が古くなりました');
+    await expect(release).toHaveCount(0);
+    await page.getByRole('button', { name: '影響を確認' }).click();
+    await expect(result).toContainText('比較元：稼働版 v2');
+    await release.click();
+    await expect(page.getByRole('status')).toContainText('v3 を公開し、有効化しました');
+    expect(h.webhook('/webhook/orders').revision).toBe(3);
     let compensationDraft;
     publishCompensations(h, false, false, (flow) => { compensationDraft = structuredClone(flow); });
     compensationDraft.nodes[1].parameters.compensation.onFailure = true;

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { NodeHost } from './host.js';
-import type { JsonObject, Workflow } from '@draflow/core';
+import { parseWorkflow, type JsonObject, type Workflow } from '@draflow/core';
 
 type Value = string | number | null;
 type Row = Record<string, Value>;
@@ -42,8 +42,8 @@ const permissions: Record<Role, string[]> = {
   disabled: [],
   viewer: ['read'],
   operator: ['read', 'resume', 'cancel', 'redrive', 'start'],
-  publisher: ['read', 'publish', 'activate'],
-  admin: ['read', 'resume', 'cancel', 'redrive', 'start', 'publish', 'activate', 'membership', ...grants],
+  publisher: ['read', 'publish', 'activate', 'release'],
+  admin: ['read', 'resume', 'cancel', 'redrive', 'start', 'publish', 'activate', 'release', 'membership', ...grants],
 };
 const reasons = [
   'receiver-confirmed',
@@ -306,6 +306,7 @@ export class OperatorStore {
           'reconcile',
           'publish',
           'activate',
+          'release',
           'start',
           'membership',
           'credentials',
@@ -425,6 +426,17 @@ export class OperatorStore {
             'INSERT INTO credential_access VALUES(?,?,?) ON CONFLICT(credential) DO UPDATE SET enabled=excluded.enabled,version=excluded.version',
           ).run(target, Number(q.enabled), version);
           change = { enabled: q.enabled, version };
+          break;
+        }
+        case 'release': {
+          if (typeof q.review !== 'string' || !/^[a-f0-9]{64}$/.test(q.review)) return deny(400);
+          const workflow = parseWorkflow(q.workflow);
+          if (workflow.id !== target) return deny(400);
+          const current = host.comparePublication(workflow);
+          if (current.review !== q.review) return deny(409);
+          result = host.publish(workflow);
+          host.activate(target, result);
+          change = { previousRevision: current.activeRevision, revision: result };
           break;
         }
         case 'publish': {

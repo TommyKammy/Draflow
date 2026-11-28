@@ -448,3 +448,91 @@ test('replacing an order schedule removes the old registration and dispatches fr
     }
   }
 });
+
+test('reviewed order release switches the exact draft once, with scoped credentials and audit', async (t) => {
+  const flow = fixture('order-sync');
+  const { requests, options } = receiver([
+    ['read', 'orders-read', 'https://orders.example.test'],
+    ['send', 'orders-send', 'https://orders.example.test'],
+    ['send', 'shipping', 'https://shipping.example.test'],
+  ].map(([nodeId, id, origin]) => ({ nodeId, id, origin, workflowId: flow.id, kind: 'bearer' })),
+  () => [{ amount: 7, approved: true }]);
+  const fetch = options.fetch;
+  let holdRead;
+  options.fetch = async (url, init) => {
+    const response = await fetch(url, init);
+    if (init.method === 'GET' && holdRead) await holdRead;
+    return response;
+  };
+  const { h, operate } = setup(t, options);
+  const compare = (workflow) => operate('publisher', { op: 'preview', workflow, compareActive: true });
+  const release = (workflow) => ({ op: 'release', request: randomUUID(), reason: 'release', workflow,
+    target: workflow.id, review: compare(workflow).review });
+  const original = release(flow);
+  for (const role of ['viewer', 'operator']) assert.throws(() => operate(role, original), (e) => e.status === 403);
+  assert.equal(operate('publisher', original), 1);
+  const draft = structuredClone(flow);
+  draft.nodes.find((n) => n.id === 'hook').parameters.path = 'orders-v2';
+  draft.nodes.find((n) => n.id === 'timer').disabled = true;
+  const send = draft.nodes.find((n) => n.id === 'send');
+  send.parameters.url = 'https://shipping.example.test/totals?key=PRIVATE';
+  send.credentials.httpAuth = 'shipping';
+  const command = release(draft);
+  const competing = structuredClone(draft);
+  competing.name = 'Second publisher draft';
+  const stale = release(competing);
+  const tampered = structuredClone(command);
+  tampered.workflow.nodes.find((n) => n.id === 'send').parameters.url += '-changed';
+  assert.throws(() => operate('publisher', tampered), (e) => e.status === 409);
+  const other = setup(t, options);
+  other.h.activate(flow.id, other.h.publish(flow));
+  assert.throws(() => other.operate('publisher', command), (e) => e.status === 409);
+  assert.deepEqual(requests, []);
+  const dispatch = async (path) => {
+    const id = h.acceptWebhook(path, h.webhook(path), { items: [{ json: {} }] });
+    await until(() => h.receipt(id).outcome === 'success');
+    return requests.splice(0).find(([method]) => method === 'POST');
+  };
+  assert.deepEqual(await dispatch('/webhook/orders'), ['POST', 'https://orders.example.test/totals', 'Bearer token-orders-send']);
+  let resume;
+  holdRead = new Promise((resolve) => { resume = resolve; });
+  const inFlight = h.acceptWebhook('/webhook/orders', h.webhook('/webhook/orders'), { items: [{ json: {} }] });
+  try {
+    await until(() => requests.some(([method]) => method === 'GET'));
+    assert.equal(operate('publisher', command), 2);
+  } finally {
+    holdRead = undefined;
+    resume();
+  }
+  await until(() => h.receipt(inFlight).outcome === 'success');
+  assert.deepEqual(requests.splice(0).find(([method]) => method === 'POST'),
+    ['POST', 'https://orders.example.test/totals', 'Bearer token-orders-send']);
+  assert.equal(operate('publisher', command), 2);
+  assert.throws(() => operate('admin', stale), (e) => e.status === 409);
+  assert.ok(!h.webhook('/webhook/orders'));
+  assert.deepEqual(await dispatch('/webhook/orders-v2'), ['POST', 'https://shipping.example.test/totals', 'Bearer token-shipping']);
+  assert.equal(operate('publisher', original), 1); // Retry returns the receipt without reactivating v1.
+  assert.equal(compare(draft).activeRevision, 2);
+  const audit = operate('publisher', { op: 'audit' });
+  assert.deepEqual(audit.filter((r) => r.request === command.request).map((r) => JSON.parse(r.changeinfo)),
+    [{ previousRevision: 1, revision: 2 }]);
+  assert.ok(!JSON.stringify(audit).includes('PRIVATE'));
+});
+
+test('failed reviewed activation rolls publication and routes back together', (t) => {
+  const { h, operate } = setup(t);
+  const flow = fixture('order-sync');
+  h.activate(flow.id, h.publish(flow));
+  const other = structuredClone(flow);
+  other.id = 'other';
+  other.nodes.find((n) => n.id === 'hook').parameters.path = 'reserved';
+  h.activate(other.id, h.publish(other));
+  flow.nodes.find((n) => n.id === 'hook').parameters.path = 'reserved';
+  const deploy = () => operate('admin', { op: 'release', workflow: flow, target: flow.id, reason: 'release',
+    request: randomUUID(), review: h.comparePublication(flow).review });
+  assert.throws(deploy, /already registered/);
+  assert.equal(h.webhook('/webhook/orders').revision, 1);
+  assert.equal(h.webhook('/webhook/reserved').workflowId, other.id);
+  h.deactivate(other.id);
+  assert.equal(deploy(), 2);
+});
