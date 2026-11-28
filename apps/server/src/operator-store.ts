@@ -158,7 +158,13 @@ export class OperatorStore {
       String(run.workflowId),
     );
     const wait = host.waitInfo(id);
-    const version = digest(JSON.stringify([run, effects, recovery, compensation, transitions, wait?.token]));
+    const eventExpired = wait?.mode === 'event' && host.isWaitDue(Number(wait.dueAt));
+    const mayRestore = run.state === 'finished' && !compensation.id &&
+      (compensation.steps.length > 0 || recovery.some((point) => point.retained && !point.attempt));
+    const publicationUnavailable = mayRestore && !host.canRestorePublication(String(run.workflowId), Number(run.revision));
+    const version = digest(JSON.stringify([
+      run, effects, recovery, compensation, transitions, wait?.token, eventExpired, publicationUnavailable,
+    ]));
     return {
       run,
       effects,
@@ -170,6 +176,8 @@ export class OperatorStore {
       version,
       waitingForEvent: wait?.mode === 'event',
       waitMode: wait?.mode,
+      eventExpired,
+      publicationUnavailable,
     };
   }
   private guidance(host: NodeHost, detail: ReturnType<OperatorStore['detail']>, allowed: string[]) {
@@ -189,10 +197,13 @@ export class OperatorStore {
     const redrivePoints = failed && !canceled && !compensation.id
       ? recovery.filter((point) => point.retained && !point.attempt)
       : [];
+    const compensable = run.state === 'finished' && compensation.steps.length > 0 && !compensation.id;
+    if (detail.eventExpired) reason = 'eventExpired';
     if (redrivePoints.length) reason = 'recoverableFailure';
+    if (detail.publicationUnavailable) reason = 'publicationUnavailable';
     if (canceled && run.state !== 'finished' && run.state !== 'review') reason = 'cancelRequested';
 
-    if (run.state === 'waiting' && waitMode === 'event' && !canceled && allowed.includes('resume'))
+    if (run.state === 'waiting' && waitMode === 'event' && !detail.eventExpired && !canceled && allowed.includes('resume'))
       actions.push({ op: 'resume' });
     if (run.state === 'review' && allowed.includes('reconcile')) {
       for (const effect of effects) {
@@ -203,13 +214,12 @@ export class OperatorStore {
         actions.push({ op: 'reconcile', key: String(effect.key), node: String(effect.nodeId), decisions });
       }
     }
-    if (allowed.includes('redrive')) {
+    if (!detail.publicationUnavailable && allowed.includes('redrive')) {
       for (const point of redrivePoints)
         actions.push({ op: 'redrive', failure: String(point.failure), node: String(point.node) });
     }
     if (allowed.includes('compensate')) {
-      const canStart = run.state === 'finished' && compensation.steps.length > 0 && !compensation.id;
-      if (canStart && !host.inspect(id).uncertain.length)
+      if (!detail.publicationUnavailable && compensable && !host.inspect(id).uncertain.length)
         actions.push({ op: 'compensate' });
       for (const step of compensation.steps) {
         if (step.status !== 'failed' || !step.failure) continue;

@@ -337,7 +337,9 @@ Use `Authorization: Bearer <token>` on `/operator/<encoded-organization>/api`. R
 
 Run detail includes `guidance: { reason, actions }` for the authenticated caller.
 The reason is independent of permission. Event and timer waits use `awaitingEvent` and
-`awaitingTime`, pending cancellation uses `cancelRequested`, a retained redrive point uses
+`awaitingTime`, an overdue event awaiting scheduler processing uses `eventExpired`, and
+a pinned publication incompatible with the current host uses `publicationUnavailable`.
+Pending cancellation uses `cancelRequested`, a retained redrive point uses
 `recoverableFailure`, and other reasons use
 the operator status or the finished outcome. Each action names an existing mutation
 in `op`. A redrive carries its `node` and `failure`, a compensation retry its

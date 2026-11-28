@@ -332,6 +332,9 @@ export class NodeHost {
   waitInfo(runId: string) {
     return this.#ledger.waitInfo(runId);
   }
+  isWaitDue(dueAt: number) {
+    return dueAt <= this.#scheduleClock.now();
+  }
   transitions(runId: string) {
     return this.#ledger.transitions(runId);
   }
@@ -364,17 +367,36 @@ export class NodeHost {
     return this.#ledger.publish(runtime.publish(workflow.id).workflow);
   }
 
+  canRestorePublication(workflowId: string, revision: number) {
+    return !this.#publicationError(this.#ledger.publication(workflowId, revision));
+  }
+
   #checkPublication(publication: PublishedWorkflow, checked = new Set<string>()) {
+    const error = this.#publicationError(publication, checked);
+    if (error) throw error;
+  }
+
+  #publicationError(publication: PublishedWorkflow, checked = new Set<string>()): Error | undefined {
     const key = JSON.stringify([publication.workflow.id, publication.revision]);
     if (checked.has(key)) return;
-    new MemoryRuntime(this.#engine).restore(publication);
+    try {
+      new MemoryRuntime(this.#engine).restore(publication);
+    } catch (error) {
+      if (error instanceof Error) return error;
+      throw error;
+    }
     checked.add(key);
     for (const node of publication.workflow.nodes) {
-      const undo = !node.disabled && compensationSpec(node);
-      if (undo) this.#checkPublication(this.#ledger.publication(undo.workflowId, undo.revision), checked);
-      if (node.disabled || (node.type !== 'draflow.call' && node.type !== 'draflow.pages')) continue;
+      if (node.disabled) continue;
+      const undo = compensationSpec(node);
+      if (undo) {
+        const error = this.#publicationError(this.#ledger.publication(undo.workflowId, undo.revision), checked);
+        if (error) return error;
+      }
+      if (node.type !== 'draflow.call' && node.type !== 'draflow.pages') continue;
       const { workflowId, revision } = node.parameters;
-      this.#checkPublication(this.#ledger.publication(String(workflowId), Number(revision)), checked);
+      const error = this.#publicationError(this.#ledger.publication(String(workflowId), Number(revision)), checked);
+      if (error) return error;
     }
   }
 

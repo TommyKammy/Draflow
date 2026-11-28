@@ -32,6 +32,8 @@ const actions = {
 const explanations = {
   awaitingEvent: '外部イベントの到着を待っています。',
   awaitingTime: '指定した再開時刻を待っています。',
+  eventExpired: 'イベントの受付期限を過ぎました。タイムアウトの処理を待っています。',
+  publicationUnavailable: 'このホストでは実行時のワークフロー版を復元できません。必要なノード版を確認してください。',
   review: '外部操作の結果が不明です。受信先の記録を確認してください。',
   throttled: '受信先の制限により再試行時刻を待っています。',
   waiting: '実行の続きが処理されるのを待っています。',

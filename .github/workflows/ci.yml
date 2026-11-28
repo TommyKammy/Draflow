@@ -43,6 +43,14 @@ jobs:
   browser:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_PASSWORD: local-ci-only
+        ports:
+          - 5432:5432
+        options: --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 15
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -56,6 +64,10 @@ jobs:
       - run: pnpm build
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm test:browser
+      - name: Operator Console against PostgreSQL
+        run: pnpm exec playwright test operator.spec.mjs
+        env:
+          DRAFLOW_TEST_POSTGRES: postgres://postgres:local-ci-only@localhost:5432/postgres
       - run: pnpm bench:canvas
 
   shared-ledger:

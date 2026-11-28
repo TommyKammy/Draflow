@@ -62,6 +62,62 @@ const command = (op, target, extra = {}) => ({
   ...extra,
 });
 
+test('event resume disappears at its deadline before the scheduler settles the wait', async (t) => {
+  let now = Date.now();
+  const organization = randomUUID();
+  const h = new NodeHost(':memory:', {
+    organization, registry, scheduleClock: { now: () => now, arm: () => () => {} },
+    ...(process.env.DRAFLOW_TEST_POSTGRES && {
+      shared: { organization, connectionString: process.env.DRAFLOW_TEST_POSTGRES, role: 'worker', pollMs: 50 },
+    }),
+  });
+  t.after(() => h.close());
+  const wait = structuredClone(flow);
+  const dueAt = now + 60000;
+  wait.nodes.push({ ...write, id: 'wait', type: 'draflow.wait', typeVersion: 1, parameters: { mode: 'event', dueAt } });
+  wait.connections = [{ id: 'edge', from: { node: 'schedule', port: 'main', index: 0 }, to: { node: 'wait', port: 'main', index: 0 } }];
+  h.activate(wait.id, h.publish(wait));
+  const id = h.accept(wait.id, 'schedule', { items: [{ json: {} }] });
+  await until(() => h.receipt(id).state === 'waiting');
+  const detail = () => h.operate(identity(h), { op: 'detail', id });
+  now = dueAt - 1;
+  const before = detail();
+  assert.ok(before.guidance.actions.some((a) => a.op === 'resume'));
+  now = dueAt;
+  assert.throws(() => h.operate(identity(h), command('resume', id, { version: before.version })), (e) => e.status === 409);
+  assert.deepEqual(detail().guidance, { reason: 'eventExpired', actions: [{ op: 'cancel' }] });
+});
+
+test('recovery candidates require the pinned compensation child to be installed on this host', async (t) => {
+  const {
+    hosts: [original], dir,
+  } = setup(t);
+  compensationFlow(original);
+  const id = accept(original);
+  await until(() => original.receipt(id).outcome === 'error');
+  const detail = (h) => h.operate(identity(h), { op: 'detail', id });
+  const before = detail(original);
+  assert.deepEqual(before.guidance.actions.map((a) => a.op), ['redrive', 'compensate']);
+  original.deactivate('order-import');
+  await original.close();
+  const organization = original.organization;
+  const h = new NodeHost(join(dir, 'alpha'), {
+    organization,
+    registry: new NodeRegistry().registerAll(standardNodes.filter((n) => n.type !== 'draflow.childInput')),
+    ...(process.env.DRAFLOW_TEST_POSTGRES && {
+      shared: { organization, connectionString: process.env.DRAFLOW_TEST_POSTGRES, role: 'intake' },
+    }),
+  });
+  t.after(() => h.close());
+  const current = detail(h);
+  const stale = command('compensate', id, { version: before.version });
+  assert.throws(() => h.operate(identity(h), stale), (err) => err.status === 409);
+  for (const { op, failure } of before.guidance.actions)
+    assert.throws(() => h.operate(identity(h), command(op, id, { version: current.version, failure })),
+      /requires draflow.childInput@1/);
+  assert.deepEqual(current.guidance, { reason: 'publicationUnavailable', actions: [] });
+});
+
 test('authorization on every request, across organizations and roles', async (t) => {
   const { hosts } = setup(t);
   const accounts = [],
@@ -670,6 +726,13 @@ test('status filters distinguish a throttled page and expose compensation failur
   const manual = h.operate(identity(h), { op: 'detail', id: root });
   const failure = manual.compensation.steps.find((step) => step.status === 'failed').failure;
   assert.deepEqual(manual.guidance, { reason: 'manual', actions: [{ op: 'retryCompensation', failure }] });
+  const retry = command('retryCompensation', root, { failure, version: manual.version });
+  assert.throws(() => h.operate(identity(h, 'viewer'), retry), (err) => err.status === 403);
+  h.operate(identity(h), command('credentials', 'release', { enabled: true }));
+  const attempt = h.operate(identity(h), retry);
+  await until(() => h.compensationInfo(root).state === 'compensated');
+  assert.equal(h.operate(identity(h), retry), attempt);
+  assert.deepEqual(h.operate(identity(h), { op: 'detail', id: root }).guidance.actions, []);
 });
 
 test('operator start and trigger deliveries have separate idempotency domains', async (t) => {
