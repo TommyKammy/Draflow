@@ -1,7 +1,7 @@
 import type { BusinessDelivery } from './business.js';
 import type { Identity } from './operator-store.js';
 import { type SharedOptions, OwnershipLost } from './postgres.js';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { setImmediate as yieldToHost } from 'node:timers/promises';
 import { isPlainObject, parseWorkflow, type ExecutionEngineOptions, type JsonObject, type Workflow } from '@draflow/core';
 import { MemoryRuntime, type PublishedWorkflow, type TriggerEvent } from '@draflow/runtime';
@@ -380,11 +380,14 @@ export class NodeHost {
 
   comparePublication(workflow: unknown) {
     const draft = this.previewDraft(workflow);
-    const revision = this.#ledger.activeRevision(draft.id);
+    const { revision, registration } = this.#ledger.reviewBaseline(draft.id);
     const load = (id: string, rev: number) => this.#ledger.publication(id, rev).workflow;
     const active = revision === null ? null : load(draft.id, revision);
-    return { workflowId: draft.id, workflowName: draft.name, activeRevision: revision,
-      changes: compareWorkflows(active, draft, this.options.registry, load) };
+    const changes = compareWorkflows(active, draft, this.options.registry, load);
+    const review = createHash('sha256')
+      .update(JSON.stringify([this.organization, revision, registration, draft, changes]))
+      .digest('hex');
+    return { workflowId: draft.id, workflowName: draft.name, activeRevision: revision, changes, review };
   }
 
   publish(workflow: Workflow): number {

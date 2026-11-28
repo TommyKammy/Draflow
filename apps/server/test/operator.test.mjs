@@ -448,8 +448,8 @@ test('audit write failure rolls back publication and an accepted redrive survive
       try {
         db.raw(
           install
-            ? "ALTER TABLE operator_audit ADD CHECK(action<>'publish')"
-            : 'ALTER TABLE operator_audit DROP CONSTRAINT operator_audit_action_check',
+            ? "ALTER TABLE operator_audit ADD CONSTRAINT reject_audit CHECK(action NOT IN ('publish','release') OR request LIKE 'rejected:%')"
+            : 'ALTER TABLE operator_audit DROP CONSTRAINT reject_audit',
         );
       } finally {
         db.close();
@@ -459,7 +459,7 @@ test('audit write failure rolls back publication and an accepted redrive survive
       try {
         db.exec(
           install
-            ? "CREATE TRIGGER reject_audit BEFORE INSERT ON operator_audit BEGIN SELECT RAISE(ABORT,'audit failed'); END"
+            ? "CREATE TRIGGER reject_audit BEFORE INSERT ON operator_audit WHEN NEW.request NOT LIKE 'rejected:%' BEGIN SELECT RAISE(ABORT,'audit failed'); END"
             : 'DROP TRIGGER reject_audit',
         );
       } finally {
@@ -471,9 +471,25 @@ test('audit write failure rolls back publication and an accepted redrive survive
   h = boot();
   const pub = command('publish', flow.id, { workflow: flow });
   assert.throws(() => h.operate(identity(h), pub));
+  const orders = fixture('order-sync');
+  h.activate(orders.id, h.publish(orders));
+  const route = h.webhook('/webhook/orders');
+  orders.nodes.find((n) => n.id === 'hook').parameters.path = 'new-orders';
+  const release = command('release', orders.id, { workflow: orders, review: h.comparePublication(orders).review });
+  assert.throws(() => h.operate(identity(h), release));
+  assert.deepEqual(h.webhook('/webhook/orders'), route);
+  assert.ok(!h.webhook('/webhook/new-orders'));
+  const failures = h.operate(identity(h), { op: 'audit' }).filter((r) => r.action === 'release');
+  assert.deepEqual(failures.map((r) => JSON.parse(r.result)), [{ status: 400 }]);
   await h.close();
   alter(false);
   h = boot();
+  assert.equal(h.operate(identity(h), release), 2);
+  await h.close();
+  h = boot();
+  assert.equal(h.operate(identity(h), release), 2);
+  assert.equal(h.webhook('/webhook/new-orders').revision, 2);
+  assert.equal(h.operate(identity(h), { op: 'audit' }).filter((r) => r.request === release.request).length, 1);
   assert.equal(h.operate(identity(h), pub), 1);
   compensationFlow(h);
   const run = accept(h);
@@ -631,6 +647,11 @@ test(
     t.after(() => h.close());
     const published = command('publish', flow.id, { workflow: flow });
     assert.equal(h.operate(identity(h), published), 1);
+    const inactiveReview = h.comparePublication(flow).review;
+    h.activate(flow.id, 1);
+    h.deactivate(flow.id);
+    const latestReview = h.comparePublication(flow).review;
+    assert.notEqual(latestReview, inactiveReview);
     h.operate(identity(h), command('membership', 'viewer', { policy: { role: 'disabled' } }));
     const delivery = structuredClone(flow);
     delivery.id = 'cutover-delivery';
@@ -650,8 +671,10 @@ test(
     const { migrateLedger } = await import('../dist/migrate.js');
     const first = migrateLedger(path, shared);
     assert.equal(first.counts.operator_audit, 2);
+    assert.equal(first.counts.inactive_registrations, 1);
     assert.deepEqual(migrateLedger(path, shared), first);
     h = new NodeHost('', { registry, fetch, shared: { ...shared, role: 'all' } });
+    assert.equal(h.comparePublication(flow).review, latestReview);
     assert.equal(h.operate(identity(h), published), 1);
     assert.throws(
       () => h.operate(identity(h, 'viewer'), { op: 'list' }),

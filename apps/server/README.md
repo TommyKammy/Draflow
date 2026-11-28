@@ -387,6 +387,30 @@ headers, bodies and custom implementation details can change behavior without
 changing those fields. The comparison is read-only and reflects the reported
 baseline revision at the time of the request.
 
+#### Publish and activate the reviewed draft
+
+After comparing a draft, select **比較した下書きを公開・有効化** to switch incoming
+events to the new revision. Runs already admitted finish on their pinned revision.
+Publisher and admin accounts can also submit this operator command, using the
+same workflow document and the `review` returned by the comparison:
+
+```js
+const comparison = host.operate(publisher, { op: 'preview', workflow, compareActive: true });
+const command = { op: 'release', target: workflow.id, workflow, review: comparison.review,
+  request: crypto.randomUUID(), reason: 'release' };
+const revision = host.operate(publisher, command);
+```
+
+Authenticated HTTP clients POST the same commands to their organization's operator API.
+The host rechecks the organization, normalized draft (including parameters omitted from
+the display), activation registration and displayed changes under the ledger's write lock.
+A switch back to an earlier revision or to inactivity also invalidates the comparison.
+A stale comparison returns HTTP 409 and requires a fresh comparison. Publication,
+activation and the success audit record commit together. An activation error leaves
+the previous routes and revision in service. Retry the identical command and request
+ID after a lost response to retrieve the committed revision. Inspect the release audit
+record for the previous and new revision numbers.
+
 ### Requests and recovery
 
 Use `Authorization: Bearer <token>` on `/operator/<encoded-organization>/api`. Read via GET query parameters. Supported read operations are `session`, `list`, `detail` (id), `history` (workflow), `audit`, and `metrics`. The list accepts exact workflow/run IDs, revision, status and inclusive `from`/`to` epoch milliseconds. It returns up to 50 rows ordered by admission time and run ID. Supply the last row's `acceptedAt` as `before` and its run ID as `afterId` for the next page. History and execution details expose metadata; request bodies, upstream results, secret values and wait tokens are omitted. External operation keys are visible for looking up upstream receipts.

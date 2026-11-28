@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 import { createHash, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { MessageChannel, Worker, receiveMessageOnPort } from 'node:worker_threads';
-import { ledgerTables, temporaryWebhookTable } from './ledger-schema.js';
+import { inactiveRegistrationTable, ledgerTables, rememberRegistration, temporaryWebhookTable } from './ledger-schema.js';
 
 export interface SharedOptions {
   connectionString: string;
@@ -198,7 +198,7 @@ export class PostgresDatabase {
         // The default also supplies identities when importing Phase 6 active rows.
         this.raw(`ALTER TABLE active ADD COLUMN registration text NOT NULL DEFAULT gen_random_uuid()::text;
           UPDATE ledger_version SET version=2`);
-      } else if (version !== 2 && version !== 3 && version !== 4 && version !== 5)
+      } else if (version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6)
         throw Error('Unsupported shared ledger version');
       if (Number(version) < 3) {
         this.raw(identifiers(operatorSchema + postgresReviewClock + seedReviewClock));
@@ -211,6 +211,13 @@ export class PostgresDatabase {
       if (Number(version) < 5) {
         this.raw(identifiers(businessAttemptsSchema));
         this.raw('UPDATE ledger_version SET version=5');
+      }
+      if (Number(version) < 6) {
+        this.raw(identifiers(inactiveRegistrationTable + `
+          CREATE FUNCTION remember_deactivation() RETURNS trigger LANGUAGE plpgsql AS $$
+          BEGIN ${rememberRegistration} RETURN OLD; END; $$;
+          CREATE TRIGGER remember_deactivation AFTER DELETE ON active FOR EACH ROW EXECUTE FUNCTION remember_deactivation();
+          UPDATE ledger_version SET version=6;`));
       }
       this.raw(identifiers(temporaryWebhookTable.replaceAll('INTEGER', 'BIGINT')));
       this.commit();
