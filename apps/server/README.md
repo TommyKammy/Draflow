@@ -350,7 +350,11 @@ Each trigger reports possible effects, including the owning workflow, pinned rev
 references. For HTTP, `destination` contains origin and path only. A dynamic URL or method
 is `null`; headers, bodies, URL query, fragment, userinfo and expression source are omitted.
 Read/write describes the requested HTTP method. The receiver defines its behavior and the
-host checks its credential grants at dispatch. Pinned child workflows are resolved in the
+host checks its credential grants at dispatch. A literal template such as `=POST`
+reports its fixed value. A statically incompatible authentication mode and credential
+binding yields `blocked` with no credential use. Anonymous HTTP requests report
+`mayRedirect: true` because the receiver can redirect the request to another destination.
+Credentialed requests and page reads reject redirects. Pinned child workflows are resolved in the
 current organization's ledger. Preview follows all reachable branches and disabled-node
 pass-through without evaluating data or simulating a run.
 

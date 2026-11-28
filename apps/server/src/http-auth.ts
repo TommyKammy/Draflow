@@ -120,14 +120,15 @@ function reflectsSecret(bytes: Uint8Array, secret: string) {
   return false;
 }
 
+export function permitsCredentialDestination(target: URL) {
+  const local = ['localhost', '127.0.0.1', '[::1]'].includes(target.hostname);
+  return !target.username && !target.password &&
+    (target.protocol === 'https:' || (local && target.protocol === 'http:'));
+}
+
 function grantFor(binding: CredentialBinding, url: string, auth?: HttpAuth) {
   const target = new URL(url);
-  const local = ['localhost', '127.0.0.1', '[::1]'].includes(target.hostname);
-  if (
-    target.username ||
-    target.password ||
-    !(target.protocol === 'https:' || (local && target.protocol === 'http:'))
-  ) {
+  if (!permitsCredentialDestination(target)) {
     throw new UnsentCredentialError('HTTP credential destination denied');
   }
   const grant = auth?.grants.find(

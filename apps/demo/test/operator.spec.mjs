@@ -169,6 +169,16 @@ test('publisher previews an order draft before publication', async ({ page }) =>
     await expect(result).toContainText('60 秒ごと');
     await expect(result.getByText(/読み取り · GET · https:.*orders · 資格情報 orders-read/)).toHaveCount(2);
     await expect(result.getByText(/書き込み · POST · https:.*totals · 資格情報 orders-send/)).toHaveCount(2);
+    const changed = JSON.parse(file);
+    const read = changed.nodes.find((n) => n.id === 'read');
+    delete read.credentials;
+    read.parameters.authentication = 'none';
+    changed.nodes.find((n) => n.id === 'send').parameters.authentication = 'none';
+    await input.setInputFiles({ name: 'changed.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(changed)) });
+    await page.getByRole('button', { name: '影響を確認' }).press('Enter');
+    await expect(result.getByText(/リダイレクト先へ送信する可能性あり/)).toHaveCount(2);
+    await expect(result.getByText(/認証設定の不一致により送信不可/)).toHaveCount(2);
+    await expect(result).not.toContainText('orders-send');
     await input.setInputFiles({ name: 'bad.json', mimeType: 'application/json', buffer: Buffer.from('{') });
     await expect(result).toBeEmpty();
     await page.getByRole('button', { name: '影響を確認' }).press('Enter');

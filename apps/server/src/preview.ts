@@ -1,6 +1,7 @@
-import { buildGraph, type NodeRegistry, type NodeType, type Workflow, type WorkflowNode } from '@draflow/core';
-import { standardNodes } from '@draflow/nodes';
+import { buildGraph, compileTemplate, type NodeRegistry, type NodeType, type Workflow, type WorkflowNode } from '@draflow/core';
+import { httpRequestNode, standardNodes } from '@draflow/nodes';
 import { compensationSpec } from './compensation.js';
+import { permitsCredentialDestination } from './http-auth.js';
 import { scheduleFor } from './schedule.js';
 
 export interface PublicationImpact {
@@ -9,21 +10,11 @@ export interface PublicationImpact {
   nodeId: string;
   nodeName: string;
   phase: 'execution' | 'compensation';
-  kind: 'read' | 'write' | 'unknown' | 'undeclared';
+  kind: 'read' | 'write' | 'unknown' | 'undeclared' | 'blocked';
+  mayRedirect?: true;
   method?: string | null;
   destination?: string | null;
   credentialRefs: string[];
-}
-
-// Expose the HTTP origin and path. Never echo expression source, userinfo, query or fragment.
-function destination(value: unknown): string | null {
-  if (typeof value !== 'string' || value.startsWith('=')) return null;
-  try {
-    const url = new URL(value);
-    return ['http:', 'https:'].includes(url.protocol) ? url.origin + url.pathname : null;
-  } catch {
-    return null;
-  }
 }
 
 // Recognize the installed implementation, not just its type string: hosts can replace a node.
@@ -34,20 +25,53 @@ const localTypes = new Set([
 ]);
 const localNodes = new Set(standardNodes.filter((node) => localTypes.has(node.type)));
 
-function impact(node: WorkflowNode, installed: NodeType): Pick<PublicationImpact, 'kind' | 'method' | 'destination' | 'credentialRefs'> | undefined {
-  if (localNodes.has(installed)) return;
-  if (!standardNodes.includes(installed) || !['draflow.httpRequest', 'draflow.pages'].includes(node.type)) {
-    const declared = installed.meta.externalEffect;
-    if (declared === 'none') return;
-    const kind = declared === 'read' || declared === 'write' ? declared : 'undeclared';
-    return { kind, destination: null, credentialRefs: Object.values(node.credentials ?? {}) };
-  }
-  const raw = node.type === 'draflow.pages' ? 'GET' : node.parameters.method ?? 'GET';
-  const method = typeof raw === 'string' && /^[a-z]+$/i.test(raw) ? raw.toUpperCase() : null;
+const pages = standardNodes.find((node) => node.type === 'draflow.pages')!;
+const dynamic = Symbol('expression');
+function literal(value: unknown): unknown {
+  if (typeof value !== 'string' || !value.startsWith('=')) return value;
+  const template = compileTemplate(value);
+  return template.hasExpressions ? dynamic : template.segments.map((segment) => segment.value).join('');
+}
+
+type Effect = Pick<PublicationImpact, 'kind' | 'method' | 'destination' | 'credentialRefs' | 'mayRedirect'>;
+
+function httpEffect(node: WorkflowNode, page: boolean): Effect {
+  const params = node.parameters;
+  const ref = node.credentials?.httpAuth;
+  const auth = page ? undefined : literal(params.authentication === undefined ? 'none' : params.authentication);
+  const endpoint = page ? params.url : literal(params.url);
+  const url = typeof endpoint === 'string' ? URL.parse(endpoint) : null;
+  if (ref && endpoint !== dynamic && (!url || !permitsCredentialDestination(url)))
+    return { kind: 'blocked', credentialRefs: [] };
+  const blocked = page ? ref === '' :
+    (auth !== dynamic && auth !== 'none' && auth !== 'credential') ||
+    (auth === 'credential' && !ref) ||
+    (ref !== undefined && (!ref || auth === 'none' || node.typeVersion !== 2));
+  if (blocked) return { kind: 'blocked', credentialRefs: [] };
+  const raw = page ? 'GET' : literal(params.method === undefined ? 'GET' : params.method);
+  const method = typeof raw === 'string' && /^[a-z0-9!#$%&'*+.^_`|~-]+$/i.test(raw) ? raw.toUpperCase() : null;
   return {
     kind: method === null ? 'unknown' : ['GET', 'HEAD'].includes(method) ? 'read' : 'write',
-    method, destination: destination(node.parameters.url),
-    credentialRefs: node.credentials?.httpAuth ? [node.credentials.httpAuth] : [],
+    method, destination: url && ['http:', 'https:'].includes(url.protocol) ? url.origin + url.pathname : null,
+    credentialRefs: ref ? [ref] : [],
+    ...(!page && !ref && { mayRedirect: true }),
+  };
+}
+
+function* impacts(node: WorkflowNode, installed: NodeType): Generator<Effect> {
+  if (localNodes.has(installed)) return;
+  if (node.type === 'draflow.pages' && installed.wait === pages.wait) {
+    yield httpEffect(node, true);
+    if (installed.execute === pages.execute) return;
+  }
+  if (node.type === 'draflow.httpRequest' && installed.execute === httpRequestNode.execute && !installed.wait) {
+    yield httpEffect(node, false);
+    return;
+  }
+  const declared = installed.meta.externalEffect;
+  if (declared !== 'none') yield {
+    kind: declared === 'read' || declared === 'write' ? declared : 'undeclared',
+    destination: null, credentialRefs: Object.values(node.credentials ?? {}),
   };
 }
 
@@ -80,26 +104,34 @@ export function previewWorkflow(root: Workflow, registry: NodeRegistry, load: (i
           seen.add(key);
           if (++visits > 50000) throw Error('Publication preview exceeds the traversal limit');
           const node = graph.nodes.get(id)!;
-          for (const edge of graph.outgoing.get(id) ?? []) {
-            if (edge.from.port !== 'main' && edge.from.port !== 'error') continue;
-            // Multi-input nodes can synchronize even on empty outputs.
-            const target = graph.nodes.get(edge.to.node)!;
-            if (!node.disabled || (edge.from.port === 'main' && edge.from.index === 0) ||
-                registry.require(target.type, target.typeVersion).ports.inputs.length > 1) pending.push(target.id);
-          }
-          if (node.disabled) continue;
           const installed = registry.require(node.type, node.typeVersion);
           if (installed.version !== node.typeVersion) throw Error('Pinned node version unavailable');
-          const entry = impact(node, installed);
-          if (entry) {
+          let blocked = false;
+          for (const entry of node.disabled ? [] : impacts(node, installed)) {
+            blocked ||= entry.kind === 'blocked';
             const effect = { workflowId: flow.id, revision, nodeId: id, nodeName: node.name, phase, ...entry };
             effectBytes += Buffer.byteLength(JSON.stringify(effect));
             if (effectBytes > 1024 * 1024) throw Error('Publication preview exceeds the output limit');
             effects.push(effect);
           }
-          const undo = compensationSpec(node);
+          for (const edge of graph.outgoing.get(id) ?? []) {
+            if (edge.from.port !== 'main' && edge.from.port !== 'error') continue;
+            // Multi-input nodes can synchronize even on empty outputs.
+            const target = graph.nodes.get(edge.to.node)!;
+            const primary = edge.from.port === 'main' && edge.from.index === 0;
+            let canRoute = !node.disabled || primary;
+            if (blocked) {
+              const onError = node.settings?.onError;
+              canRoute = primary && (onError === 'continue' || node.settings?.alwaysOutputData === true) ||
+                edge.from.port === 'error' && edge.from.index === 0 && onError === 'errorOutput';
+            }
+            if (canRoute || registry.require(target.type, target.typeVersion).ports.inputs.length > 1)
+              pending.push(target.id);
+          }
+          if (node.disabled || blocked) continue;
+          const undo = !installed.wait && installed.journalMode && compensationSpec(node);
           if (undo) child(undo.workflowId, undo.revision, 'compensation');
-          if (node.type === 'draflow.call' || node.type === 'draflow.pages')
+          if (installed.wait && (node.type === 'draflow.call' || node.type === 'draflow.pages'))
             child(String(node.parameters.workflowId), Number(node.parameters.revision), phase);
         }
       }

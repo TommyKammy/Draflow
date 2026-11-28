@@ -461,11 +461,12 @@ $('previewForm').onsubmit = async (event) => {
         : trigger.path ?? trigger.type;
       line(box, trigger.nodeName, condition);
       if (!trigger.effects.length) box.append(node('p', '外部操作はありません。'));
-      const kinds = { read: '読み取り', write: '書き込み', unknown: '操作は実行時に決定', undeclared: '影響未宣言' };
+      const kinds = { read: '読み取り', write: '書き込み', unknown: '操作は実行時に決定', undeclared: '影響未宣言', blocked: '認証設定の不一致により送信不可' };
       for (const effect of trigger.effects) {
         const owner = effect.revision === null ? effect.nodeName : effect.workflowId + ' v' + effect.revision + ' / ' + effect.nodeName;
         const fields = [kinds[effect.kind], effect.method, effect.destination];
         if (effect.destination === null) fields.push('送信先は実行時に確認');
+        if (effect.mayRedirect) fields.push('リダイレクト先へ送信する可能性あり');
         if (effect.credentialRefs.length) fields.push('資格情報 ' + effect.credentialRefs.join(', '));
         line(box, (effect.phase === 'compensation' ? '補償 · ' : '') + owner, fields.filter(Boolean).join(' · '));
       }
