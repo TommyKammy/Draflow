@@ -10,6 +10,7 @@ import {
   ReadDeferred,
   ReadThrottled,
   sharedRateLimit,
+  previewGrantCheck,
   serverHttp,
   type RateGate,
   type HttpAuth,
@@ -72,6 +73,7 @@ export class WebhookGone extends Error {}
 
 export class NodeHost {
   readonly #ledger: ExecutionLedger;
+  readonly #httpAuth: HttpAuth | undefined;
   readonly #engine: ExecutionEngineOptions;
   #operatorEffects: { commit: (() => void)[]; rollback: (() => void)[] } | undefined;
   readonly #capacity: number;
@@ -124,27 +126,28 @@ export class NodeHost {
       }
       return fetchFn(url, init);
     };
+    this.#httpAuth = organization && options.httpAuth
+      ? {
+          get grants() {
+            return options.httpAuth!.grants;
+          },
+          currentVersion: (id) => {
+            const access = this.#ledger.operators.credentialAccess(id);
+            if (access?.enabled === 0) return null;
+            if (access?.version != null && !this.credentialVersions(id).includes(String(access.version)))
+              return null;
+            return access?.version == null ? undefined : String(access.version);
+          },
+          resolve: (id, version) => options.httpAuth!.resolve(id, version),
+        }
+      : options.httpAuth;
     this.#engine = {
       ...options,
       fetch: transport,
       credentialFetch: serverHttp(
         transport,
         options.maxHttpResponseBytes ?? 1024 * 1024,
-        organization && options.httpAuth
-          ? {
-              get grants() {
-                return options.httpAuth!.grants;
-              },
-              currentVersion: (id) => {
-                const access = this.#ledger.operators.credentialAccess(id);
-                if (access?.enabled === 0) return null;
-                if (access?.version != null && !this.credentialVersions(id).includes(String(access.version)))
-                  return null;
-                return access?.version == null ? undefined : String(access.version);
-              },
-              resolve: (id, version) => options.httpAuth!.resolve(id, version),
-            }
-          : options.httpAuth,
+        this.#httpAuth,
         () =>
           this.options.shared || this.#latestCooldown > this.#scheduleClock.now()
             ? this.#rateGate()
@@ -376,6 +379,11 @@ export class NodeHost {
 
   previewPublication(workflow: unknown) {
     return previewWorkflow(this.previewDraft(workflow), this.options.registry, (id, revision) => this.#ledger.publication(id, revision).workflow);
+  }
+
+  checkHttpGrants(workflow: unknown) {
+    return previewWorkflow(this.previewDraft(workflow), this.options.registry,
+      (id, revision) => this.#ledger.publication(id, revision).workflow, undefined, previewGrantCheck(this.#httpAuth));
   }
 
   comparePublication(workflow: unknown) {

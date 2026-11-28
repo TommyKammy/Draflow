@@ -438,9 +438,15 @@ function triggerCondition(trigger) {
 function showEffect(box, effect, prefix = '') {
   const kinds = { read: '読み取り', write: '書き込み', unknown: '操作は実行時に決定', undeclared: '影響未宣言', blocked: '認証設定の不一致により送信不可' };
   const owner = effect.revision === null ? effect.nodeName : effect.workflowId + ' v' + effect.revision + ' / ' + effect.nodeName;
-  const fields = [kinds[effect.kind], effect.method, effect.destination];
+  const fields = [effect.kind === 'blocked' && effect.grantStatus ? '送信不可' : kinds[effect.kind], effect.method, effect.destination];
   if (effect.destination === null) fields.push('送信先は実行時に確認');
   if (effect.mayRedirect) fields.push('リダイレクト先へ送信する可能性あり');
+  if (effect.grantStatus) fields.push({
+    matched: 'このホストの許可設定と一致', noGrant: '一致する送信許可なし',
+    unavailable: '資格情報は無効または指定版を利用できません', runtime: '送信許可は実行時に判定',
+    anonymous: '資格情報なし（照合対象外）', invalidBinding: '認証設定の不一致',
+    invalidDestination: '資格情報を送信できない宛先',
+  }[effect.grantStatus]);
   if (effect.credentialRefs.length) fields.push('資格情報 ' + effect.credentialRefs.join(', '));
   line(box, prefix + (effect.phase === 'compensation' ? '補償 · ' : '') + owner, fields.filter(Boolean).join(' · '));
 }
@@ -507,8 +513,9 @@ $('previewForm').onsubmit = async (event) => {
     } catch {
       throw Error('JSON 形式を確認してください。');
     }
-    const compareActive = $('compareActive').checked;
-    const preview = await api({ op: 'preview', workflow, compareActive }, true);
+    const checkGrants = event.submitter === $('checkHttpGrants');
+    const compareActive = !checkGrants && $('compareActive').checked;
+    const preview = await api(checkGrants ? { op: 'checkHttpGrants', workflow } : { op: 'preview', workflow, compareActive }, true);
     if (request !== previewRequest) return;
     const box = $('previewResult');
     box.append(node('h3', preview.workflowName));
@@ -532,13 +539,14 @@ $('previewForm').onsubmit = async (event) => {
       announce('稼働版との差分を表示しました。');
       return;
     }
+    if (checkGrants) box.append(node('p', 'このホストの現在の許可設定を表示します。秘密値の取得や接続テストは行いません。'));
     if (!preview.triggers.length) box.append(node('p', '有効な起動ノードはありません。'));
     for (const trigger of preview.triggers) {
       line(box, trigger.nodeName, triggerCondition(trigger));
       if (!trigger.effects.length) box.append(node('p', '外部操作はありません。'));
       for (const effect of trigger.effects) showEffect(box, effect);
     }
-    announce('公開前の影響を表示しました。');
+    announce(checkGrants ? 'このホストの送信許可を確認しました。' : '公開前の影響を表示しました。');
   } catch (error) {
     if (request === previewRequest) report(error);
     else if (error.status === 401 || error.status === 403) report(error);

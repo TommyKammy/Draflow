@@ -1,10 +1,13 @@
 import { buildGraph, compileTemplate, type NodeRegistry, type NodeType, type Workflow, type WorkflowNode } from '@draflow/core';
 import { httpRequestNode, standardNodes } from '@draflow/nodes';
 import { compensationSpec, type CompensationSpec } from './compensation.js';
-import { permitsCredentialDestination } from './http-auth.js';
+import { permitsCredentialDestination, type CheckGrant } from './http-auth.js';
 import { scheduleFor } from './schedule.js';
 
+type GrantStatus = ReturnType<CheckGrant> | 'runtime' | 'anonymous' | 'invalidBinding' | 'invalidDestination';
+
 export interface PublicationImpact {
+  grantStatus?: GrantStatus;
   workflowId: string;
   revision: number | null;
   nodeId: string;
@@ -33,39 +36,54 @@ function literal(value: unknown): unknown {
   return template.hasExpressions ? dynamic : template.segments.map((segment) => segment.value).join('');
 }
 
-type Effect = Pick<PublicationImpact, 'kind' | 'method' | 'destination' | 'credentialRefs' | 'mayRedirect'>;
+type Effect = Pick<PublicationImpact, 'kind' | 'method' | 'destination' | 'credentialRefs' | 'mayRedirect' | 'grantStatus'>;
 
-function httpEffect(node: WorkflowNode, page: boolean): Effect {
-  const params = node.parameters;
+function httpEffect(node: WorkflowNode, installed: NodeType, workflowId: string, check?: CheckGrant): Effect {
+  const page = installed.type === 'draflow.pages';
+  function httpParameter(name: string, fallback: string) {
+    const value = node.parameters[name];
+    if (value !== undefined) return literal(value);
+    const schemaDefault = installed.parameters.find((p) => p.name === name)?.default;
+    return literal(schemaDefault === undefined ? fallback : schemaDefault);
+  }
   const ref = node.credentials?.httpAuth;
-  const auth = page ? undefined : literal(params.authentication === undefined ? 'none' : params.authentication);
-  const endpoint = page ? params.url : literal(params.url);
+  const auth = page ? undefined : httpParameter('authentication', 'none');
+  const endpoint = page ? node.parameters.url : httpParameter('url', '');
   const url = typeof endpoint === 'string' ? URL.parse(endpoint) : null;
   if (ref && endpoint !== dynamic && (!url || !permitsCredentialDestination(url)))
-    return { kind: 'blocked', credentialRefs: [] };
+    return { kind: 'blocked', credentialRefs: [], ...(check && { grantStatus: 'invalidDestination' }) };
   const blocked = page ? ref === '' :
     (auth !== dynamic && auth !== 'none' && auth !== 'credential') ||
     (auth === 'credential' && !ref) ||
     (ref !== undefined && (!ref || auth === 'none' || node.typeVersion !== 2));
-  if (blocked) return { kind: 'blocked', credentialRefs: [] };
-  const raw = page ? 'GET' : literal(params.method === undefined ? 'GET' : params.method);
+  if (blocked) return { kind: 'blocked', credentialRefs: [], ...(check && { grantStatus: 'invalidBinding' }) };
+  const raw = page ? 'GET' : httpParameter('method', 'GET');
   const method = typeof raw === 'string' && /^[a-z0-9!#$%&'*+.^_`|~-]+$/i.test(raw) ? raw.toUpperCase() : null;
+  let grantStatus: GrantStatus | undefined;
+  if (check) {
+    if (auth === dynamic) grantStatus = 'runtime';
+    else if (!ref) grantStatus = 'anonymous';
+    else if (!url) grantStatus = 'runtime';
+    else grantStatus = check({ workflowId, nodeId: node.id, type: node.type, typeVersion: node.typeVersion,
+      slot: 'httpAuth', id: ref }, url.origin);
+  }
   return {
     kind: method === null ? 'unknown' : ['GET', 'HEAD'].includes(method) ? 'read' : 'write',
     method, destination: url && ['http:', 'https:'].includes(url.protocol) ? url.origin + url.pathname : null,
     credentialRefs: ref ? [ref] : [],
     ...(!page && !ref && { mayRedirect: true }),
+    ...(grantStatus && { grantStatus }),
   };
 }
 
-function* impacts(node: WorkflowNode, installed: NodeType): Generator<Effect> {
+function* impacts(node: WorkflowNode, installed: NodeType, workflowId: string, check?: CheckGrant): Generator<Effect> {
   if (localNodes.has(installed)) return;
   if (node.type === 'draflow.pages' && installed.wait === pages.wait) {
-    yield httpEffect(node, true);
+    yield httpEffect(node, installed, workflowId, check);
     if (installed.execute === pages.execute) return;
   }
   if (node.type === 'draflow.httpRequest' && installed.execute === httpRequestNode.execute && !installed.wait) {
-    yield httpEffect(node, false);
+    yield httpEffect(node, installed, workflowId, check);
     return;
   }
   const declared = installed.meta.externalEffect;
@@ -96,7 +114,7 @@ export interface CallSite {
 type CallSites = Map<string, Map<string, CallSite>>;
 type Load = (id: string, revision: number) => Workflow;
 
-export function previewWorkflow(root: Workflow, registry: NodeRegistry, load: Load, sites?: CallSites) {
+export function previewWorkflow(root: Workflow, registry: NodeRegistry, load: Load, sites?: CallSites, check?: CheckGrant) {
   const graphs = new Map<Workflow, ReturnType<typeof buildGraph>>();
   const children = new Map<string, Workflow>();
   let visits = 0;
@@ -128,7 +146,7 @@ export function previewWorkflow(root: Workflow, registry: NodeRegistry, load: Lo
           const installed = registry.require(node.type, node.typeVersion);
           if (installed.version !== node.typeVersion) throw Error('Pinned node version unavailable');
           let blocked = false;
-          for (const entry of node.disabled ? [] : impacts(node, installed)) {
+          for (const entry of node.disabled ? [] : impacts(node, installed, flow.id, check)) {
             blocked ||= entry.kind === 'blocked';
             const effect = { workflowId: flow.id, revision, nodeId: id, nodeName: node.name, phase, ...entry };
             countRecord(JSON.stringify(effect));

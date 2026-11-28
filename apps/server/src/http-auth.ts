@@ -126,29 +126,33 @@ export function permitsCredentialDestination(target: URL) {
     (target.protocol === 'https:' || (local && target.protocol === 'http:'));
 }
 
+function findGrant(binding: CredentialBinding, origin: string, auth?: Pick<HttpAuth, 'grants'>) {
+  if (binding.slot !== 'httpAuth' || !(
+    (binding.type === 'draflow.httpRequest' && binding.typeVersion === 2) ||
+    (binding.type === 'draflow.pages' && binding.typeVersion === 1)
+  )) return;
+  return auth?.grants.find((rule) => rule.id === binding.id && rule.origin === origin &&
+    rule.workflowId === binding.workflowId && rule.nodeId === binding.nodeId);
+}
+
 function grantFor(binding: CredentialBinding, url: string, auth?: HttpAuth) {
   const target = new URL(url);
-  if (!permitsCredentialDestination(target)) {
-    throw new UnsentCredentialError('HTTP credential destination denied');
-  }
-  const grant = auth?.grants.find(
-    (rule) =>
-      rule.id === binding.id &&
-      rule.origin === target.origin &&
-      rule.workflowId === binding.workflowId &&
-      rule.nodeId === binding.nodeId,
-  );
-  if (
-    !grant ||
-    !(
-      (binding.type === 'draflow.httpRequest' && binding.typeVersion === 2) ||
-      (binding.type === 'draflow.pages' && binding.typeVersion === 1)
-    ) ||
-    binding.slot !== 'httpAuth'
-  ) {
-    throw new UnsentCredentialError('HTTP credential not authorized');
-  }
+  if (!permitsCredentialDestination(target)) throw new UnsentCredentialError('HTTP credential destination denied');
+  const grant = findGrant(binding, target.origin, auth);
+  if (!grant) throw new UnsentCredentialError('HTTP credential not authorized');
   return grant;
+}
+
+export type CheckGrant = (binding: CredentialBinding & { id: string }, origin: string) => 'noGrant' | 'matched' | 'unavailable';
+
+// One preview has one view of credential availability. Dispatch always rechecks live state.
+export function previewGrantCheck(auth?: Pick<HttpAuth, 'grants' | 'currentVersion'>): CheckGrant {
+  const available = new Map<string, boolean>();
+  return (binding, origin) => {
+    if (!findGrant(binding, origin, auth)) return 'noGrant';
+    if (!available.has(binding.id)) available.set(binding.id, auth?.currentVersion?.(binding.id) !== null);
+    return available.get(binding.id) ? 'matched' : 'unavailable';
+  };
 }
 
 export function serverHttp(

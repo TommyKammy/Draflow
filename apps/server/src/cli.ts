@@ -94,6 +94,9 @@ try {
       const q = JSON.parse(line);
       let result: unknown;
       switch (q.op) {
+        case 'checkHttpGrants':
+          result = host.checkHttpGrants(q.workflow);
+          break;
         case 'preview':
           result = q.compareActive === true ? host.comparePublication(q.workflow) : host.previewPublication(q.workflow);
           break;
