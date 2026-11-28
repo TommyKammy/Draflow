@@ -769,23 +769,43 @@ test('checked order release enforces live grants on the whole draft and replays 
 
 test('checked release follows pinned child and compensation grants', (t) => {
   const grants = [{ workflowId: 'order-import', nodeId: 'ship', id: 'order-import', origin: 'https://sink.example.test', kind: 'bearer' }];
-  const { h, operate } = setup(t, { httpAuth: { grants, resolve() { assert.fail('secret lookup'); } },
+  const versions = { release: ['v1'] };
+  const { h, operate } = setup(t, { httpAuth: { grants, versions, resolve() { assert.fail('secret lookup'); } },
     fetch() { assert.fail('dispatch'); } });
-  const release = (workflow) => operate('publisher', { op: 'releaseWithHttpGrants', workflow,
+  const prepare = (workflow) => ({ op: 'releaseWithHttpGrants', workflow,
     target: workflow.id, review: h.comparePublication(workflow).review, reason: 'release', request: randomUUID() });
+  const submit = (command) => operate('publisher', command);
+  const access = (target, enabled, extra = {}) => operate('admin', { op: 'credentials', target, enabled,
+    ...extra, reason: 'access-change', request: randomUUID() });
   const child = fixture('process-order-batch'), parent = fixture('order-import');
   child.nodes[1].parameters.authentication = 'credential';
   child.nodes[1].credentials = { httpAuth: 'sink' };
   h.publish(child);
-  assert.throws(() => release(parent), (e) => e.status === 422);
+  assert.throws(() => submit(prepare(parent)), (e) => e.status === 422);
   grants.push({ ...grants[0], workflowId: child.id, nodeId: 'register', id: 'sink' });
-  assert.equal(release(parent), 1);
+  const parentCommand = prepare(parent);
+  access('sink', false);
+  assert.throws(() => submit(parentCommand), (e) => e.status === 422);
+  access('sink', true);
+  assert.equal(submit(parentCommand), 1);
   let draft;
   publishCompensations(h, false, false, (root) => { draft = structuredClone(root); });
   assert.deepEqual(h.compareHttpGrants(draft).changes, []);
-  assert.throws(() => release(draft), (e) => e.status === 422);
+  assert.throws(() => submit(prepare(draft)), (e) => e.status === 422);
   grants.push({ ...grants[0], workflowId: 'release', nodeId: 'register', id: 'release' });
-  assert.equal(release(draft), 3);
+  access('release', true, { credentialVersion: 'v1' });
+  const command = prepare(draft);
+  versions.release.pop();
+  assert.throws(() => submit(command), (e) => e.status === 422);
+  assert.equal(h.comparePublication(draft).activeRevision, 2);
+  versions.release.push('v1');
+  assert.equal(submit(command), 3);
+  access('release', false);
+  assert.equal(submit(command), 3);
+  const audit = operate('publisher', { op: 'audit' }).filter((row) => row.action === command.op);
+  assert.equal(audit.filter((row) => JSON.parse(row.result).status === 422).length, 4);
+  assert.deepEqual(audit.filter((row) => row.request === command.request).map((row) => JSON.parse(row.changeinfo)),
+    [{ previousRevision: 2, revision: 3 }]);
 });
 
 test('failed reviewed activation rolls publication and routes back together', (t) => {
@@ -825,7 +845,7 @@ for (const initiallyActive of [true, false]) {
   });
 }
 
-test('concurrent publishers and cross-intake retries commit one order revision and one success receipt', async (t) => {
+async function raceReleases(t, op) {
   const organization = randomUUID(), connectionString = process.env.DRAFLOW_TEST_POSTGRES;
   const tokens = [randomUUID(), randomUUID()];
   const accounts = tokens.map((token, i) => ({ organization, actor: 'publisher-' + i, role: 'publisher',
@@ -855,7 +875,7 @@ test('concurrent publishers and cross-intake retries commit one order revision a
     workflow.nodes.find((n) => n.id === 'hook').parameters.path = path;
     const [status, preview] = await post(url, i, { op: 'preview', compareActive: true, workflow });
     assert.equal(status, 200);
-    return { op: 'release', reason: 'release', request: randomUUID(), target: workflow.id, workflow, review: preview.review };
+    return { op, reason: 'release', request: randomUUID(), target: workflow.id, workflow, review: preview.review };
   };
   const first = await prepare(left, 0, 'orders');
   assert.deepEqual(await post(left, 0, first), [200, 1]);
@@ -876,7 +896,11 @@ test('concurrent publishers and cross-intake retries commit one order revision a
   assert.deepEqual(audit.filter((r) => r.request === command.request).map((r) => JSON.parse(r.changeinfo)),
     [{ previousRevision: 1, revision: 2 }]);
   assert.equal(audit.filter((r) => r.actor === accounts[1 - winner].actor && JSON.parse(r.result).status === 409).length, 1);
-});
+}
+
+for (const op of ['release', 'releaseWithHttpGrants']) {
+  test(op + ' commits one order revision and receipt across competing publishers and retries', (t) => raceReleases(t, op));
+}
 
 test('order grant check predicts scoped sends without resolving secrets, dispatching or changing release review', async (t) => {
   const flow = fixture('order-sync'), origin = 'https://orders.example.test';

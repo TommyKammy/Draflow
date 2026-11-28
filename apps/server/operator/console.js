@@ -84,6 +84,7 @@ function clear() {
   $('login').hidden = false;
   $('token').value = '';
   resetPreview();
+  requireDraftHttpGrants = false;
   $('previewForm').reset();
   $('previewPanel').open = false;
   $('previewPanel').hidden = true;
@@ -467,6 +468,8 @@ function showRelease(box, workflow, preview, generation) {
   button.type = 'button';
   const check = node('input');
   check.type = 'checkbox';
+  check.checked = requireDraftHttpGrants;
+  check.onchange = () => { requireDraftHttpGrants = check.checked; };
   const label = node('label');
   label.append(check, ' 公開時にこのホストの組み込みHTTP送信許可を必須にする');
   box.append(label, button);
@@ -499,12 +502,16 @@ function showRelease(box, workflow, preview, generation) {
   };
 }
 
+let requireDraftHttpGrants = false;
 let previewRequest = 0;
 function resetPreview() {
   previewRequest++;
   $('previewResult').replaceChildren();
 }
-$('draftFile').onchange = resetPreview;
+$('draftFile').onchange = () => {
+  requireDraftHttpGrants = false;
+  resetPreview();
+};
 $('compareActive').onchange = resetPreview;
 $('previewForm').onsubmit = async (event) => {
   event.preventDefault();

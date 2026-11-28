@@ -7,6 +7,10 @@ import { createOperatorServer } from '../dist/operator-http.js';
 
 const { organization, connectionString, accounts } = workerData;
 const host = new NodeHost(':memory:', {
+  httpAuth: { organization, grants: ['read', 'send'].map((nodeId) => ({ nodeId, workflowId: 'order-sync',
+    id: 'orders-' + nodeId, origin: 'https://orders.example.test', kind: 'bearer' })),
+    resolve() { throw Error('unexpected secret lookup'); } },
+  fetch() { throw Error('unexpected dispatch'); },
   organization, registry: new NodeRegistry().registerAll(standardNodes),
   ...(connectionString && { shared: { organization, connectionString, role: 'intake' } }),
 });
