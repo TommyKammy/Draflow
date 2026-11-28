@@ -10,6 +10,7 @@ const tables = [...ledgerTables.matchAll(/CREATE TABLE IF NOT EXISTS (\w+)/g)].m
 const operatorTables = new Set([
   'business_publications',
   'business_receipts',
+  'business_attempts',
   'memberships',
   'credential_access',
   'operator_audit',

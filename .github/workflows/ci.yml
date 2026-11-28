@@ -116,7 +116,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: TommyKammy/Prood
-          ref: a70531771b7b3f90123fcde0ccb17117ade8690d
+          ref: af79a3276e5c07e983504fef077d63120d41cd09
           path: .prood
           persist-credentials: false
       - uses: pnpm/action-setup@v4
@@ -131,9 +131,10 @@ jobs:
         working-directory: .prood
       - name: Exercise both ledgers and the authenticated rule preview
         env:
+          PROOD_EFFECTS_CHECKOUT: ${{ github.workspace }}/.prood
           PROOD_CHECKOUT: ${{ github.workspace }}/.prood
         run: |
-          node --test apps/server/test/prood-business.test.mjs
-          DRAFLOW_TEST_POSTGRES=postgres://postgres:local-ci-only@localhost:5432/postgres node --test apps/server/test/prood-business.test.mjs
+          node --test --test-concurrency=1 apps/server/test/prood-business.test.mjs apps/server/test/business-effects.test.mjs
+          DRAFLOW_TEST_POSTGRES=postgres://postgres:local-ci-only@localhost:5432/postgres node --test --test-concurrency=1 apps/server/test/prood-business.test.mjs apps/server/test/business-effects.test.mjs
           pnpm exec playwright install --with-deps chromium
-          pnpm exec playwright test prood-rule.spec.mjs
+          pnpm exec playwright test prood-rule.spec.mjs prood-studio.spec.mjs

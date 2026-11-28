@@ -355,7 +355,7 @@ Run `node --test apps/server/test/operator.test.mjs` for the SQLite contract; se
 
 ## Prood business automation (Phase 8.1–8.2)
 
-The optional Prood worker accepts committed project subscriptions and prepares the two permitted operations (assign a task or set its status). The Prood application owns authentication, rule revisions, delegation, task versions, the transactional subscription outbox and authorization audits. Each organization-bound Draflow ledger keeps a permanent receipt per project/event/rule and pins the generated proposal workflow. The receipt, publication binding and queued run commit atomically. The public rule format cannot introduce executable nodes, URLs, credentials or child workflows. These phases produce proposals only. Enabling changes to tasks requires the receiver-side operation receipts in Phase 8.3.
+The optional Prood worker accepts committed project subscriptions and prepares the two permitted operations (assign a task or set its status). The Prood application owns authentication, rule revisions, delegation, task versions, the transactional subscription outbox and authorization audits. Each organization-bound Draflow ledger keeps a permanent receipt per project/event/rule and pins the generated proposal workflow. The receipt, publication binding and queued run commit atomically. The public rule format cannot introduce executable nodes, URLs, credentials or child workflows. Definitions without an explicit `apply: true` continue to prepare proposals. Phase 8.3 rules may delegate a status or assignee update.
 
 Build both checkouts. With a migrated Prood deployment and its workspace ID:
 
@@ -363,8 +363,26 @@ Build both checkouts. With a migrated Prood deployment and its workspace ID:
 PROOD_SQLITE_PATH=/data/prood.sqlite node apps/server/src/prood-worker.mjs /path/to/Prood wks_WORKSPACE_ID /data/draflow-organization.sqlite
 ```
 
-For PostgreSQL, set `DATABASE_URL` for Prood and `DRAFLOW_POSTGRES_URL` for Draflow (the final path argument may be `:memory:` in shared mode). Run one logical binding per Prood workspace. The bridge claims only business proposals. Normal workers without a Prood callback leave proposals queued for a capable worker. Use separate SQLite files for the bridge and ordinary workers, or share the PostgreSQL ledger. Supervise this process as other Node workers. SQLite mode needs one Draflow writer per file. PostgreSQL supports replicas. Upgrade all Draflow processes per organization for schema v4. Offline cutover migrates the receipt and immutable publication bindings.
+For PostgreSQL, set `DATABASE_URL` for Prood and `DRAFLOW_POSTGRES_URL` for Draflow (the final path argument may be `:memory:` in shared mode). Run one logical binding per Prood workspace. The bridge claims only business proposals. Normal workers without a Prood callback leave proposals queued for a capable worker. Use separate SQLite files for the bridge and ordinary workers, or share the PostgreSQL ledger. Supervise this process as other Node workers. SQLite mode needs one Draflow writer per file. PostgreSQL supports replicas. Upgrade all Draflow processes per organization for schema v5 before enabling live rules. Offline cutover migrates permanent receipts, attempt counts and immutable publication bindings.
 
 The authenticated Prood page at `/automation/review` previews a rule document and requests explicit delegation. Project managers use the same validation via `POST /api/v1/projects/:projectId/automation/:rule` with `op: preview|publish|stop`, the current revision (zero to create), and their own user ID as `delegate` when publishing. A manual start uses `op: start` and a task ID. Earlier events are not backfilled on publication. Rule edits keep already selected revisions; stopping a rule or changing its delegate invalidates earlier delegations. A later edit to the task conservatively skips a stale proposal.
 
 The cross-checkout test is opt-in: set `PROOD_CHECKOUT` to the built Prood checkout and run `node --test apps/server/test/prood-business.test.mjs`. Set `DRAFLOW_TEST_POSTGRES` to a disposable PostgreSQL database to repeat using both PostgreSQL adapters. The Playwright test `apps/demo/test/prood-rule.spec.mjs` takes the same checkout path.
+
+
+### Applying and reviewing Prood rules
+
+Use the Automation link for the workspace, or open `/projects/<projectId>/automation` in Prood. Project managers select a template, a visible sample task and a target value, run the trial, and explicitly delegate publication. The review-assignment template matches a real status transition into the selected status while the task has no assignee. Trials use the latest relevant event on the sample; an old task version is reported as skipped. A manual template uses the current task. Project viewers can inspect the task and rule histories. Links ending in `?task=<taskId>` open the corresponding task history. Set `PROOD_DRAFLOW_OPERATOR_URL` on the Prood server to link managers to the Phase 7 operator console.
+
+Each live rule has one operation per run and target. Prood commits the guarded task mutation, receiver receipt and derived Outbox event in one transaction. Replays check current access and the original input. Rules can opt into restoring the previous field value. An approved reversal needs a current delegation, a visible previous value and an unchanged task version. Choosing to keep or reverse an operation records one final decision.
+
+Draflow persists the attempt count and makes up to three dispatches. If the response is still missing, it probes Prood for the receipt. An inconclusive lookup enters operator review. The operator decision “applied” performs another lookup; an authorized keyed retry uses the same run ID. Queued work and retries recheck cancellation before starting the mutation. This connector has no mail or arbitrary network action.
+
+Cross-checkout fault and browser tests require a built Prood checkout with receipt migration 9:
+
+```sh
+PROOD_EFFECTS_CHECKOUT=/path/to/Prood node --test apps/server/test/business-effects.test.mjs
+PROOD_EFFECTS_CHECKOUT=/path/to/Prood pnpm exec playwright test prood-studio.spec.mjs
+```
+
+Set `DRAFLOW_TEST_POSTGRES` to repeat the fault test with real PostgreSQL. For the latency comparison run `node apps/server/test/prood-latency-bench.mjs /path/to/built/Prood /path/to/built/Draflow`, optionally with a disposable `DATABASE_URL`. It measures synchronous task updates and the time from their return to durable admission for bursts of 20, with a 250 ms poll delay.
