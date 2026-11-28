@@ -363,6 +363,34 @@ For a host-defined node, optionally declare `meta.externalEffect` as `read`, `wr
 cannot override this declaration. Large previews fail as a whole at 50,000 node visits
 or 1 MiB of effect records.
 
+#### Check credentialed HTTP grants on this host
+
+After choosing a draft, select **下書きの送信許可を確認**. Publishers and admins can
+also POST `{"op":"checkHttpGrants","workflow":...}` to their organization's operator
+API. The trusted local CLI accepts the same command. The embedded Node host exposes
+`host.checkHttpGrants(workflow)`.
+
+This read-only report follows the same draft triggers, pinned children and compensations
+as preview. For built-in HTTP Request and Pages operations, `grantStatus` describes
+the configuration on the host answering the request:
+
+| Status | Meaning |
+| --- | --- |
+| `matched` | Credential reference, owning workflow and node, supported type/version, slot and exact URL origin match a grant, and the selected credential is enabled here. |
+| `noGrant` | This binding has no matching grant on this host. |
+| `unavailable` | The credential is disabled or its selected version is unavailable here. |
+| `runtime` | The destination or authentication mode depends on runtime data. |
+| `anonymous` | The operation uses no host credential. |
+| `invalidBinding` / `invalidDestination` | The fixed binding or credential destination is incompatible with the operation. |
+
+The report exposes credential references and sanitized destinations. It omits secrets,
+headers, query strings, grant lists and version names. Custom operations retain their
+declared effects. The check does not execute nodes, call the secret resolver, contact
+a receiver, create a run, or alter the release review. For split intake/worker deployments
+each worker still checks its own configuration, resolves the secret and revalidates
+authorization at dispatch. Secret availability, request header conflicts and receiver
+acceptance are checked only during execution.
+
 #### Compare a draft with the active revision
 
 Select **稼働版と比較** before **影響を確認**, or send

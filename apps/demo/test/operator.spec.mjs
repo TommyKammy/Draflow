@@ -152,7 +152,10 @@ test('an operator refreshing an expired event wait sees the deadline and can sti
 
 test('publisher previews an order draft before publication', async ({ page }) => {
   const organization = randomUUID(), token = randomUUID();
-  const h = new NodeHost(':memory:', hostOptions(organization));
+  const h = new NodeHost(':memory:', { ...hostOptions(organization), httpAuth: { organization,
+    grants: [{ workflowId: 'order-sync', nodeId: 'read', id: 'orders-read', origin: 'https://orders.example.test', kind: 'bearer' }],
+    resolve() { throw Error('unexpected secret resolution'); },
+  } });
   const srv = createOperatorServer([h], () => [{
     organization, actor: 'publisher', role: 'publisher', sha256: createHash('sha256').update(token).digest('hex'),
   }]);
@@ -174,6 +177,11 @@ test('publisher previews an order draft before publication', async ({ page }) =>
     await expect(result).toContainText('60 秒ごと');
     await expect(result.getByText(/読み取り · GET · https:.*orders · 資格情報 orders-read/)).toHaveCount(2);
     await expect(result.getByText(/書き込み · POST · https:.*totals · 資格情報 orders-send/)).toHaveCount(2);
+    const grantCheck = page.getByRole('button', { name: '下書きの送信許可を確認' });
+    await grantCheck.press('Enter');
+    await expect(result.getByText(/読み取り · GET .*このホストの許可設定と一致 · 資格情報 orders-read/)).toHaveCount(2);
+    await expect(result.getByText(/書き込み · POST .*一致する送信許可なし · 資格情報 orders-send/)).toHaveCount(2);
+    await expect(page.getByRole('status')).toContainText('このホストの送信許可を確認しました');
     const changed = JSON.parse(file);
     const read = changed.nodes.find((n) => n.id === 'read');
     delete read.credentials;

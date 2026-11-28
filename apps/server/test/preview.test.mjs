@@ -100,6 +100,9 @@ test('preview retains dynamic and undeclared effects, omits secrets and follows 
     ['aggregate', 'write', null], ['send', 'unknown', null],
   ]);
   assert.ok(!JSON.stringify(preview).includes('SECRET'));
+  const checked = h.checkHttpGrants(flow);
+  assert.deepEqual(checked.triggers[0].effects.map((e) => e.grantStatus), ['anonymous', undefined, undefined, 'runtime']);
+  assert.ok(!JSON.stringify(checked).includes('SECRET'));
 });
 
 // Record the request after the host has applied its destination grant and credentials.
@@ -146,6 +149,11 @@ test('paged reads and nested calls dispatch to the previewed pinned revisions an
   assert.deepEqual(effects.map((e) => [e.workflowId, e.revision, e.destination]), [
     [parent.id, null, parent.nodes[1].parameters.url], [leaf.id, 1, oldUrl],
   ]);
+  assert.deepEqual(h.checkHttpGrants(parent).triggers[0].effects.map((e) => [e.workflowId, e.revision, e.grantStatus]),
+    [[parent.id, null, 'matched'], [leaf.id, 1, 'matched']]);
+  options.httpAuth.grants[1].workflowId = parent.id;
+  assert.equal(h.checkHttpGrants(parent).triggers[0].effects[1].grantStatus, 'noGrant');
+  options.httpAuth.grants[1].workflowId = leaf.id;
   assert.throws(() => other.previewPublication(parent), /Unknown publication/);
   assert.deepEqual(requests, []);
   h.activate(parent.id, h.publish(parent));
@@ -166,6 +174,9 @@ test('forward writes and the pinned compensations match their actual requests', 
   replacement.nodes[1].parameters.url = 'https://sink.example.test/new-release';
   h.publish(replacement);
   const effects = h.previewPublication(draft).triggers[0].effects;
+  const checked = h.checkHttpGrants(draft).triggers[0].effects;
+  assert.deepEqual(checked.filter((e) => e.phase === 'compensation').map((e) => [e.workflowId, e.grantStatus]),
+    [['release', 'matched'], ['refund', 'anonymous'], ['void', 'anonymous']]);
   const forward = effects.filter((e) => e.phase === 'execution');
   const undo = effects.filter((e) => e.phase === 'compensation');
   assert.deepEqual(forward.map((e) => e.nodeId), ['reserve', 'charge', 'ship']);
@@ -207,6 +218,7 @@ test('conflicting or missing credential references block dispatch', async (t) =>
     const { effects } = h.previewPublication(flow).triggers[0];
     assert.deepEqual(effects.map((e) => e.nodeId), [read.id]);
     const [entry] = effects;
+    assert.equal(h.checkHttpGrants(flow).triggers[0].effects[0].grantStatus, url ? 'invalidDestination' : 'invalidBinding');
     assert.equal(entry.kind, 'blocked');
     assert.deepEqual(entry.credentialRefs, []);
     h.activate(flow.id, h.publish(flow));
@@ -608,4 +620,92 @@ test('concurrent publishers and cross-intake retries commit one order revision a
   assert.deepEqual(audit.filter((r) => r.request === command.request).map((r) => JSON.parse(r.changeinfo)),
     [{ previousRevision: 1, revision: 2 }]);
   assert.equal(audit.filter((r) => r.actor === accounts[1 - winner].actor && JSON.parse(r.result).status === 409).length, 1);
+});
+
+test('order grant check predicts scoped sends without resolving secrets, dispatching or changing release review', async (t) => {
+  const flow = fixture('order-sync'), origin = 'https://orders.example.test';
+  const refs = ['read', 'send'].map((nodeId) => ({
+    workflowId: flow.id, nodeId, origin, id: 'orders-' + nodeId, kind: 'bearer',
+  }));
+  const resolutions = [];
+  const { options, requests } = receiver(refs, () => [{ approved: true, amount: 7 }]);
+  const versions = ['v2'];
+  options.httpAuth.versions = { 'orders-send': versions };
+  options.httpAuth.resolve = (id) => { resolutions.push(id); return 'private-' + id; };
+  const { h, operate } = setup(t, options);
+  const command = { op: 'checkHttpGrants', workflow: flow };
+  for (const role of ['viewer', 'operator']) assert.throws(() => operate(role, command), (e) => e.status === 403);
+  const check = () => operate('publisher', command).triggers.map((tr) => tr.effects.map((e) => e.grantStatus));
+  const both = (read, send) => [[read, send], [read, send]];
+  assert.deepEqual(check(), both('matched', 'matched'));
+  assert.deepEqual(operate('admin', command), h.checkHttpGrants(flow));
+  const neighbor = setup(t);
+  assert.deepEqual(neighbor.h.checkHttpGrants(flow).triggers[0].effects.map((e) => e.grantStatus), ['noGrant', 'noGrant']);
+  const send = flow.nodes.find((n) => n.id === 'send');
+  send.parameters.url = 'https://other.example.test/totals?private=query';
+  refs.push({ ...refs[1], nodeId: 'other-node', origin: 'https://other.example.test' });
+  assert.deepEqual(check(), both('matched', 'noGrant'));
+  assert.ok(!JSON.stringify(h.checkHttpGrants(flow)).includes('private'));
+  assert.deepEqual([requests, resolutions], [[], []]);
+  assert.deepEqual(await h.history.list(flow.id), []);
+  assert.deepEqual(operate('publisher', { op: 'audit' }), []);
+  assert.ok(!h.webhook('/webhook/orders'));
+  assert.equal(h.publish(flow), 1);
+  h.activate(flow.id, 1);
+  const run = async (nodeId, expected) => {
+    const id = h.accept(flow.id, nodeId, { items: [{ json: {} }] });
+    await until(() => h.receipt(id).state === 'finished');
+    assert.equal(h.receipt(id).outcome, expected);
+  };
+  await run('hook', 'error');
+  assert.deepEqual(requests.splice(0).map(([m]) => m), ['GET']);
+  assert.deepEqual(resolutions.splice(0), ['orders-read']);
+  refs.push({ ...refs[1], origin: 'https://other.example.test' });
+  assert.deepEqual(check(), both('matched', 'matched'));
+  await run('timer', 'success');
+  assert.deepEqual(requests.splice(0), [['GET', origin + '/orders', 'Bearer private-orders-read'],
+    ['POST', 'https://other.example.test/totals', 'Bearer private-orders-send']]);
+  resolutions.length = 0;
+  const compared = h.comparePublication(flow);
+  operate('admin', { op: 'credentials', target: 'orders-send', enabled: true, credentialVersion: 'v2',
+    request: randomUUID(), reason: 'access-change' });
+  assert.deepEqual(check(), both('matched', 'matched'));
+  versions.pop();
+  assert.deepEqual(check(), both('matched', 'unavailable'));
+  assert.deepEqual(resolutions, []);
+  await run('timer', 'error');
+  assert.deepEqual(requests.splice(0).map(([m]) => m), ['GET']);
+  assert.deepEqual(resolutions.splice(0), ['orders-read']);
+  versions.push('v2');
+  assert.deepEqual(check(), both('matched', 'matched'));
+  operate('admin', { op: 'credentials', target: 'orders-send', enabled: false, request: randomUUID(), reason: 'access-change' });
+  assert.deepEqual(check(), both('matched', 'unavailable'));
+  assert.deepEqual(h.comparePublication(flow), compared);
+  assert.deepEqual(resolutions, []);
+  await run('hook', 'error');
+  assert.deepEqual(requests.map(([m]) => m), ['GET']);
+  assert.deepEqual(resolutions, ['orders-read']);
+});
+
+test('grant checks share credential state across both entry points only within one request', async (t) => {
+  const flow = fixture('order-sync'), reads = [];
+  let disabled = false;
+  const h = new NodeHost(':memory:', { registry: new NodeRegistry().registerAll(standardNodes),
+    httpAuth: {
+      grants: ['read', 'send'].map((nodeId) => ({ workflowId: flow.id, nodeId, kind: 'bearer',
+        id: 'orders-' + nodeId, origin: 'https://orders.example.test' })),
+      currentVersion(id) { reads.push(id); return disabled ? null : undefined; },
+      resolve() { assert.fail('secret lookup'); },
+    },
+    fetch() { assert.fail('network dispatch'); },
+  });
+  t.after(() => h.close());
+  h.previewPublication(flow);
+  h.comparePublication(flow);
+  assert.deepEqual(reads, []);
+  h.checkHttpGrants(flow);
+  assert.deepEqual(reads.splice(0), ['orders-read', 'orders-send']);
+  disabled = true;
+  assert.ok(h.checkHttpGrants(flow).triggers.every((t) => t.effects.every((e) => e.grantStatus === 'unavailable')));
+  assert.deepEqual(reads, ['orders-read', 'orders-send']);
 });

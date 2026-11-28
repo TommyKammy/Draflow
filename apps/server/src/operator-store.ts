@@ -347,8 +347,9 @@ export class OperatorStore {
       if (!validPolicy(policy) || policy.role === 'disabled') return deny(403);
       const allowed = [...permissions[policy.role], ...(policy.grants ?? [])];
       const op = field(q.op);
-      if (op === 'preview') {
+      if (op === 'preview' || op === 'checkHttpGrants') {
         if (!allowed.includes('publish')) return deny(403);
+        if (op === 'checkHttpGrants') return host.checkHttpGrants(q.workflow);
         return q.compareActive === true ? host.comparePublication(q.workflow) : host.previewPublication(q.workflow);
       }
       if (['session', 'list', 'detail', 'metrics', 'audit', 'history'].includes(op)) {
