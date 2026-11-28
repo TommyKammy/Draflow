@@ -386,3 +386,25 @@ PROOD_EFFECTS_CHECKOUT=/path/to/Prood pnpm exec playwright test prood-studio.spe
 ```
 
 Set `DRAFLOW_TEST_POSTGRES` to repeat the fault test with real PostgreSQL. For the latency comparison run `node apps/server/test/prood-latency-bench.mjs /path/to/built/Prood /path/to/built/Draflow`, optionally with a disposable `DATABASE_URL`. It measures synchronous task updates and the time from their return to durable admission for bursts of 20, with a 250 ms poll delay.
+
+### Looking up a business receipt without dispatching a write
+
+A host that provides `executeBusiness` can also pass `lookupBusinessReceipt(request)` to
+`NodeHost`. Draflow uses this callback after the write retry budget is exhausted, for an
+operator's applied-result check, and to settle an uncertain canceled run. With this option
+enabled, the write callback receives only dispatch attempts. Existing Phase 8 integrations
+continue to receive lookups through `executeBusiness(..., true, canStart)`.
+
+The request contains the original organization, project, event, rule, revision and run.
+Use the run as the operation key, verify the remaining identity and current access, and
+read the receiver's durable receipt. Return an object with a `status`:
+
+- `applied` or `skipped` records a confirmed outcome. `denied` and `conflict` end the run with an error.
+- `absent` means the receiver has established that there is no receipt and no outstanding
+  writer can still commit that operation. A canceled run can then finish as canceled.
+  An active run stays in review for an explicit decision.
+- `review` or a thrown lookup error keeps the outcome uncertain. For example, a missing
+  record on a lagging replica is insufficient evidence for `absent`.
+
+The lookup must not apply the business action. It must observe the same operation lock
+or equivalent ordering guarantee as the receiver's write path.

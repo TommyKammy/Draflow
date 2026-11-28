@@ -354,3 +354,49 @@ test('a live run requires an applied or skipped result and reports a conflicting
     if (event === 'conflict') assert.equal((await host.history.get(host.receipt(run).workflowId, run)).error.name, 'BusinessConflict');
   }
 });
+
+test('dedicated receipt lookup survives restart and settlement never dispatches another write', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'business-lookup-'));
+  const organization = randomUUID();
+  const shared = process.env.DRAFLOW_TEST_POSTGRES && {
+    organization, connectionString: process.env.DRAFLOW_TEST_POSTGRES,
+  };
+  const sends = [], lookups = [];
+  let outcome = 'offline';
+  const open = () => new NodeHost(join(dir, 'ledger'), {
+    organization, shared,
+    registry: new NodeRegistry().registerAll(standardNodes),
+    prepareBusiness: async () => ({ status: 'prepared' }),
+    executeBusiness: async (_org, _event, _rule, run, _project, _revision, probe) => {
+      sends.push({ run, probe });
+      throw Error('response lost');
+    },
+    lookupBusinessReceipt: async (request) => {
+      lookups.push(request);
+      if (outcome === 'offline') throw Error('receipt unavailable');
+      return { status: outcome };
+    },
+  });
+  let host = open();
+  t.after(async () => {
+    await host.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  for (const [event, final] of [['confirmed', 'applied'], ['never-applied', 'absent']]) {
+    outcome = 'offline';
+    const identity = { organization, event, project: 'p', rule: 'r', revision: 2 };
+    const run = host.acceptBusiness({ ...identity, proposal: { definition: { apply: true } } });
+    await until(() => host.receipt(run).state === 'review');
+    await host.close();
+    host = open();
+    outcome = 'absent';
+    assert.equal(host.reconcile(run, run, 'applied'), true);
+    await until(() => host.receipt(run).state === 'review');
+    outcome = final;
+    assert.equal(host.cancel(run), true);
+    await until(() => host.receipt(run).state === 'finished');
+    assert.equal(host.receipt(run).outcome, final === 'applied' ? 'success' : 'canceled');
+    assert.deepEqual(sends.filter(s => s.run === run), Array(3).fill({ run, probe: false }));
+    assert.deepEqual(lookups.filter(s => s.run === run), Array(3).fill({ ...identity, run }));
+  }
+});

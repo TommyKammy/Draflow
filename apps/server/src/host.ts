@@ -25,6 +25,18 @@ import {
   type Reconciliation,
 } from './sqlite.js';
 
+/** Immutable identity shared by every attempt to settle this business operation. */
+export interface BusinessReceiptRequest {
+  readonly organization: string;
+  readonly event: string;
+  readonly rule: string;
+  readonly run: string;
+  readonly project: string;
+  readonly revision: number;
+}
+
+export type BusinessReceiptStatus = 'applied' | 'skipped' | 'denied' | 'conflict' | 'absent' | 'review';
+
 interface HostOptions extends Omit<ExecutionEngineOptions, 'credentialFetch'> {
   scheduleClock?: {
     now(): number;
@@ -44,6 +56,7 @@ interface HostOptions extends Omit<ExecutionEngineOptions, 'credentialFetch'> {
   executeBusiness?: (organization: string, event: string, rule: string, run: string, project: string,
     revision: number, probe: boolean, canStart: () => boolean) =>
       Promise<{status: 'applied'|'prepared'|'skipped'|'denied'|'conflict'|'review'|'canceled'}>;
+  lookupBusinessReceipt?: (request: BusinessReceiptRequest) => Promise<{ status: BusinessReceiptStatus }>;
   httpAuth?: HttpAuth;
   maxHttpResponseBytes?: number;
   maxCallDepth?: number;
@@ -667,11 +680,28 @@ export class NodeHost {
           this.#ledger.shared?.checkDispatch();
           return !controller.signal.aborted && !this.#ledger.canceled(r.runId);
         };
+        const lookup = async () => {
+          if (!this.options.lookupBusinessReceipt)
+            return this.options.executeBusiness?.(...args, true, canStart);
+          const [organization, event, rule, run, project, revision] = args;
+          const receipt = await this.options.lookupBusinessReceipt({ organization, event, rule, run, project, revision });
+          switch (receipt?.status) {
+            case 'absent':
+              return { status: this.#ledger.canceled(run) ? 'canceled' as const : 'review' as const };
+            case 'applied':
+            case 'skipped':
+            case 'conflict':
+            case 'denied':
+              return { status: receipt.status };
+            default:
+              return { status: 'review' as const };
+          }
+        };
         while (canStart()) {
           const attempt = this.#ledger.nextBusinessAttempt(r.runId);
           const probe = attempt > 3;
           try {
-            decision = await this.options.executeBusiness?.(...args, probe, canStart);
+            decision = probe ? await lookup() : await this.options.executeBusiness?.(...args, false, canStart);
             break;
           } catch (error) {
             if (error instanceof OwnershipLost) throw error;
@@ -684,7 +714,7 @@ export class NodeHost {
         }
         if (this.#ledger.canceled(r.runId) && !decision) {
           try {
-            decision = await this.options.executeBusiness?.(...args, true, canStart);
+            decision = await lookup();
           } catch (error) {
             if (error instanceof OwnershipLost) throw error;
             decision = { status: 'review' };
