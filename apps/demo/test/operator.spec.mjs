@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import { NodeRegistry } from '@draflow/core';
 import { standardNodes } from '@draflow/nodes';
 import { NodeHost } from '../../server/dist/host.js';
+import { publish as publishCompensations } from '../../server/test/compensation-fixture.mjs';
 import { createOperatorServer } from '../../server/dist/operator-http.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -197,6 +198,15 @@ test('publisher previews an order draft before publication', async ({ page }) =>
     await input.setInputFiles({ name: 'original.json', mimeType: 'application/json', buffer: file });
     await page.getByRole('button', { name: '影響を確認' }).press('Enter');
     await expect(result).toContainText('表示対象の差分はありません。');
+    let compensationDraft;
+    publishCompensations(h, false, false, (flow) => { compensationDraft = structuredClone(flow); });
+    compensationDraft.nodes[1].parameters.compensation.onFailure = true;
+    await input.setInputFiles({ name: 'undo.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(compensationDraft)) });
+    await page.getByRole('button', { name: '影響を確認' }).press('Enter');
+    await expect(result).toContainText('削除 · 補償 · order-import / reserve');
+    await expect(result).toContainText('自動開始なし');
+    await expect(result).toContainText('追加 · 補償 · order-import / reserve');
+    await expect(result).toContainText('release v1 · 実行順 3 · 失敗時の自動補償を開始');
     await compare.uncheck();
     await expect(result).toBeEmpty();
   } finally {

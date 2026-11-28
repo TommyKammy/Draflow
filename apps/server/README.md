@@ -375,7 +375,11 @@ inactive publication does not change the baseline. With no active revision,
 Each entry in `changes` describes one trigger. `before` and `after` describe
 its previous and proposed start conditions. A missing side is null.
 `removed` and `added` list the old and new effects, including pinned child
-revisions and compensation. A destination or credential replacement appears on
+revisions and compensation. `addedCalls` and `removedCalls` identify each distinct
+caller and its pinned target, including page batches. They also track the source
+step, priority, automatic-start flag and applicability of each compensation.
+A changed compensation predicate appears on both sides, with its field and value
+redacted. A destination or credential replacement appears on
 both sides. Trigger and node IDs establish identity, so renaming or reordering
 nodes alone produces no change. This comparison covers the preview's visible
 fields. Input filters, expressions behind dynamic values, query strings,

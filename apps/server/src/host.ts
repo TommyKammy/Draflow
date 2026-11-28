@@ -15,7 +15,7 @@ import {
   type HttpAuth,
 } from './http-auth.js';
 import { compensationSpec } from './compensation.js';
-import { comparePreviews, previewWorkflow, webhookPath } from './preview.js';
+import { compareWorkflows, previewWorkflow, webhookPath } from './preview.js';
 import { pageConfig, readPage, retryTime } from './pages.js';
 import { latestDue, nextTime, scheduleFor } from './schedule.js';
 import {
@@ -367,20 +367,24 @@ export class NodeHost {
     return runtime.publish(workflow.id).workflow;
   }
 
-  previewPublication(workflow: unknown) {
+  private previewDraft(workflow: unknown) {
     this.#ready();
     const draft = this.publicationDraft(parseWorkflow(workflow));
     this.#ledger.validateTargets(draft);
-    return previewWorkflow(draft, this.options.registry, (id, revision) => this.#ledger.publication(id, revision).workflow);
+    return draft;
+  }
+
+  previewPublication(workflow: unknown) {
+    return previewWorkflow(this.previewDraft(workflow), this.options.registry, (id, revision) => this.#ledger.publication(id, revision).workflow);
   }
 
   comparePublication(workflow: unknown) {
-    const draft = this.previewPublication(workflow);
-    const revision = this.#ledger.activeRevision(draft.workflowId);
+    const draft = this.previewDraft(workflow);
+    const revision = this.#ledger.activeRevision(draft.id);
     const load = (id: string, rev: number) => this.#ledger.publication(id, rev).workflow;
-    const active = revision === null ? null : previewWorkflow(load(draft.workflowId, revision), this.options.registry, load);
-    return { workflowId: draft.workflowId, workflowName: draft.workflowName, activeRevision: revision,
-      changes: comparePreviews(active, draft) };
+    const active = revision === null ? null : load(draft.id, revision);
+    return { workflowId: draft.id, workflowName: draft.name, activeRevision: revision,
+      changes: compareWorkflows(active, draft, this.options.registry, load) };
   }
 
   publish(workflow: Workflow): number {

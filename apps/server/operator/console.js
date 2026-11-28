@@ -445,6 +445,17 @@ function showEffect(box, effect, prefix = '') {
   line(box, prefix + (effect.phase === 'compensation' ? '補償 · ' : '') + owner, fields.filter(Boolean).join(' · '));
 }
 
+function showCall(box, site, prefix) {
+  const source = site.sourceWorkflow + (site.sourceRevision === null ? '' : ' v' + site.sourceRevision) + ' / ' + site.nodeId;
+  const kind = { call: '子フロー', pages: 'ページ処理', compensation: '補償' }[site.kind];
+  const fields = [site.workflowId + ' v' + site.revision];
+  if (site.kind === 'compensation') {
+    fields.push('実行順 ' + site.order, site.onFailure ? '失敗時の自動補償を開始' : '自動開始なし');
+    fields.push(site.conditional ? '適用条件あり（値は非表示）' : '適用条件なし');
+  }
+  line(box, prefix + kind + ' · ' + source, fields.join(' · '));
+}
+
 let previewRequest = 0;
 function resetPreview() {
   previewRequest++;
@@ -483,6 +494,8 @@ $('previewForm').onsubmit = async (event) => {
           if (change.before) line(box, '削除する起動条件', triggerCondition(change.before));
           if (change.after) line(box, '追加する起動条件', triggerCondition(change.after));
         }
+        for (const site of change.removedCalls) showCall(box, site, '削除 · ');
+        for (const site of change.addedCalls) showCall(box, site, '追加 · ');
         for (const effect of change.removed) showEffect(box, effect, '削除 · ');
         for (const effect of change.added) showEffect(box, effect, '追加 · ');
       }

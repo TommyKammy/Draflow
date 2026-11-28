@@ -1,6 +1,6 @@
 import { buildGraph, compileTemplate, type NodeRegistry, type NodeType, type Workflow, type WorkflowNode } from '@draflow/core';
 import { httpRequestNode, standardNodes } from '@draflow/nodes';
-import { compensationSpec } from './compensation.js';
+import { compensationSpec, type CompensationSpec } from './compensation.js';
 import { permitsCredentialDestination } from './http-auth.js';
 import { scheduleFor } from './schedule.js';
 
@@ -81,17 +81,38 @@ export function webhookPath(node: WorkflowNode) {
   return '/webhook/' + path;
 }
 
-export function previewWorkflow(root: Workflow, registry: NodeRegistry, load: (id: string, revision: number) => Workflow) {
+export interface CallSite {
+  sourceWorkflow: string;
+  sourceRevision: number | null;
+  nodeId: string;
+  kind: 'call' | 'pages' | 'compensation';
+  workflowId: string;
+  revision: number;
+  order?: number;
+  onFailure?: boolean;
+  conditional?: boolean;
+}
+
+type CallSites = Map<string, Map<string, CallSite>>;
+type Load = (id: string, revision: number) => Workflow;
+
+export function previewWorkflow(root: Workflow, registry: NodeRegistry, load: Load, sites?: CallSites) {
   const graphs = new Map<Workflow, ReturnType<typeof buildGraph>>();
   const children = new Map<string, Workflow>();
   let visits = 0;
   let effectBytes = 0;
+  function countRecord(json: string) {
+    effectBytes += Buffer.byteLength(json);
+    if (effectBytes > 1024 * 1024) throw Error('Publication preview exceeds the output limit');
+  }
   const triggers = root.nodes.filter((n) => !n.disabled && registry.require(n.type, n.typeVersion).meta.category === 'trigger');
   return {
     workflowId: root.id,
     workflowName: root.name,
     triggers: triggers.map((trigger) => {
       const effects: PublicationImpact[] = [];
+      const calls = sites && new Map<string, CallSite>();
+      if (calls) sites?.set(trigger.id, calls);
       const seen = new Set<string>();
       function walk(flow: Workflow, revision: number | null, start: string, phase: PublicationImpact['phase']) {
         const graph = graphs.get(flow) ?? buildGraph(flow);
@@ -110,8 +131,7 @@ export function previewWorkflow(root: Workflow, registry: NodeRegistry, load: (i
           for (const entry of node.disabled ? [] : impacts(node, installed)) {
             blocked ||= entry.kind === 'blocked';
             const effect = { workflowId: flow.id, revision, nodeId: id, nodeName: node.name, phase, ...entry };
-            effectBytes += Buffer.byteLength(JSON.stringify(effect));
-            if (effectBytes > 1024 * 1024) throw Error('Publication preview exceeds the output limit');
+            countRecord(JSON.stringify(effect));
             effects.push(effect);
           }
           for (const edge of graph.outgoing.get(id) ?? []) {
@@ -130,12 +150,27 @@ export function previewWorkflow(root: Workflow, registry: NodeRegistry, load: (i
           }
           if (node.disabled || blocked) continue;
           const undo = !installed.wait && installed.journalMode && compensationSpec(node);
-          if (undo) child(undo.workflowId, undo.revision, 'compensation');
+          if (undo) child({
+            sourceWorkflow: flow.id, sourceRevision: revision, nodeId: id, kind: 'compensation',
+            workflowId: undo.workflowId, revision: undo.revision, order: undo.order,
+            onFailure: undo.onFailure === true, conditional: !!undo.when,
+          }, 'compensation', undo.when);
           if (installed.wait && (node.type === 'draflow.call' || node.type === 'draflow.pages'))
-            child(String(node.parameters.workflowId), Number(node.parameters.revision), phase);
+            child({
+              sourceWorkflow: flow.id, sourceRevision: revision, nodeId: id,
+              kind: node.type === 'draflow.pages' ? 'pages' : 'call',
+              workflowId: String(node.parameters.workflowId), revision: Number(node.parameters.revision),
+            }, phase);
         }
       }
-      function child(id: string, revision: number, phase: PublicationImpact['phase']) {
+      function child(site: CallSite, phase: PublicationImpact['phase'], when?: CompensationSpec['when']) {
+        if (calls) {
+          // Compare predicate changes privately. Never serialize the field or value into the report.
+          const identity = JSON.stringify([site, when?.field, when?.equals]);
+          countRecord(identity);
+          calls.set(identity, site);
+        }
+        const { workflowId: id, revision } = site;
         const key = JSON.stringify([id, revision]);
         const flow = children.get(key) ?? load(id, revision);
         children.set(key, flow);
@@ -168,20 +203,28 @@ function triggerCondition(trigger: Trigger | undefined) {
   return { nodeId, nodeName, type, path, schedule };
 }
 
-export function comparePreviews(active: Preview | null, draft: Preview) {
-  const before = new Map(active?.triggers.map((t) => [t.nodeId, t]));
+function difference<T>(left: Map<string, T> | undefined, right: Map<string, T> | undefined): T[] {
+  return Array.from(left ?? []).filter(([key]) => !right?.has(key)).map(([, value]) => value);
+}
+
+export function compareWorkflows(active: Workflow | null, proposed: Workflow, registry: NodeRegistry, load: Load) {
+  const previousSites: CallSites = new Map(), nextSites: CallSites = new Map();
+  const activePreview = active && previewWorkflow(active, registry, load, previousSites);
+  const draft = previewWorkflow(proposed, registry, load, nextSites);
+  const before = new Map(activePreview?.triggers.map((t) => [t.nodeId, t]));
   const after = new Map(draft.triggers.map((t) => [t.nodeId, t]));
   const changes = [];
   for (const id of new Set([...after.keys(), ...before.keys()])) {
     const previous = before.get(id), next = after.get(id);
     const previousEffects = new Map(previous?.effects.map((e) => [effectKey(e), e]));
     const nextEffects = new Map(next?.effects.map((e) => [effectKey(e), e]));
-    const added = [...nextEffects].filter(([key]) => !previousEffects.has(key)).map(([, effect]) => effect);
-    const removed = [...previousEffects].filter(([key]) => !nextEffects.has(key)).map(([, effect]) => effect);
+    const added = difference(nextEffects, previousEffects), removed = difference(previousEffects, nextEffects);
+    const addedCalls = difference(nextSites.get(id), previousSites.get(id));
+    const removedCalls = difference(previousSites.get(id), nextSites.get(id));
     const conditionChanged = !previous || !next || previous.type !== next.type || previous.path !== next.path ||
       JSON.stringify(previous.schedule) !== JSON.stringify(next.schedule);
-    if (conditionChanged || added.length || removed.length)
-      changes.push({ before: triggerCondition(previous), after: triggerCondition(next), conditionChanged, added, removed });
+    if (conditionChanged || added.length || removed.length || addedCalls.length || removedCalls.length)
+      changes.push({ before: triggerCondition(previous), after: triggerCondition(next), conditionChanged, added, removed, addedCalls, removedCalls });
   }
   return changes;
 }
