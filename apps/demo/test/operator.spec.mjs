@@ -70,7 +70,11 @@ test('operators reconcile the same delivery in two tabs; a viewer can inspect th
       await p.goto(url);
       await p.getByLabel('組織 ID').fill(organization);
       await p.getByLabel('アクセストークン').fill(account.token);
-      await p.getByLabel('アクセストークン').press('Enter');
+      const [session] = await Promise.all([
+        p.waitForResponse((response) => new URL(response.url()).searchParams.get('op') === 'session'),
+        p.getByRole('button', { name: 'ログイン' }).click(),
+      ]);
+      expect(session.status()).toBe(200);
       await p.getByRole('combobox', { name: '状態', exact: true }).selectOption('review');
       await p.getByRole('button', { name: '検索', exact: true }).press('Enter');
       await p.getByRole('link', { name: flow.id, exact: true }).press('Enter');
