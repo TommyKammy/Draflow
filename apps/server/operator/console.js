@@ -83,6 +83,10 @@ function clear() {
   $('detail').hidden = $('work').hidden = $('logout').hidden = true;
   $('login').hidden = false;
   $('token').value = '';
+  resetPreview();
+  $('previewForm').reset();
+  $('previewPanel').open = false;
+  $('previewPanel').hidden = true;
   filter.reset();
   $('auditPanel').open = false;
   $('auditFilter').reset();
@@ -365,6 +369,7 @@ $('login').onsubmit = async (e) => {
     $('token').value = '';
     $('login').hidden = true;
     $('work').hidden = $('logout').hidden = false;
+    $('previewPanel').hidden = !me.allowed.includes('publish');
     $('who').textContent = me.organization + ' / ' + me.actor + ' · ' + me.role;
     announce('');
     filter.elements.status.focus();
@@ -419,4 +424,56 @@ $('olderAudit').onclick = () => audit(true);
 $('auditFilter').onsubmit = (e) => {
   e.preventDefault();
   audit();
+};
+
+let previewRequest = 0;
+function resetPreview() {
+  previewRequest++;
+  $('previewResult').replaceChildren();
+}
+$('draftFile').onchange = resetPreview;
+$('previewForm').onsubmit = async (event) => {
+  event.preventDefault();
+  resetPreview();
+  const request = previewRequest;
+  const file = $('draftFile').files[0];
+  try {
+    if (!file || file.size > 1024 * 1024) throw Error('1 MiB 以下のフロー定義を選んでください。');
+    const source = await file.text();
+    if (request !== previewRequest) return;
+    let workflow;
+    try {
+      workflow = JSON.parse(source);
+    } catch {
+      throw Error('JSON 形式を確認してください。');
+    }
+    const preview = await api({ op: 'preview', workflow }, true);
+    if (request !== previewRequest) return;
+    const box = $('previewResult');
+    box.append(node('h3', preview.workflowName));
+    if (!preview.triggers.length) box.append(node('p', '有効な起動ノードはありません。'));
+    for (const trigger of preview.triggers) {
+      const schedule = trigger.schedule;
+      const condition = schedule
+        ? schedule.intervalMs ? (schedule.intervalMs / 1000) + ' 秒ごと'
+          : [schedule.minute, schedule.hour, schedule.day, schedule.month, schedule.weekday]
+              .map((value) => value ?? '*').join(' ') + ' ' + schedule.timezone
+        : trigger.path ?? trigger.type;
+      line(box, trigger.nodeName, condition);
+      if (!trigger.effects.length) box.append(node('p', '外部操作はありません。'));
+      const kinds = { read: '読み取り', write: '書き込み', unknown: '操作は実行時に決定', undeclared: '影響未宣言', blocked: '認証設定の不一致により送信不可' };
+      for (const effect of trigger.effects) {
+        const owner = effect.revision === null ? effect.nodeName : effect.workflowId + ' v' + effect.revision + ' / ' + effect.nodeName;
+        const fields = [kinds[effect.kind], effect.method, effect.destination];
+        if (effect.destination === null) fields.push('送信先は実行時に確認');
+        if (effect.mayRedirect) fields.push('リダイレクト先へ送信する可能性あり');
+        if (effect.credentialRefs.length) fields.push('資格情報 ' + effect.credentialRefs.join(', '));
+        line(box, (effect.phase === 'compensation' ? '補償 · ' : '') + owner, fields.filter(Boolean).join(' · '));
+      }
+    }
+    announce('公開前の影響を表示しました。');
+  } catch (error) {
+    if (request === previewRequest) report(error);
+    else if (error.status === 401 || error.status === 403) report(error);
+  }
 };

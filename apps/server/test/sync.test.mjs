@@ -556,6 +556,8 @@ test('parallel pages retain completed siblings across restart and duplicate redr
   const sent = [],
     completed = [],
     rows = Array.from({ length: 1003 }, (_, i) => change(i + 1));
+  const firstWave = Promise.withResolvers();
+  const siblingFinished = Promise.withResolvers();
   let active = 0,
     peak = 0,
     calls = 0,
@@ -582,12 +584,16 @@ test('parallel pages retain completed siblings across restart and duplicate redr
       if (init.method === 'POST') {
         const id = JSON.parse(init.body).id;
         peak = Math.max(peak, ++active);
-        const firstInBatch = (Number(id) - 1) % 25 === 0;
-        const pause = process.env.DRAFLOW_TEST_SHARED && firstInBatch ? 200 : 1;
-        await new Promise((resolve) => setTimeout(resolve, Number(id) === 1 ? pause + 100 : pause));
+        // Exercise three occupied slots and an out-of-order sibling independently of DB latency.
+        if (active === 3) firstWave.resolve();
+        await firstWave.promise;
+        if (Number(id) === 1) await siblingFinished.promise;
         active--;
         sent.push(id);
-        if (Number(id) % 25 === 0) completed.push(Number(id));
+        if (Number(id) % 25 === 0) {
+          completed.push(Number(id));
+          if (Number(id) !== 25) siblingFinished.resolve();
+        }
         return Response.json({});
       }
       const i = Number(new URL(url).searchParams.get('cursor') ?? 0);
@@ -607,7 +613,12 @@ test('parallel pages retain completed siblings across restart and duplicate redr
   );
   const id = start(h, 'parallel');
   assert.equal(start(h, 'parallel'), id);
-  assert.equal(await outcome(h, id), 'error');
+  try {
+    assert.equal(await outcome(h, id), 'error');
+  } finally {
+    firstWave.resolve();
+    siblingFinished.resolve();
+  }
   assert.equal(reads, 1);
   assert.equal(h.progress(id)[0].pages, 0);
   const [point] = h.recoveryInfo(id);

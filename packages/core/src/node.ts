@@ -14,6 +14,8 @@ import type {
 export type NodeCategory = 'trigger' | 'core' | 'transform' | 'flow' | 'network' | 'human';
 
 export interface NodeMeta {
+  /** Host declaration for a static publication preview. Omission means unknown. */
+  externalEffect?: 'none' | 'read' | 'write';
   label: string;
   category: NodeCategory;
   description?: string;

@@ -144,3 +144,49 @@ test('an operator refreshing an expired event wait sees the deadline and can sti
     await h.close();
   }
 });
+
+test('publisher previews an order draft before publication', async ({ page }) => {
+  const organization = randomUUID(), token = randomUUID();
+  const h = new NodeHost(':memory:', hostOptions(organization));
+  const srv = createOperatorServer([h], () => [{
+    organization, actor: 'publisher', role: 'publisher', sha256: createHash('sha256').update(token).digest('hex'),
+  }]);
+  try {
+    await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve));
+    await page.goto('http://127.0.0.1:' + srv.address().port + '/operator/');
+    await page.getByLabel('組織 ID').fill(organization);
+    await page.getByLabel('アクセストークン').fill(token);
+    await page.getByLabel('アクセストークン').press('Enter');
+    const previewPanel = page.getByText('公開前の影響を確認', { exact: true });
+    await expect(previewPanel).toBeVisible();
+    await previewPanel.press('Enter');
+    const input = page.getByLabel('フロー定義（JSON）');
+    const file = readFileSync(new URL('../../../examples/order-sync.json', import.meta.url));
+    await input.setInputFiles({ name: 'orders.json', mimeType: 'application/json', buffer: file });
+    await page.getByRole('button', { name: '影響を確認' }).press('Enter');
+    const result = page.locator('#previewResult');
+    await expect(result).toContainText('Order webhook');
+    await expect(result).toContainText('60 秒ごと');
+    await expect(result.getByText(/読み取り · GET · https:.*orders · 資格情報 orders-read/)).toHaveCount(2);
+    await expect(result.getByText(/書き込み · POST · https:.*totals · 資格情報 orders-send/)).toHaveCount(2);
+    const changed = JSON.parse(file);
+    const read = changed.nodes.find((n) => n.id === 'read');
+    delete read.credentials;
+    read.parameters.authentication = 'none';
+    changed.nodes.find((n) => n.id === 'send').parameters.authentication = 'none';
+    await input.setInputFiles({ name: 'changed.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(changed)) });
+    await page.getByRole('button', { name: '影響を確認' }).press('Enter');
+    await expect(result.getByText(/リダイレクト先へ送信する可能性あり/)).toHaveCount(2);
+    await expect(result.getByText(/認証設定の不一致により送信不可/)).toHaveCount(2);
+    await expect(result).not.toContainText('orders-send');
+    await input.setInputFiles({ name: 'bad.json', mimeType: 'application/json', buffer: Buffer.from('{') });
+    await expect(result).toBeEmpty();
+    await page.getByRole('button', { name: '影響を確認' }).press('Enter');
+    await expect(page.getByRole('status')).toContainText('JSON 形式');
+    expect(h.publish(JSON.parse(file))).toBe(1);
+  } finally {
+    srv.closeAllConnections();
+    await new Promise((resolve) => srv.close(resolve));
+    await h.close();
+  }
+});
