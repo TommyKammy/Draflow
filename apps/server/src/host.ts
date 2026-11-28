@@ -645,7 +645,8 @@ export class NodeHost {
   async #runJob(job: NonNullable<ReturnType<ExecutionLedger['claim']>>, controller: AbortController) {
     const { receipt: r } = job;
     let items = job.items;
-    if (this.#ledger.canceled(r.runId)) {
+    let effectConfirmed = false;
+    if (this.#ledger.canceled(r.runId) && !this.#ledger.businessStarted(r.runId)) {
       this.#ledger.finishCanceled(r);
       return;
     }
@@ -681,7 +682,15 @@ export class NodeHost {
             await new Promise((done) => setTimeout(done, 50 * attempt));
           }
         }
-        if (this.#ledger.canceled(r.runId) || decision?.status === 'canceled') {
+        if (this.#ledger.canceled(r.runId) && !decision) {
+          try {
+            decision = await this.options.executeBusiness?.(...args, true, canStart);
+          } catch (error) {
+            if (error instanceof OwnershipLost) throw error;
+            decision = { status: 'review' };
+          }
+        }
+        if (decision?.status === 'canceled') {
           this.#ledger.finishCanceled(r);
           return;
         }
@@ -692,7 +701,10 @@ export class NodeHost {
       } else if (this.organization === context.organization) {
         decision = await this.options.prepareBusiness?.(...args);
       }
-      if (!decision || !['prepared', 'applied', 'skipped'].includes(decision.status)) {
+      if (
+        !decision ||
+        ![context.apply === true ? 'applied' : 'prepared', 'skipped'].includes(decision.status)
+      ) {
         this.#ledger.finish(
           r,
           {
@@ -710,11 +722,18 @@ export class NodeHost {
           {
             workflow: publication.workflow,
             tasks: [],
-            error: { name: 'BusinessAuthorization', message: 'Business action unavailable' },
+            error:
+              decision?.status === 'conflict'
+                ? {
+                    name: 'BusinessConflict',
+                    message: 'Business operation does not match the receiver receipt',
+                  }
+                : { name: 'BusinessAuthorization', message: 'Business action unavailable' },
           },
         );
         return;
       }
+      effectConfirmed = context.apply === true;
       items = [{ json: { businessStatus: decision.status } }];
     }
     const operation = this.#ledger.pendingMode(r.runId);
@@ -821,7 +840,8 @@ export class NodeHost {
         mode: r.mode,
         ...(r.eventKey !== null && { key: r.eventKey }),
       },
-      controller.signal,
+      // This generated trigger only records the receiver outcome. A late cancel cannot undo it.
+      effectConfirmed ? undefined : controller.signal,
     );
     if (result.status === 'waiting') {
       this.#armSchedules();

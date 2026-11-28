@@ -401,7 +401,8 @@ export class ExecutionLedger {
         this.#prepare('DELETE FROM syncQueue WHERE runId=?').run(run);
         this.#prepare('UPDATE pageRuns SET retryAt=NULL WHERE runId=?').run(run);
         this.#prepare("INSERT INTO transitions VALUES(?, '', ?, 'cancelRequested')").run(run, this.#now());
-        if (row.state === 'waiting') this.#prepare("UPDATE runs SET state='queued' WHERE runId=?").run(run);
+        if (row.state === 'waiting' || (row.state === 'review' && this.businessStarted(run)))
+          this.#prepare("UPDATE runs SET state='queued' WHERE runId=?").run(run);
       }
       return rows.map((row) => String(row.runId));
     });
@@ -1058,6 +1059,13 @@ export class ExecutionLedger {
     });
   }
 
+  businessStarted(run: string) {
+    return (
+      this.#businessEnabled &&
+      !!this.#prepare('SELECT 1 FROM business_attempts WHERE run=? AND attempts>0').get(run)
+    );
+  }
+
   nextBusinessAttempt(run: string) {
     return this.#transaction(() => {
       this.#prepare(
@@ -1401,10 +1409,10 @@ export class ExecutionLedger {
     return this.#transaction(() => {
       if (this.get(id)?.state !== 'review') return false;
       if (this.#businessEnabled && id === key && this.isBusinessRun(id)) {
-        if (this.canceled(id)) return false;
+        if (this.canceled(id) && decision === 'retryKeyed') return false;
         // An applied decision is verified at the receiver; it cannot manufacture a successful receipt.
-        if (decision !== 'applied')
-          this.#prepare('UPDATE business_attempts SET attempts=0 WHERE run=?').run(id);
+        const lookupOnly = decision === 'applied' || this.canceled(id);
+        this.#prepare('UPDATE business_attempts SET attempts=? WHERE run=?').run(lookupOnly ? 3 : 0, id);
         this.#prepare("INSERT INTO transitions VALUES(?,'event',?,?)").run(
           id,
           this.#now(),

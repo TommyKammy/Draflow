@@ -264,3 +264,82 @@ test('a canceled handoff cannot start a business write after the receiver become
   await until(() => host.receipt(id).state === 'finished');
   assert.equal(writes, 0);
 });
+
+test('cancellation of an uncertain business effect keeps receipt lookup available without resending', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'cancel-business-review-'));
+  const organization = randomUUID();
+  const shared = process.env.DRAFLOW_TEST_POSTGRES && {
+    organization,
+    connectionString: process.env.DRAFLOW_TEST_POSTGRES,
+  };
+  let sends = 0,
+    canceledLookups = 0,
+    recovered = false;
+  const host = new NodeHost(join(dir, 'ledger'), {
+    organization,
+    shared,
+    registry: new NodeRegistry().registerAll(standardNodes),
+    prepareBusiness: async () => ({ status: 'prepared' }),
+    executeBusiness: async (_org, _event, _rule, _run, _project, _revision, probe, canStart) => {
+      if (!probe) sends++;
+      else if (!canStart()) {
+        canceledLookups++;
+        if (recovered) return { status: 'applied' };
+      }
+      throw Error('receiver unavailable');
+    },
+  });
+  t.after(async () => {
+    await host.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const run = host.acceptBusiness({
+    organization,
+    event: 'e',
+    rule: 'r',
+    project: 'p',
+    revision: 1,
+    proposal: { definition: { apply: true } },
+  });
+  await until(() => host.receipt(run).state === 'review');
+  assert.equal(host.cancel(run), true);
+  await until(() => canceledLookups === 1 && host.receipt(run).state === 'review');
+  assert.equal(host.reconcile(run, run, 'retryKeyed'), false);
+  recovered = true;
+  assert.equal(host.reconcile(run, run, 'applied'), true);
+  await until(() => host.receipt(run).outcome === 'success');
+  assert.deepEqual([sends, canceledLookups], [3, 2]);
+});
+
+test('a live run requires an applied or skipped result and reports a conflicting receiver receipt', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'business-result-'));
+  const organization = randomUUID();
+  const shared = process.env.DRAFLOW_TEST_POSTGRES && {
+    organization, connectionString: process.env.DRAFLOW_TEST_POSTGRES,
+  };
+  const host = new NodeHost(join(dir, 'ledger'), {
+    organization, shared, registry: new NodeRegistry().registerAll(standardNodes),
+    prepareBusiness: async () => ({ status: 'prepared' }),
+    executeBusiness: async (_org, event, _rule, _run, _project, _revision, probe) => ({
+      status: event === 'review' && probe ? 'applied' : event,
+    }),
+  });
+  t.after(async () => {
+    await host.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const uncertain = host.acceptBusiness({
+    organization, event: 'review', project: 'p', rule: 'r', revision: 1,
+    proposal: { definition: { apply: true } },
+  });
+  await until(() => host.receipt(uncertain).state === 'review');
+  assert.equal(host.reconcile(uncertain, uncertain, 'applied'), true);
+  await until(() => host.receipt(uncertain).outcome === 'success');
+  for (const event of ['prepared', 'conflict']) {
+    const run = host.acceptBusiness({
+      organization, event, project: 'p', rule: 'r', revision: 1, proposal: { definition: { apply: true } },
+    });
+    await until(() => host.receipt(run).outcome === 'error');
+    if (event === 'conflict') assert.equal((await host.history.get(host.receipt(run).workflowId, run)).error.name, 'BusinessConflict');
+  }
+});
