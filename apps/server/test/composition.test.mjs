@@ -189,7 +189,7 @@ test('1003 records resume in source order across restart with bounded pages and 
   h.publish(child([post]));
   h.activate('parent', h.publish(pages()));
   const id = start(h);
-  await until(() => Number(h.progress(id)[0]?.pages) >= 6);
+  await untilLong(() => Number(h.progress(id)[0]?.pages) >= 6);
   await h.close();
   h = open();
   await untilLong(() => h.receipt(id).state === 'finished');
