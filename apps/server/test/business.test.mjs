@@ -309,6 +309,17 @@ test('cancellation of an uncertain business effect keeps receipt lookup availabl
   assert.equal(host.reconcile(run, run, 'applied'), true);
   await until(() => host.receipt(run).outcome === 'success');
   assert.deepEqual([sends, canceledLookups], [3, 2]);
+
+  // Resetting the retry budget cannot erase evidence of the original dispatch.
+  const next = host.acceptBusiness({
+    organization, event: 'another', rule: 'r', project: 'p', revision: 1,
+    proposal: { definition: { apply: true } },
+  });
+  await until(() => host.receipt(next).state === 'review');
+  assert.equal(host.reconcile(next, next, 'retryKeyed'), true);
+  assert.equal(host.cancel(next), true);
+  await until(() => host.receipt(next).outcome === 'success');
+  assert.deepEqual([sends, canceledLookups], [6, 3]);
 });
 
 test('a live run requires an applied or skipped result and reports a conflicting receiver receipt', async (t) => {

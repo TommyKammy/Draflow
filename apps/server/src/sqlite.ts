@@ -1062,7 +1062,10 @@ export class ExecutionLedger {
   businessStarted(run: string) {
     return (
       this.#businessEnabled &&
-      !!this.#prepare('SELECT 1 FROM business_attempts WHERE run=? AND attempts>0').get(run)
+      !!this.#prepare(
+        `SELECT 1 FROM business_attempts a WHERE a.run=? AND (a.attempts>0 OR EXISTS(
+          SELECT 1 FROM transitions t WHERE t.runId=a.run AND t.reason IN ('reconciled:notApplied','reconciled:retryKeyed')))`,
+      ).get(run)
     );
   }
 
