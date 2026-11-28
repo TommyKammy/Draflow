@@ -1,3 +1,4 @@
+import type { BusinessDelivery } from './business.js';
 import type { Identity } from './operator-store.js';
 import { type SharedOptions, OwnershipLost } from './postgres.js';
 import { randomUUID } from 'node:crypto';
@@ -31,6 +32,15 @@ interface HostOptions extends Omit<ExecutionEngineOptions, 'credentialFetch'> {
   };
   shared?: SharedOptions;
   organization?: string;
+  businessOnly?: boolean;
+  prepareBusiness?: (
+    organization: string,
+    event: string,
+    rule: string,
+    run: string,
+    project: string,
+    revision: number,
+  ) => Promise<{ status: 'prepared' | 'skipped' | 'denied' }>;
   httpAuth?: HttpAuth;
   maxHttpResponseBytes?: number;
   maxCallDepth?: number;
@@ -84,6 +94,8 @@ export class NodeHost {
     if (options.organization && options.shared && options.organization !== options.shared.organization)
       throw Error('Ledger organization mismatch');
     const organization = options.shared?.organization ?? options.organization;
+    if (options.businessOnly && (!organization || !options.prepareBusiness))
+      throw Error('A business worker requires an organization and preparation callback');
     if (organization && options.httpAuth && options.httpAuth.organization !== organization)
       throw Error('HTTP credentials belong to a different organization');
     const fetchFn = options.fetch ?? fetch;
@@ -136,7 +148,7 @@ export class NodeHost {
       this.#latestCooldown = this.#ledger.latestCooldown();
       if (this.#executes()) this.#ledger.recover();
       const checked = new Set<string>();
-      for (const row of this.#ledger.requiredPublications()) {
+      for (const row of this.#ledger.requiredPublications(this.#executionLane())) {
         this.#checkPublication(
           this.#ledger.publication(String(row.workflowId), Number(row.revision)),
           checked,
@@ -176,6 +188,14 @@ export class NodeHost {
     }
   }
 
+  acceptBusiness(delivery: BusinessDelivery) {
+    this.#ready();
+    if (!this.organization || delivery.organization !== this.organization)
+      throw Error('Business organization mismatch');
+    const run = this.#ledger.acceptBusiness(delivery, this.#capacity, (workflow) => this.publish(workflow));
+    this.#wake();
+    return run;
+  }
   get organization() {
     return this.options.shared?.organization ?? this.options.organization;
   }
@@ -468,7 +488,7 @@ export class NodeHost {
   }
 
   #prepareScheduleTimer(minDelay = 0) {
-    if (this.options.shared) return;
+    if (this.options.shared || this.options.businessOnly) return;
     const next = this.#ledger.nextScheduleTime();
     if (next === undefined) return;
     // Recheck long waits periodically in case the wall clock moves.
@@ -476,14 +496,17 @@ export class NodeHost {
     return this.#scheduleClock.arm(() => this.#tickSchedules(), delay);
   }
 
+  #executionLane() {
+    return this.options.businessOnly ? 'business' : this.options.prepareBusiness ? 'all' : 'ordinary';
+  }
   #executes() {
     return !['intake', 'scheduler'].includes(this.options.shared?.role ?? 'all');
   }
   #schedules() {
-    return !['intake', 'worker'].includes(this.options.shared?.role ?? 'all');
+    return !this.options.businessOnly && !['intake', 'worker'].includes(this.options.shared?.role ?? 'all');
   }
   #armSchedules(minDelay = 0) {
-    if (this.options.shared) return; // Every scheduler polls the durable due times.
+    if (this.options.shared || this.options.businessOnly) return; // Every scheduler polls the durable due times.
     const cancel = this.#prepareScheduleTimer(minDelay);
     this.#cancelSchedule?.();
     this.#cancelSchedule = cancel;
@@ -580,7 +603,11 @@ export class NodeHost {
     while (true) {
       await yieldToHost();
       if (this.#stopping || this.#fault) return;
-      const job = this.#ledger.claim(this.#parallel.size < this.#parallelLimit, this.#parallelLimit);
+      const job = this.#ledger.claim(
+        this.#parallel.size < this.#parallelLimit,
+        this.#parallelLimit,
+        this.#executionLane(),
+      );
       if (!job) {
         this.#worker = undefined;
         return;
@@ -613,12 +640,51 @@ export class NodeHost {
   }
 
   async #runJob(job: NonNullable<ReturnType<ExecutionLedger['claim']>>, controller: AbortController) {
-    const { receipt: r, items } = job;
+    const { receipt: r } = job;
+    let items = job.items;
     if (this.#ledger.canceled(r.runId)) {
       this.#ledger.finishCanceled(r);
       return;
     }
     const publication = this.#ledger.publication(r.workflowId, r.revision);
+    if (this.organization && r.workflowId.startsWith('business-') && this.#ledger.isBusinessRun(r.runId)) {
+      const context = items[0]!.json;
+      const decision =
+        this.organization === context.organization
+          ? await this.options.prepareBusiness?.(
+              this.organization,
+              String(context.event),
+              String(context.rule),
+              r.runId,
+              String(context.project),
+              Number(context.revision),
+            )
+          : undefined;
+      if (!decision || (decision.status !== 'prepared' && decision.status !== 'skipped')) {
+        this.#ledger.finish(
+          r,
+          {
+            id: r.runId,
+            workflowId: r.workflowId,
+            workflowName: publication.workflow.name,
+            mode: r.mode,
+            startNodeId: r.triggerNodeId,
+            status: 'error',
+            startedAt: r.startedAt!,
+            stoppedAt: this.#scheduleClock.now(),
+            executed: 0,
+            reused: 0,
+          },
+          {
+            workflow: publication.workflow,
+            tasks: [],
+            error: { name: 'BusinessAuthorization', message: 'Business action unavailable' },
+          },
+        );
+        return;
+      }
+      items = [{ json: { businessStatus: decision.status } }];
+    }
     const operation = this.#ledger.pendingMode(r.runId);
     if (operation === 'pages') {
       const entry = this.#ledger.continuation(r.runId)!.checkpoint.stack[0]!;

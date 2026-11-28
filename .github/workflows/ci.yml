@@ -95,7 +95,45 @@ jobs:
       - run: node --test --test-name-pattern="incremental tokens|parallel pages retain|two parallel imports|parallel receiver cooldown|occupied host|first GET attempt|during rate-limit wait" apps/server/test/sync.test.mjs
         env:
           DRAFLOW_TEST_SHARED: postgres://postgres:local-ci-only@localhost:5432/postgres
-      - run: node --test apps/server/test/operator.test.mjs && node apps/server/test/operator-bench.mjs
+      - run: node --test apps/server/test/operator.test.mjs apps/server/test/business.test.mjs && node apps/server/test/operator-bench.mjs
         env:
           DRAFLOW_TEST_POSTGRES: postgres://postgres:local-ci-only@localhost:5432/postgres
       - run: node apps/server/test/postgres-ha.mjs
+
+  prood-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_PASSWORD: local-ci-only
+        ports:
+          - 5432:5432
+        options: --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: TommyKammy/Prood
+          ref: a70531771b7b3f90123fcde0ccb17117ade8690d
+          path: .prood
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile && pnpm build
+      - run: pnpm install --frozen-lockfile && pnpm build
+        working-directory: .prood
+      - name: Exercise both ledgers and the authenticated rule preview
+        env:
+          PROOD_CHECKOUT: ${{ github.workspace }}/.prood
+        run: |
+          node --test apps/server/test/prood-business.test.mjs
+          DRAFLOW_TEST_POSTGRES=postgres://postgres:local-ci-only@localhost:5432/postgres node --test apps/server/test/prood-business.test.mjs
+          pnpm exec playwright install --with-deps chromium
+          pnpm exec playwright test prood-rule.spec.mjs

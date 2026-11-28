@@ -8,6 +8,8 @@ import { PostgresDatabase, type SharedOptions } from './postgres.js';
 const tables = [...ledgerTables.matchAll(/CREATE TABLE IF NOT EXISTS (\w+)/g)].map((m) => m[1]!);
 // Optional on source ledgers created before the operator API or without an organization.
 const operatorTables = new Set([
+  'business_publications',
+  'business_receipts',
   'memberships',
   'credential_access',
   'operator_audit',
