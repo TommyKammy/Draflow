@@ -184,6 +184,21 @@ test('publisher previews an order draft before publication', async ({ page }) =>
     await page.getByRole('button', { name: '影響を確認' }).press('Enter');
     await expect(page.getByRole('status')).toContainText('JSON 形式');
     expect(h.publish(JSON.parse(file))).toBe(1);
+    h.activate(changed.id, 1);
+    const compare = page.getByRole('checkbox', { name: '稼働版と比較' });
+    await compare.check();
+    await input.setInputFiles({ name: 'changed.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(changed)) });
+    await page.getByRole('button', { name: '影響を確認' }).press('Enter');
+    await expect(result).toContainText('比較元：稼働版 v1');
+    await expect(result).toContainText('削除 · ');
+    await expect(result).toContainText('資格情報 orders-read');
+    await expect(result).toContainText('追加 · ');
+    await expect(result).toContainText('認証設定の不一致により送信不可');
+    await input.setInputFiles({ name: 'original.json', mimeType: 'application/json', buffer: file });
+    await page.getByRole('button', { name: '影響を確認' }).press('Enter');
+    await expect(result).toContainText('表示対象の差分はありません。');
+    await compare.uncheck();
+    await expect(result).toBeEmpty();
   } finally {
     srv.closeAllConnections();
     await new Promise((resolve) => srv.close(resolve));

@@ -15,7 +15,7 @@ import {
   type HttpAuth,
 } from './http-auth.js';
 import { compensationSpec } from './compensation.js';
-import { previewWorkflow, webhookPath } from './preview.js';
+import { comparePreviews, previewWorkflow, webhookPath } from './preview.js';
 import { pageConfig, readPage, retryTime } from './pages.js';
 import { latestDue, nextTime, scheduleFor } from './schedule.js';
 import {
@@ -372,6 +372,15 @@ export class NodeHost {
     const draft = this.publicationDraft(parseWorkflow(workflow));
     this.#ledger.validateTargets(draft);
     return previewWorkflow(draft, this.options.registry, (id, revision) => this.#ledger.publication(id, revision).workflow);
+  }
+
+  comparePublication(workflow: unknown) {
+    const draft = this.previewPublication(workflow);
+    const revision = this.#ledger.activeRevision(draft.workflowId);
+    const load = (id: string, rev: number) => this.#ledger.publication(id, rev).workflow;
+    const active = revision === null ? null : previewWorkflow(load(draft.workflowId, revision), this.options.registry, load);
+    return { workflowId: draft.workflowId, workflowName: draft.workflowName, activeRevision: revision,
+      changes: comparePreviews(active, draft) };
   }
 
   publish(workflow: Workflow): number {

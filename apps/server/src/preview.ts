@@ -153,3 +153,35 @@ export function previewWorkflow(root: Workflow, registry: NodeRegistry, load: (i
     }),
   };
 }
+
+type Preview = ReturnType<typeof previewWorkflow>;
+type Trigger = Preview['triggers'][number];
+
+function effectKey(e: PublicationImpact) {
+  return JSON.stringify([e.workflowId, e.revision, e.nodeId, e.phase, e.kind, e.method,
+    e.destination, e.mayRedirect, [...e.credentialRefs].sort()]);
+}
+
+function triggerCondition(trigger: Trigger | undefined) {
+  if (!trigger) return null;
+  const { nodeId, nodeName, type, path, schedule } = trigger;
+  return { nodeId, nodeName, type, path, schedule };
+}
+
+export function comparePreviews(active: Preview | null, draft: Preview) {
+  const before = new Map(active?.triggers.map((t) => [t.nodeId, t]));
+  const after = new Map(draft.triggers.map((t) => [t.nodeId, t]));
+  const changes = [];
+  for (const id of new Set([...after.keys(), ...before.keys()])) {
+    const previous = before.get(id), next = after.get(id);
+    const previousEffects = new Map(previous?.effects.map((e) => [effectKey(e), e]));
+    const nextEffects = new Map(next?.effects.map((e) => [effectKey(e), e]));
+    const added = [...nextEffects].filter(([key]) => !previousEffects.has(key)).map(([, effect]) => effect);
+    const removed = [...previousEffects].filter(([key]) => !nextEffects.has(key)).map(([, effect]) => effect);
+    const conditionChanged = !previous || !next || previous.type !== next.type || previous.path !== next.path ||
+      JSON.stringify(previous.schedule) !== JSON.stringify(next.schedule);
+    if (conditionChanged || added.length || removed.length)
+      changes.push({ before: triggerCondition(previous), after: triggerCondition(next), conditionChanged, added, removed });
+  }
+  return changes;
+}

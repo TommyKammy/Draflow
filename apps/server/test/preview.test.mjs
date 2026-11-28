@@ -260,3 +260,79 @@ test('replaced nodes without wait or journal hooks do not dispatch children or r
   assert.deepEqual(h.compensationInfo(run).steps, []);
   assert.deepEqual(requests, []);
 });
+
+test('order comparison uses the active tenant revision, predicts the switch, and has no dispatch side effects', async (t) => {
+  const flow = fixture('order-sync'), draft = structuredClone(flow);
+  const send = draft.nodes.find((n) => n.id === 'send');
+  send.parameters.url = 'https://shipping.example.test/totals?token=PRIVATE';
+  send.credentials.httpAuth = 'shipping';
+  draft.nodes.find((n) => n.id === 'timer').disabled = true;
+  const grants = [
+    ['orders-read', 'read', 'https://orders.example.test'],
+    ['orders-send', 'send', 'https://orders.example.test'],
+    ['shipping', 'send', 'https://shipping.example.test'],
+  ].map(([id, nodeId, origin]) => ({ id, nodeId, origin, workflowId: flow.id, kind: 'bearer' }));
+  const { requests, options } = receiver(grants, () => [{ approved: true, amount: 7 }]);
+  const { h, operate } = setup(t, options);
+  const query = { op: 'preview', compareActive: true, workflow: draft };
+  for (const role of ['operator', 'viewer']) assert.throws(() => operate(role, query), (e) => e.status === 403);
+  h.activate(flow.id, h.publish(flow));
+  assert.equal(h.publish(draft), 2); // Published, still inactive.
+  const before = h.stats();
+  const diff = operate('publisher', query);
+  assert.deepEqual(diff, operate('admin', query));
+  assert.equal(diff.activeRevision, 1);
+  assert.ok(!JSON.stringify(diff).includes('PRIVATE'));
+  const [hook, timer] = diff.changes;
+  assert.equal(hook.after.nodeId, 'hook');
+  assert.equal(hook.conditionChanged, false);
+  assert.deepEqual(hook.removed.map(expectedRequest), [['POST', 'https://orders.example.test/totals', 'Bearer token-orders-send']]);
+  assert.deepEqual(hook.added.map(expectedRequest), [['POST', 'https://shipping.example.test/totals', 'Bearer token-shipping']]);
+  assert.equal(timer.before.nodeId, 'timer');
+  assert.equal(timer.after, null);
+  assert.deepEqual(timer.removed.map((e) => e.nodeId), ['read', 'send']);
+  assert.deepEqual(h.stats(), before);
+  assert.deepEqual(requests, []);
+  assert.deepEqual(operate('publisher', { op: 'audit' }), []);
+  assert.deepEqual(await h.history.list(flow.id), []);
+  const fresh = setup(t).h.comparePublication(draft);
+  assert.equal(fresh.activeRevision, null);
+  assert.equal(fresh.changes[0].before, null);
+  const dispatch = async () => {
+    const id = h.accept(flow.id, 'hook', { items: [{ json: {} }] });
+    await until(() => h.receipt(id).outcome === 'success');
+    return requests.splice(0).filter(([method]) => method === 'POST');
+  };
+  assert.deepEqual(await dispatch(), hook.removed.map(expectedRequest));
+  h.activate(flow.id, 2);
+  assert.deepEqual(await dispatch(), hook.added.map(expectedRequest));
+  const renamed = structuredClone(draft);
+  renamed.nodes.find((n) => n.id === 'send').name = 'Other label';
+  assert.deepEqual(h.comparePublication(renamed).changes, []);
+  const moved = structuredClone(draft);
+  moved.nodes.find((n) => n.id === 'hook').parameters.path = 'new-orders';
+  const [changed] = h.comparePublication(moved).changes;
+  assert.deepEqual([changed.before.path, changed.after.path, changed.added, changed.removed],
+    ['/webhook/orders', '/webhook/new-orders', [], []]);
+  h.deactivate(flow.id);
+  assert.equal(h.comparePublication(draft).activeRevision, null);
+});
+
+test('comparison distinguishes pinned child and compensation revisions', (t) => {
+  const { h } = setup(t);
+  const child = fixture('process-order-batch'), parent = fixture('order-import');
+  h.publish(child);
+  h.activate(parent.id, h.publish(parent));
+  child.nodes[1].parameters.url = 'https://sink.example.test/changed';
+  parent.nodes[1].parameters.revision = h.publish(child);
+  const [page] = h.comparePublication(parent).changes;
+  assert.deepEqual(page.removed.map((e) => [e.phase, e.workflowId, e.revision]), [['execution', child.id, 1]]);
+  assert.deepEqual(page.added.map((e) => [e.phase, e.workflowId, e.revision]), [['execution', child.id, 2]]);
+  let draft;
+  publishCompensations(h, false, false, (flow) => { draft = structuredClone(flow); });
+  child.id = 'refund';
+  draft.nodes.find((n) => n.id === 'charge').parameters.compensation.revision = h.publish(child);
+  const [undo] = h.comparePublication(draft).changes;
+  assert.deepEqual(undo.removed.map((e) => [e.phase, e.workflowId, e.revision]), [['compensation', 'refund', 1]]);
+  assert.deepEqual(undo.added.map((e) => [e.phase, e.workflowId, e.revision]), [['compensation', 'refund', 2]]);
+});

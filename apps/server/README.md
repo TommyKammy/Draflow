@@ -363,6 +363,26 @@ For a host-defined node, optionally declare `meta.externalEffect` as `read`, `wr
 cannot override this declaration. Large previews fail as a whole at 50,000 node visits
 or 1 MiB of effect records.
 
+#### Compare a draft with the active revision
+
+Select **稼働版と比較** before **影響を確認**, or send
+`{"op":"preview","compareActive":true,"workflow":...}` as a publisher or admin.
+Hosts can call `host.comparePublication(workflow)`. The comparison captures the
+active revision of the same workflow in the current organization. A newer,
+inactive publication does not change the baseline. With no active revision,
+`activeRevision` is null and every draft trigger and effect is an addition.
+
+Each entry in `changes` describes one trigger. `before` and `after` describe
+its previous and proposed start conditions. A missing side is null.
+`removed` and `added` list the old and new effects, including pinned child
+revisions and compensation. A destination or credential replacement appears on
+both sides. Trigger and node IDs establish identity, so renaming or reordering
+nodes alone produces no change. This comparison covers the preview's visible
+fields. Input filters, expressions behind dynamic values, query strings,
+headers, bodies and custom implementation details can change behavior without
+changing those fields. The comparison is read-only and reflects the reported
+baseline revision at the time of the request.
+
 ### Requests and recovery
 
 Use `Authorization: Bearer <token>` on `/operator/<encoded-organization>/api`. Read via GET query parameters. Supported read operations are `session`, `list`, `detail` (id), `history` (workflow), `audit`, and `metrics`. The list accepts exact workflow/run IDs, revision, status and inclusive `from`/`to` epoch milliseconds. It returns up to 50 rows ordered by admission time and run ID. Supply the last row's `acceptedAt` as `before` and its run ID as `afterId` for the next page. History and execution details expose metadata; request bodies, upstream results, secret values and wait tokens are omitted. External operation keys are visible for looking up upstream receipts.
