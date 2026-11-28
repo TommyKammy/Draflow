@@ -380,12 +380,12 @@ export class NodeHost {
 
   comparePublication(workflow: unknown) {
     const draft = this.previewDraft(workflow);
-    const revision = this.#ledger.activeRevision(draft.id);
+    const { revision, registration } = this.#ledger.reviewBaseline(draft.id);
     const load = (id: string, rev: number) => this.#ledger.publication(id, rev).workflow;
     const active = revision === null ? null : load(draft.id, revision);
     const changes = compareWorkflows(active, draft, this.options.registry, load);
     const review = createHash('sha256')
-      .update(JSON.stringify([this.organization, revision, draft, changes]))
+      .update(JSON.stringify([this.organization, revision, registration, draft, changes]))
       .digest('hex');
     return { workflowId: draft.id, workflowName: draft.name, activeRevision: revision, changes, review };
   }

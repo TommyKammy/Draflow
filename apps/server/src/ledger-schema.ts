@@ -3,6 +3,13 @@ export const deliverySchema = `CREATE TABLE IF NOT EXISTS deliveries (
   runId TEXT NOT NULL REFERENCES runs(runId), PRIMARY KEY(workflowId, triggerNodeId, eventKey, source)
 );`;
 
+// Keep the last removed registration so an inactive workflow still has a comparison identity.
+export const inactiveRegistrationTable = `CREATE TABLE IF NOT EXISTS inactive_registrations (
+  workflowId TEXT PRIMARY KEY, registration TEXT NOT NULL
+);`;
+export const rememberRegistration = `INSERT INTO inactive_registrations(workflowId,registration)
+  VALUES(OLD.workflowId,OLD.registration) ON CONFLICT(workflowId) DO UPDATE SET registration=excluded.registration;`;
+
 export const temporaryWebhookTable = `CREATE TEMP TABLE testWebhooks (
           path TEXT PRIMARY KEY, workflowId TEXT NOT NULL, revision INTEGER NOT NULL,
           triggerNodeId TEXT NOT NULL, expiresAt INTEGER NOT NULL, document TEXT NOT NULL

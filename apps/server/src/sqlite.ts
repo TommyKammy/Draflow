@@ -6,7 +6,7 @@ import {
 } from './business.js';
 import { operatorSchema, sqliteReviewClock, seedReviewClock } from './operator-schema.js';
 import { OperatorStore } from './operator-store.js';
-import { deliverySchema, ledgerTables, sqliteTriggers } from './ledger-schema.js';
+import { deliverySchema, inactiveRegistrationTable, ledgerTables, rememberRegistration, sqliteTriggers } from './ledger-schema.js';
 import { PostgresDatabase, validateOrganization, type SharedOptions } from './postgres.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
@@ -112,6 +112,8 @@ export class ExecutionLedger {
             "ALTER TABLE active ADD COLUMN registration TEXT NOT NULL DEFAULT ''; UPDATE active SET registration=lower(hex(randomblob(16)))",
           );
         }
+        this.#db.exec(inactiveRegistrationTable + `CREATE TRIGGER IF NOT EXISTS remember_deactivation
+          AFTER DELETE ON active BEGIN ${rememberRegistration} END;`);
         if (!this.#prepare("SELECT 1 FROM pragma_table_info('pageRuns') WHERE name='skipped'").get()) {
           this.#db.exec('ALTER TABLE pageRuns ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0');
         }
@@ -220,9 +222,11 @@ export class ExecutionLedger {
     });
   }
 
-  activeRevision(id: string): number | null {
-    const row = this.#prepare('SELECT revision FROM active WHERE workflowId=?').get(id);
-    return row ? Number(row.revision) : null;
+  reviewBaseline(id: string) {
+    const row = this.#prepare(`SELECT a.revision, COALESCE(a.registration,i.registration) AS registration
+      FROM (SELECT ? AS workflowId) w LEFT JOIN active a USING(workflowId)
+      LEFT JOIN inactive_registrations i USING(workflowId)`).get(id)!;
+    return { revision: row.revision === null ? null : Number(row.revision), registration: row.registration };
   }
 
   publication(id: string, revision: number): PublishedWorkflow {

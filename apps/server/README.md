@@ -403,7 +403,8 @@ const revision = host.operate(publisher, command);
 
 Authenticated HTTP clients POST the same commands to their organization's operator API.
 The host rechecks the organization, normalized draft (including parameters omitted from
-the display), active revision and displayed changes under the ledger's write lock.
+the display), activation registration and displayed changes under the ledger's write lock.
+A switch back to an earlier revision or to inactivity also invalidates the comparison.
 A stale comparison returns HTTP 409 and requires a fresh comparison. Publication,
 activation and the success audit record commit together. An activation error leaves
 the previous routes and revision in service. Retry the identical command and request

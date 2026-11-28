@@ -6,8 +6,8 @@ import { ledgerTables } from './ledger-schema.js';
 import { PostgresDatabase, type SharedOptions } from './postgres.js';
 
 const tables = [...ledgerTables.matchAll(/CREATE TABLE IF NOT EXISTS (\w+)/g)].map((m) => m[1]!);
-// Optional on source ledgers created before the operator API or without an organization.
-const operatorTables = new Set([
+// Additive tables may be absent on older or organization-less source ledgers.
+const optionalTables = new Set([
   'business_publications',
   'business_receipts',
   'business_attempts',
@@ -16,6 +16,7 @@ const operatorTables = new Set([
   'operator_audit',
   'review_clock',
   'operator_alerts',
+  'inactive_registrations',
 ]);
 function identifier(name: string) {
   return '"' + name.replaceAll('"', '""') + '"';
@@ -41,7 +42,7 @@ export function migrateLedger(path: string, options: SharedOptions) {
       const previous = pg.raw('SELECT fingerprint FROM migration').rows[0];
       const hash = createHash('sha256');
       const counts: Record<string, number> = {};
-      for (const table of [...tables, ...operatorTables]) {
+      for (const table of [...tables, ...optionalTables]) {
         const t = identifier(table);
         if (!previous && pg.raw('SELECT 1 FROM ' + t + ' LIMIT 1').rows.length)
           throw Error('Destination must be empty');
@@ -49,7 +50,7 @@ export function migrateLedger(path: string, options: SharedOptions) {
           .prepare('PRAGMA table_info(' + t + ')')
           .all()
           .map((c) => String((c as { name: string }).name));
-        if (!columns.length && operatorTables.has(table)) continue;
+        if (!columns.length && optionalTables.has(table)) continue;
         if (!columns.length) throw Error('Missing Phase 6 table: ' + table);
         const ordered =
           pg.raw(

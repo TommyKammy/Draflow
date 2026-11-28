@@ -3,7 +3,8 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { Worker } from 'node:worker_threads';
 import { NodeRegistry } from '@draflow/core';
 import { standardNodes, noOpNode } from '@draflow/nodes';
 import { NodeHost } from '../dist/host.js';
@@ -535,4 +536,76 @@ test('failed reviewed activation rolls publication and routes back together', (t
   assert.equal(h.webhook('/webhook/reserved').workflowId, other.id);
   h.deactivate(other.id);
   assert.equal(deploy(), 2);
+});
+
+for (const initiallyActive of [true, false]) {
+  test('review expires after returning to the same ' + (initiallyActive ? 'revision' : 'inactive state'), (t) => {
+    const { h, operate } = setup(t);
+    const flow = fixture('order-sync');
+    const first = h.publish(flow);
+    if (initiallyActive) h.activate(flow.id, first);
+    const command = { op: 'release', target: flow.id, workflow: flow, request: randomUUID(), reason: 'release',
+      review: h.comparePublication(flow).review };
+    const second = h.publish(flow);
+    h.activate(flow.id, second);
+    if (initiallyActive) h.activate(flow.id, first);
+    else h.deactivate(flow.id);
+    assert.throws(() => operate('publisher', command), (e) => e.status === 409);
+    const current = h.comparePublication(flow);
+    assert.equal(current.activeRevision, initiallyActive ? first : null);
+    assert.equal(operate('publisher', { ...command, review: current.review, request: randomUUID() }), 3);
+  });
+}
+
+test('concurrent publishers and cross-intake retries commit one order revision and one success receipt', async (t) => {
+  const organization = randomUUID(), connectionString = process.env.DRAFLOW_TEST_POSTGRES;
+  const tokens = [randomUUID(), randomUUID()];
+  const accounts = tokens.map((token, i) => ({ organization, actor: 'publisher-' + i, role: 'publisher',
+    sha256: createHash('sha256').update(token).digest('hex') }));
+  const intake = async () => {
+    const worker = new Worker(new URL('./release-intake.mjs', import.meta.url), {
+      workerData: { organization, connectionString, accounts },
+    });
+    const [port] = await once(worker, 'message');
+    t.after(async () => {
+      const done = once(worker, 'exit');
+      worker.postMessage('close');
+      await done;
+    });
+    return 'http://127.0.0.1:' + port + '/operator/' + organization + '/api';
+  };
+  const left = await intake(), right = connectionString ? await intake() : left;
+  const post = async (url, i, body) => {
+    const response = await fetch(url, { method: 'POST', headers: {
+      authorization: 'Bearer ' + tokens[i], 'content-type': 'application/json',
+    }, body: JSON.stringify(body) });
+    return [response.status, await response.json()];
+  };
+  const flow = fixture('order-sync');
+  const prepare = async (url, i, path) => {
+    const workflow = structuredClone(flow);
+    workflow.nodes.find((n) => n.id === 'hook').parameters.path = path;
+    const [status, preview] = await post(url, i, { op: 'preview', compareActive: true, workflow });
+    assert.equal(status, 200);
+    return { op: 'release', reason: 'release', request: randomUUID(), target: workflow.id, workflow, review: preview.review };
+  };
+  const first = await prepare(left, 0, 'orders');
+  assert.deepEqual(await post(left, 0, first), [200, 1]);
+  const proposals = await Promise.all([prepare(left, 0, 'orders-a'), prepare(right, 1, 'orders-b')]);
+  const results = await Promise.all([post(left, 0, proposals[0]), post(right, 1, proposals[1])]);
+  const winner = results.findIndex(([status]) => status === 200);
+  assert.notEqual(winner, -1);
+  assert.deepEqual(results[winner], [200, 2]);
+  assert.equal(results[1 - winner][0], 409);
+  const command = proposals[winner];
+  assert.deepEqual(await Promise.all([post(left, winner, command), post(right, winner, command)]), [[200, 2], [200, 2]]);
+  assert.deepEqual(await post(right, 0, first), [200, 1]);
+  const [, active] = await post(right, winner, { op: 'preview', compareActive: true, workflow: command.workflow });
+  assert.equal(active.activeRevision, 2);
+  assert.deepEqual(active.changes, []);
+  const audit = await (await fetch(right + '?op=audit', { headers: { authorization: 'Bearer ' + tokens[winner] } })).json();
+  assert.equal(audit.length, 3);
+  assert.deepEqual(audit.filter((r) => r.request === command.request).map((r) => JSON.parse(r.changeinfo)),
+    [{ previousRevision: 1, revision: 2 }]);
+  assert.equal(audit.filter((r) => r.actor === accounts[1 - winner].actor && JSON.parse(r.result).status === 409).length, 1);
 });
