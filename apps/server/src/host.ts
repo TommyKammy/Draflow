@@ -41,6 +41,9 @@ interface HostOptions extends Omit<ExecutionEngineOptions, 'credentialFetch'> {
     project: string,
     revision: number,
   ) => Promise<{ status: 'prepared' | 'skipped' | 'denied' }>;
+  executeBusiness?: (organization: string, event: string, rule: string, run: string, project: string,
+    revision: number, probe: boolean, canStart: () => boolean) =>
+      Promise<{status: 'applied'|'prepared'|'skipped'|'denied'|'conflict'|'review'|'canceled'}>;
   httpAuth?: HttpAuth;
   maxHttpResponseBytes?: number;
   maxCallDepth?: number;
@@ -148,7 +151,7 @@ export class NodeHost {
       this.#latestCooldown = this.#ledger.latestCooldown();
       if (this.#executes()) this.#ledger.recover();
       const checked = new Set<string>();
-      for (const row of this.#ledger.requiredPublications(this.#executionLane())) {
+      for (const row of this.#ledger.requiredPublications(this.#executionLane(), !!options.executeBusiness)) {
         this.#checkPublication(
           this.#ledger.publication(String(row.workflowId), Number(row.revision)),
           checked,
@@ -606,7 +609,7 @@ export class NodeHost {
       const job = this.#ledger.claim(
         this.#parallel.size < this.#parallelLimit,
         this.#parallelLimit,
-        this.#executionLane(),
+        this.#executionLane(), !!this.options.executeBusiness,
       );
       if (!job) {
         this.#worker = undefined;
@@ -649,18 +652,47 @@ export class NodeHost {
     const publication = this.#ledger.publication(r.workflowId, r.revision);
     if (this.organization && r.workflowId.startsWith('business-') && this.#ledger.isBusinessRun(r.runId)) {
       const context = items[0]!.json;
-      const decision =
-        this.organization === context.organization
-          ? await this.options.prepareBusiness?.(
-              this.organization,
-              String(context.event),
-              String(context.rule),
-              r.runId,
-              String(context.project),
-              Number(context.revision),
-            )
-          : undefined;
-      if (!decision || (decision.status !== 'prepared' && decision.status !== 'skipped')) {
+      const args = [
+        this.organization,
+        String(context.event),
+        String(context.rule),
+        r.runId,
+        String(context.project),
+        Number(context.revision),
+      ] as const;
+      let decision;
+      if (this.organization === context.organization && context.apply === true) {
+        const canStart = () => {
+          this.#ledger.shared?.checkDispatch();
+          return !controller.signal.aborted && !this.#ledger.canceled(r.runId);
+        };
+        while (canStart()) {
+          const attempt = this.#ledger.nextBusinessAttempt(r.runId);
+          const probe = attempt > 3;
+          try {
+            decision = await this.options.executeBusiness?.(...args, probe, canStart);
+            break;
+          } catch (error) {
+            if (error instanceof OwnershipLost) throw error;
+            if (probe) {
+              decision = { status: 'review' };
+              break;
+            }
+            await new Promise((done) => setTimeout(done, 50 * attempt));
+          }
+        }
+        if (this.#ledger.canceled(r.runId) || decision?.status === 'canceled') {
+          this.#ledger.finishCanceled(r);
+          return;
+        }
+        if (decision?.status === 'review') {
+          this.#ledger.pauseBusiness(r.runId);
+          return;
+        }
+      } else if (this.organization === context.organization) {
+        decision = await this.options.prepareBusiness?.(...args);
+      }
+      if (!decision || !['prepared', 'applied', 'skipped'].includes(decision.status)) {
         this.#ledger.finish(
           r,
           {

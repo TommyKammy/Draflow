@@ -10,6 +10,8 @@ export interface BusinessDelivery {
   revision: number;
   proposal: JsonObject;
 }
+export const businessAttemptsSchema =
+  'CREATE TABLE IF NOT EXISTS business_attempts(run TEXT PRIMARY KEY REFERENCES runs(runId), attempts INTEGER NOT NULL);';
 export const businessSchema = `
 CREATE TABLE IF NOT EXISTS business_publications (workflow TEXT PRIMARY KEY, revision INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS business_receipts (delivery TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, run TEXT NOT NULL UNIQUE REFERENCES runs(runId));`;

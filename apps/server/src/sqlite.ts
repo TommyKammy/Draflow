@@ -1,4 +1,9 @@
-import { businessSchema, describeDelivery, type BusinessDelivery } from './business.js';
+import {
+  businessAttemptsSchema,
+  businessSchema,
+  describeDelivery,
+  type BusinessDelivery,
+} from './business.js';
 import { operatorSchema, sqliteReviewClock, seedReviewClock } from './operator-schema.js';
 import { OperatorStore } from './operator-store.js';
 import { deliverySchema, ledgerTables, sqliteTriggers } from './ledger-schema.js';
@@ -99,7 +104,9 @@ export class ExecutionLedger {
         ${ledgerTables}
         ${sqliteTriggers}`);
         if (organization)
-          this.#db.exec(businessSchema + operatorSchema + sqliteReviewClock + seedReviewClock);
+          this.#db.exec(
+            businessSchema + businessAttemptsSchema + operatorSchema + sqliteReviewClock + seedReviewClock,
+          );
         if (!this.#prepare("SELECT 1 FROM pragma_table_info('active') WHERE name='registration'").get()) {
           this.#db.exec(
             "ALTER TABLE active ADD COLUMN registration TEXT NOT NULL DEFAULT ''; UPDATE active SET registration=lower(hex(randomblob(16)))",
@@ -897,17 +904,22 @@ export class ExecutionLedger {
     this.#prepare("UPDATE runs SET state='queued' WHERE runId=?").run(id);
   }
 
-  #eligibleRun(lane: 'business' | 'ordinary' | 'all') {
-    return !this.#businessEnabled || lane === 'all'
-      ? ''
-      : `AND ${lane === 'ordinary' ? 'NOT ' : ''}EXISTS(SELECT 1 FROM business_receipts b WHERE b.run=r.runId)`;
+  #eligibleRun(lane: 'business' | 'ordinary' | 'all', live: boolean) {
+    if (!this.#businessEnabled) return '';
+    const kind =
+      lane === 'all'
+        ? ''
+        : `AND ${lane === 'ordinary' ? 'NOT ' : ''}EXISTS(SELECT 1 FROM business_receipts b WHERE b.run=r.runId)`;
+    return live || lane === 'ordinary'
+      ? kind
+      : kind + ' AND NOT EXISTS(SELECT 1 FROM business_attempts a WHERE a.run=r.runId)';
   }
 
-  requiredPublications(lane: 'business' | 'ordinary' | 'all') {
+  requiredPublications(lane: 'business' | 'ordinary' | 'all', live: boolean) {
     return this.#prepare(
       `${lane === 'business' ? '' : 'SELECT workflowId, revision FROM active UNION'}
        SELECT DISTINCT r.workflowId, r.revision FROM runs r
-       WHERE r.state IN ('queued','waiting','review') ${this.#eligibleRun(lane)}`,
+       WHERE r.state IN ('queued','waiting','review') ${this.#eligibleRun(lane, live)}`,
     ).all();
   }
 
@@ -1046,6 +1058,21 @@ export class ExecutionLedger {
     });
   }
 
+  nextBusinessAttempt(run: string) {
+    return this.#transaction(() => {
+      this.#prepare(
+        'INSERT INTO business_attempts VALUES(?,1) ON CONFLICT(run) DO UPDATE SET attempts=business_attempts.attempts+1',
+      ).run(run);
+      return Number(this.#prepare('SELECT attempts FROM business_attempts WHERE run=?').get(run)!.attempts);
+    });
+  }
+  pauseBusiness(run: string) {
+    this.#transaction(() => {
+      this.#prepare("UPDATE runs SET state='review' WHERE runId=?").run(run);
+      this.#recordPause(run);
+    });
+  }
+
   isBusinessRun(id: string) {
     return !!this.#prepare('SELECT 1 FROM business_receipts WHERE run=?').get(id);
   }
@@ -1070,6 +1097,7 @@ export class ExecutionLedger {
       const revision = stored ? Number(stored.revision) : publish(descriptor.document);
       if (!stored)
         this.#prepare('INSERT INTO business_publications VALUES(?,?)').run(descriptor.workflow, revision);
+      const apply = (d.proposal.definition as { apply?: boolean } | undefined)?.apply === true;
       const run = this.accept(
         descriptor.workflow,
         'event',
@@ -1077,6 +1105,7 @@ export class ExecutionLedger {
           items: [
             {
               json: {
+                apply,
                 organization: d.organization,
                 event: d.event,
                 rule: d.rule,
@@ -1091,6 +1120,7 @@ export class ExecutionLedger {
         () => {},
         revision,
       );
+      if (apply) this.#prepare('INSERT INTO business_attempts VALUES(?,0)').run(run);
       this.#prepare('INSERT INTO business_receipts VALUES(?,?,?)').run(
         descriptor.key,
         descriptor.fingerprint,
@@ -1195,7 +1225,7 @@ export class ExecutionLedger {
     ).run(target, until);
   }
 
-  claim(allowParallel = true, batchLimit = 4, lane: 'business' | 'ordinary' | 'all' = 'all') {
+  claim(allowParallel = true, batchLimit = 4, lane: 'business' | 'ordinary' | 'all' = 'all', live = true) {
     return this.#transaction(() => {
       if (this.shared) {
         const active = this.#prepare("SELECT count(*) AS n FROM runs WHERE state='running'").get()!;
@@ -1208,7 +1238,7 @@ export class ExecutionLedger {
       }
       const next = this.#prepare(
         `SELECT r.runId,r.payload FROM runs r LEFT JOIN readyAfter y ON r.runId=y.runId
-         WHERE r.state='queued' ${this.#eligibleRun(lane)} AND (? OR NOT EXISTS(
+         WHERE r.state='queued' ${this.#eligibleRun(lane, live)} AND (? OR NOT EXISTS(
            SELECT 1 FROM calls c JOIN pageRuns p ON p.runId=c.parent AND p.node=c.node AND p.visit=c.visit
            WHERE c.child=r.runId))
          AND NOT EXISTS(SELECT 1 FROM parallelWork w JOIN runs k ON k.runId=w.child
@@ -1356,6 +1386,8 @@ export class ExecutionLedger {
   }
 
   effects(id: string) {
+    if (this.#businessEnabled && this.get(id)?.state === 'review' && this.isBusinessRun(id))
+      return [{ nodeId: 'event', visit: 0, item: 0, key: id, mode: 'keyed', state: 'unknown' }];
     return this.#prepare(
       'SELECT nodeId,visit,item,key,mode,state FROM effects WHERE runId=? ORDER BY rowid',
     ).all(id);
@@ -1368,6 +1400,19 @@ export class ExecutionLedger {
     if (Buffer.byteLength(json) > 1024 * 1024) throw new Error('Reconciliation data exceeds 1 MiB');
     return this.#transaction(() => {
       if (this.get(id)?.state !== 'review') return false;
+      if (this.#businessEnabled && id === key && this.isBusinessRun(id)) {
+        if (this.canceled(id)) return false;
+        // An applied decision is verified at the receiver; it cannot manufacture a successful receipt.
+        if (decision !== 'applied')
+          this.#prepare('UPDATE business_attempts SET attempts=0 WHERE run=?').run(id);
+        this.#prepare("INSERT INTO transitions VALUES(?,'event',?,?)").run(
+          id,
+          this.#now(),
+          'reconciled:' + decision,
+        );
+        this.#prepare("UPDATE runs SET state='queued' WHERE runId=?").run(id);
+        return true;
+      }
       const op = this.#prepare(
         "SELECT mode,item FROM effects WHERE runId=? AND key=? AND state='unknown'",
       ).get(id, key);
@@ -1419,7 +1464,7 @@ export class ExecutionLedger {
     const { workflow } = this.publication(r.workflowId, r.revision);
     if (workflow.settings.saveExecutionData && workflow.settings.saveExecutionData !== 'all') return;
     const wait = this.waitInfo(id);
-    const tasks = executionTasks(this.continuation(id)!.checkpoint.runData);
+    const tasks = executionTasks(this.continuation(id)?.checkpoint.runData ?? {});
     const summary: ExecutionSummary = {
       id,
       workflowId: r.workflowId,

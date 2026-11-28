@@ -30,6 +30,7 @@ try {
     ...(process.env.DRAFLOW_POSTGRES_URL && {
       shared: { organization, connectionString: process.env.DRAFLOW_POSTGRES_URL },
     }),
+    executeBusiness: (...args) => work.executeAutomation(...args),
     prepareBusiness: (...args) => work.prepareAutomation(...args),
     onWorkerError: () => {
       process.exitCode = 1;

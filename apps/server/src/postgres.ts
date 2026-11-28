@@ -1,4 +1,4 @@
-import { businessSchema } from './business.js';
+import { businessAttemptsSchema, businessSchema } from './business.js';
 import { operatorSchema, postgresReviewClock, seedReviewClock } from './operator-schema.js';
 import { createRequire } from 'node:module';
 import { createHash, randomUUID } from 'node:crypto';
@@ -198,15 +198,19 @@ export class PostgresDatabase {
         // The default also supplies identities when importing Phase 6 active rows.
         this.raw(`ALTER TABLE active ADD COLUMN registration text NOT NULL DEFAULT gen_random_uuid()::text;
           UPDATE ledger_version SET version=2`);
-      } else if (version !== 2 && version !== 3 && version !== 4)
+      } else if (version !== 2 && version !== 3 && version !== 4 && version !== 5)
         throw Error('Unsupported shared ledger version');
       if (Number(version) < 3) {
         this.raw(identifiers(operatorSchema + postgresReviewClock + seedReviewClock));
         this.raw('UPDATE ledger_version SET version=3');
       }
-      if (version !== 4) {
+      if (Number(version) < 4) {
         this.raw(identifiers(businessSchema));
         this.raw('UPDATE ledger_version SET version=4');
+      }
+      if (Number(version) < 5) {
+        this.raw(identifiers(businessAttemptsSchema));
+        this.raw('UPDATE ledger_version SET version=5');
       }
       this.raw(identifiers(temporaryWebhookTable.replaceAll('INTEGER', 'BIGINT')));
       this.commit();
