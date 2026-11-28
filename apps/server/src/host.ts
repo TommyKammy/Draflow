@@ -148,7 +148,7 @@ export class NodeHost {
       this.#latestCooldown = this.#ledger.latestCooldown();
       if (this.#executes()) this.#ledger.recover();
       const checked = new Set<string>();
-      for (const row of this.#ledger.requiredPublications()) {
+      for (const row of this.#ledger.requiredPublications(this.#executionLane())) {
         this.#checkPublication(
           this.#ledger.publication(String(row.workflowId), Number(row.revision)),
           checked,
@@ -496,6 +496,9 @@ export class NodeHost {
     return this.#scheduleClock.arm(() => this.#tickSchedules(), delay);
   }
 
+  #executionLane() {
+    return this.options.businessOnly ? 'business' : this.options.prepareBusiness ? 'all' : 'ordinary';
+  }
   #executes() {
     return !['intake', 'scheduler'].includes(this.options.shared?.role ?? 'all');
   }
@@ -603,7 +606,7 @@ export class NodeHost {
       const job = this.#ledger.claim(
         this.#parallel.size < this.#parallelLimit,
         this.#parallelLimit,
-        this.options.businessOnly ? 'business' : this.options.prepareBusiness ? 'all' : 'ordinary',
+        this.#executionLane(),
       );
       if (!job) {
         this.#worker = undefined;

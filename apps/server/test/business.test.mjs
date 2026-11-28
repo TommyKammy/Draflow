@@ -161,8 +161,12 @@ test('ordinary and business workers leave incompatible jobs for their owner afte
   const first = ordinary();
   await until(() => host.receipt(first).outcome === 'success');
   assert.equal(host.receipt(business).state, 'queued');
-  await open({ businessOnly: true, prepareBusiness: async () => ({ status: 'prepared' }) });
   const second = ordinary();
+  await open({
+    businessOnly: true,
+    registry: new NodeRegistry().registerAll(standardNodes),
+    prepareBusiness: async () => ({ status: 'prepared' }),
+  });
   await until(() => host.receipt(business).outcome === 'success');
   assert.equal(host.receipt(second).state, 'queued');
   await open({});

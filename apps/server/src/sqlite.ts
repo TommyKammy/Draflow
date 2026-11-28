@@ -897,10 +897,17 @@ export class ExecutionLedger {
     this.#prepare("UPDATE runs SET state='queued' WHERE runId=?").run(id);
   }
 
-  requiredPublications() {
+  #eligibleRun(lane: 'business' | 'ordinary' | 'all') {
+    return !this.#businessEnabled || lane === 'all'
+      ? ''
+      : `AND ${lane === 'ordinary' ? 'NOT ' : ''}EXISTS(SELECT 1 FROM business_receipts b WHERE b.run=r.runId)`;
+  }
+
+  requiredPublications(lane: 'business' | 'ordinary' | 'all') {
     return this.#prepare(
-      `SELECT workflowId, revision FROM active UNION
-      SELECT workflowId, revision FROM runs WHERE state IN ('queued','waiting','review')`,
+      `${lane === 'business' ? '' : 'SELECT workflowId, revision FROM active UNION'}
+       SELECT DISTINCT r.workflowId, r.revision FROM runs r
+       WHERE r.state IN ('queued','waiting','review') ${this.#eligibleRun(lane)}`,
     ).all();
   }
 
@@ -1199,13 +1206,9 @@ export class ExecutionLedger {
         ).get()!;
         allowParallel = allowParallel && Number(batches.n) < batchLimit;
       }
-      const eligible =
-        !this.#businessEnabled || lane === 'all'
-          ? ''
-          : `AND ${lane === 'ordinary' ? 'NOT ' : ''}EXISTS(SELECT 1 FROM business_receipts b WHERE b.run=r.runId)`;
       const next = this.#prepare(
         `SELECT r.runId,r.payload FROM runs r LEFT JOIN readyAfter y ON r.runId=y.runId
-         WHERE r.state='queued' ${eligible} AND (? OR NOT EXISTS(
+         WHERE r.state='queued' ${this.#eligibleRun(lane)} AND (? OR NOT EXISTS(
            SELECT 1 FROM calls c JOIN pageRuns p ON p.runId=c.parent AND p.node=c.node AND p.visit=c.visit
            WHERE c.child=r.runId))
          AND NOT EXISTS(SELECT 1 FROM parallelWork w JOIN runs k ON k.runId=w.child
