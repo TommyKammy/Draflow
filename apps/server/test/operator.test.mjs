@@ -62,6 +62,62 @@ const command = (op, target, extra = {}) => ({
   ...extra,
 });
 
+test('event resume disappears at its deadline before the scheduler settles the wait', async (t) => {
+  let now = Date.now();
+  const organization = randomUUID();
+  const h = new NodeHost(':memory:', {
+    organization, registry, scheduleClock: { now: () => now, arm: () => () => {} },
+    ...(process.env.DRAFLOW_TEST_POSTGRES && {
+      shared: { organization, connectionString: process.env.DRAFLOW_TEST_POSTGRES, role: 'worker', pollMs: 50 },
+    }),
+  });
+  t.after(() => h.close());
+  const wait = structuredClone(flow);
+  const dueAt = now + 60000;
+  wait.nodes.push({ ...write, id: 'wait', type: 'draflow.wait', typeVersion: 1, parameters: { mode: 'event', dueAt } });
+  wait.connections = [{ id: 'edge', from: { node: 'schedule', port: 'main', index: 0 }, to: { node: 'wait', port: 'main', index: 0 } }];
+  h.activate(wait.id, h.publish(wait));
+  const id = h.accept(wait.id, 'schedule', { items: [{ json: {} }] });
+  await until(() => h.receipt(id).state === 'waiting');
+  const detail = () => h.operate(identity(h), { op: 'detail', id });
+  now = dueAt - 1;
+  const before = detail();
+  assert.ok(before.guidance.actions.some((a) => a.op === 'resume'));
+  now = dueAt;
+  assert.throws(() => h.operate(identity(h), command('resume', id, { version: before.version })), (e) => e.status === 409);
+  assert.deepEqual(detail().guidance, { reason: 'eventExpired', actions: [{ op: 'cancel' }] });
+});
+
+test('recovery candidates require the pinned compensation child to be installed on this host', async (t) => {
+  const {
+    hosts: [original], dir,
+  } = setup(t);
+  compensationFlow(original);
+  const id = accept(original);
+  await until(() => original.receipt(id).outcome === 'error');
+  const detail = (h) => h.operate(identity(h), { op: 'detail', id });
+  const before = detail(original);
+  assert.deepEqual(before.guidance.actions.map((a) => a.op), ['redrive', 'compensate']);
+  original.deactivate('order-import');
+  await original.close();
+  const organization = original.organization;
+  const h = new NodeHost(join(dir, 'alpha'), {
+    organization,
+    registry: new NodeRegistry().registerAll(standardNodes.filter((n) => n.type !== 'draflow.childInput')),
+    ...(process.env.DRAFLOW_TEST_POSTGRES && {
+      shared: { organization, connectionString: process.env.DRAFLOW_TEST_POSTGRES, role: 'intake' },
+    }),
+  });
+  t.after(() => h.close());
+  const current = detail(h);
+  const stale = command('compensate', id, { version: before.version });
+  assert.throws(() => h.operate(identity(h), stale), (err) => err.status === 409);
+  for (const { op, failure } of before.guidance.actions)
+    assert.throws(() => h.operate(identity(h), command(op, id, { version: current.version, failure })),
+      /requires draflow.childInput@1/);
+  assert.deepEqual(current.guidance, { reason: 'publicationUnavailable', actions: [] });
+});
+
 test('authorization on every request, across organizations and roles', async (t) => {
   const { hosts } = setup(t);
   const accounts = [],
@@ -162,12 +218,25 @@ test('reconciliation and compensation requests are durable and apply once', asyn
   const run = invoke(command('start', reconciliation.id, { trigger: 'schedule' }));
   await until(() => h.receipt(run).state === 'review');
   const detail = invoke({ op: 'detail', id: run });
+  assert.equal(detail.guidance.reason, 'review');
+  assert.deepEqual(detail.guidance.actions, [
+    { op: 'reconcile', key: detail.effects[0].key, node: n.id, decisions: ['applied', 'notApplied'] },
+    { op: 'cancel' },
+  ]);
+  assert.deepEqual(h.operate(identity(h, 'viewer'), { op: 'detail', id: run }).guidance,
+    { reason: 'review', actions: [] });
   const action = command('reconcile', run, {
     version: detail.version,
     key: detail.effects[0].key,
     decision: 'applied',
     reason: 'receiver-confirmed',
   });
+  const operator = identity(h, 'operator');
+  invoke(command('membership', operator.actor, { policy: { role: 'operator', grants: ['reconcile'] } }));
+  assert.deepEqual(h.operate(operator, { op: 'detail', id: run }).guidance, detail.guidance);
+  invoke(command('membership', operator.actor, { policy: { role: 'operator' } }));
+  assert.throws(() => h.operate(operator, action), (error) => error.status === 403);
+  assert.deepEqual(h.operate(operator, { op: 'detail', id: run }).guidance.actions, [{ op: 'cancel' }]);
   assert.ok(invoke(action));
   assert.ok(invoke(action));
   assert.throws(
@@ -175,6 +244,7 @@ test('reconciliation and compensation requests are durable and apply once', asyn
     (e) => e.status === 409,
   );
   await until(() => h.receipt(run).outcome === 'success');
+  assert.deepEqual(invoke({ op: 'detail', id: run }).guidance, { reason: 'success', actions: [] });
   compensationFlow(h);
   const root = accept(h);
   await until(() => h.receipt(root).outcome === 'error');
@@ -409,6 +479,9 @@ test('audit write failure rolls back publication and an accepted redrive survive
   const run = accept(h);
   await until(() => h.receipt(run).outcome === 'error');
   const before = h.operate(identity(h), { op: 'detail', id: run });
+  assert.equal(before.guidance.reason, 'recoverableFailure');
+  assert.ok(before.guidance.actions.some((a) => a.op === 'redrive' &&
+    a.failure === before.recovery[0].failure && a.node === before.recovery[0].node));
   const retry = command('redrive', run, { version: before.version, failure: before.recovery[0].failure });
   available = true;
   const attempt = h.operate(identity(h), retry);
@@ -517,6 +590,9 @@ test('a publisher pins children locally and an operator resumes or cancels only 
     h.operate(identity(h, 'publisher'), command('activate', wait.id, { revision: publish(wait) }));
     const id = h.operate(identity(h, 'operator'), command('start', wait.id, { trigger: 'schedule' }));
     await until(() => h.receipt(id).state === 'waiting');
+    assert.deepEqual(h.operate(identity(h, 'operator'), { op: 'detail', id }).guidance, {
+      reason: 'awaitingEvent', actions: [{ op: 'resume' }, { op: 'cancel' }],
+    });
     runs.push(id);
   }
   assert.equal(sends.length, 2);
@@ -629,6 +705,7 @@ test('status filters distinguish a throttled page and expose compensation failur
     })[0].runId,
     throttled,
   );
+  assert.deepEqual(read({ op: 'detail', id: throttled }).guidance, { reason: 'throttled', actions: [] });
   assert.equal(read({ op: 'list', status: 'waiting' }).length, 0);
   h.cancel(throttled);
   compensationFlow(h);
@@ -646,6 +723,16 @@ test('status filters distinguish a throttled page and expose compensation failur
   await until(() => h.compensationInfo(root).state === 'manual');
   assert.equal(read({ op: 'list', status: 'manual' })[0].outcome, 'error');
   assert.equal(read({ op: 'metrics' }).compensationFailures, 1);
+  const manual = h.operate(identity(h), { op: 'detail', id: root });
+  const failure = manual.compensation.steps.find((step) => step.status === 'failed').failure;
+  assert.deepEqual(manual.guidance, { reason: 'manual', actions: [{ op: 'retryCompensation', failure }] });
+  const retry = command('retryCompensation', root, { failure, version: manual.version });
+  assert.throws(() => h.operate(identity(h, 'viewer'), retry), (err) => err.status === 403);
+  h.operate(identity(h), command('credentials', 'release', { enabled: true }));
+  const attempt = h.operate(identity(h), retry);
+  await until(() => h.compensationInfo(root).state === 'compensated');
+  assert.equal(h.operate(identity(h), retry), attempt);
+  assert.deepEqual(h.operate(identity(h), { op: 'detail', id: root }).guidance.actions, []);
 });
 
 test('operator start and trigger deliveries have separate idempotency domains', async (t) => {

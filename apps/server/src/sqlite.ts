@@ -1404,6 +1404,11 @@ export class ExecutionLedger {
     ).all(id);
   }
 
+  withinKeyedRetryWindow(id: string, item: number) {
+    const change = this.#prepare('SELECT firstSend,lifetime FROM syncWork WHERE child=? AND item=?').get(id, item);
+    return change?.firstSend == null || this.#now() < Number(change.firstSend) + Number(change.lifetime);
+  }
+
   reconcile(id: string, key: string, decision: Reconciliation, result: JsonObject) {
     if (!['applied', 'notApplied', 'retryKeyed'].includes(decision))
       throw new Error('Invalid reconciliation');
@@ -1427,18 +1432,11 @@ export class ExecutionLedger {
       const op = this.#prepare(
         "SELECT mode,item FROM effects WHERE runId=? AND key=? AND state='unknown'",
       ).get(id, key);
-      if (!op || (decision === 'retryKeyed' && (op.mode !== 'keyed' || this.canceled(id)))) return false;
-      const change = this.#prepare('SELECT firstSend,lifetime FROM syncWork WHERE child=? AND item=?').get(
-        id,
-        Number(op.item),
-      );
-      if (
-        decision === 'retryKeyed' &&
-        change?.firstSend != null &&
-        this.#now() >= Number(change.firstSend) + Number(change.lifetime)
-      )
+      if (!op) return false;
+      if (decision === 'retryKeyed' &&
+          (op.mode !== 'keyed' || this.canceled(id) || !this.withinKeyedRetryWindow(id, Number(op.item))))
         return false;
-      if (decision === 'notApplied' && change)
+      if (decision === 'notApplied')
         this.#prepare('UPDATE syncWork SET firstSend=NULL WHERE child=? AND item=?').run(id, Number(op.item));
       // A keyed retry keeps the unknown state, original fingerprint and key.
       if (decision !== 'retryKeyed') {

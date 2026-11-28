@@ -6,11 +6,21 @@ import { createOperatorServer } from '../../server/dist/operator-http.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
+function hostOptions(organization) {
+  const connectionString = process.env.DRAFLOW_TEST_POSTGRES;
+  return {
+    organization,
+    registry: new NodeRegistry().registerAll(standardNodes),
+    ...(connectionString && { shared: { organization, connectionString, pollMs: 50 } }),
+  };
+}
+
 test('operators reconcile the same delivery in two tabs; a viewer can inspect the outcome', async ({
   context,
 }) => {
+  const organization = randomUUID();
   const grants = ['operator', 'operator', 'viewer'].map((role, i) => ({
-    organization: 'orders',
+    organization,
     role,
     actor: 'person' + i,
     token: randomUUID(),
@@ -18,8 +28,7 @@ test('operators reconcile the same delivery in two tabs; a viewer can inspect th
   }));
   let sends = 0;
   const h = new NodeHost(':memory:', {
-    organization: 'orders',
-    registry: new NodeRegistry().registerAll(standardNodes),
+    ...hostOptions(organization),
     fetch: async () => {
       sends++;
       throw Error('private response');
@@ -58,7 +67,7 @@ test('operators reconcile the same delivery in two tabs; a viewer can inspect th
         );
       }
       await p.goto(url);
-      await p.getByLabel('組織 ID').fill('orders');
+      await p.getByLabel('組織 ID').fill(organization);
       await p.getByLabel('アクセストークン').fill(account.token);
       await p.getByLabel('アクセストークン').press('Enter');
       await p.getByRole('combobox', { name: '状態', exact: true }).selectOption('review');
@@ -69,12 +78,14 @@ test('operators reconcile the same delivery in two tabs; a viewer can inspect th
     const [first, second, viewer] = pages;
     await expect(viewer.getByRole('region', { name: '稼働状況' })).toContainText('最終ハートビート');
     await expect(viewer.locator('#monitorError')).toBeHidden();
+    await expect(viewer.locator('#record')).toContainText('外部操作の結果が不明');
     await expect(viewer.getByRole('button', { name: '配送結果を照合' })).toHaveCount(0);
     await second.getByRole('combobox', { name: '受信先の確認結果' }).selectOption('notApplied');
     await first.getByRole('button', { name: '配送結果を照合' }).press('Enter');
     await expect(first.getByRole('status')).toContainText('操作を記録');
     await second.getByRole('button', { name: '配送結果を照合' }).press('Enter');
     await expect(second.getByRole('status')).toContainText('最新の状態');
+    await expect(second.getByRole('button', { name: '配送結果を照合' })).toHaveCount(0);
     await expect.poll(() => h.receipt(id).outcome).toBe('success');
     await viewer.getByRole('button', { name: '詳細を更新' }).press('Enter');
     await expect(viewer.locator('#record')).toContainText('成功');
@@ -91,6 +102,45 @@ test('operators reconcile the same delivery in two tabs; a viewer can inspect th
       srv.close(r);
       srv.closeAllConnections();
     });
+    await h.close();
+  }
+});
+
+test('an operator refreshing an expired event wait sees the deadline and can still cancel', async ({ page }) => {
+  const organization = randomUUID(), token = randomUUID();
+  let now = Date.now();
+  const dueAt = now + 60000;
+  const h = new NodeHost(':memory:', {
+    ...hostOptions(organization),
+    scheduleClock: { now: () => now, arm: () => () => {} },
+  });
+  const srv = createOperatorServer([h], () => [{
+    organization, actor: 'oncall', role: 'operator', sha256: createHash('sha256').update(token).digest('hex'),
+  }]);
+  try {
+    const flow = JSON.parse(readFileSync(new URL('../../../examples/order-import.json', import.meta.url)));
+    flow.nodes[1] = { ...flow.nodes[1], type: 'draflow.wait', typeVersion: 1, parameters: { mode: 'event', dueAt } };
+    h.activate(flow.id, h.publish(flow));
+    const id = h.accept(flow.id, 'schedule', { items: [{ json: {} }] });
+    await expect.poll(() => h.receipt(id).state).toBe('waiting');
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+    await page.goto('http://127.0.0.1:' + srv.address().port + '/operator/');
+    await page.getByLabel('組織 ID').fill(organization);
+    await page.getByLabel('アクセストークン').fill(token);
+    await page.getByLabel('アクセストークン').press('Enter');
+    await page.getByRole('link', { name: flow.id, exact: true }).press('Enter');
+    const resume = page.getByRole('button', { name: '待機を再開' });
+    await expect(resume).toBeVisible();
+    now = dueAt;
+    await resume.press('Enter');
+    await expect(page.getByRole('status')).toContainText('最新の状態');
+    await expect(resume).toHaveCount(0);
+    await expect(page.locator('#record')).toContainText('イベントの受付期限を過ぎました');
+    await page.getByRole('button', { name: '取消', exact: true }).press('Enter');
+    await expect.poll(() => h.receipt(id).outcome).toBe('canceled');
+  } finally {
+    srv.closeAllConnections();
+    await new Promise((resolve) => srv.close(resolve));
     await h.close();
   }
 });

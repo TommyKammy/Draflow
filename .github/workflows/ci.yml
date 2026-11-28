@@ -43,6 +43,14 @@ jobs:
   browser:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_PASSWORD: local-ci-only
+        ports:
+          - 5432:5432
+        options: --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 15
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -56,6 +64,10 @@ jobs:
       - run: pnpm build
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm test:browser
+      - name: Operator Console against PostgreSQL
+        run: pnpm exec playwright test operator.spec.mjs
+        env:
+          DRAFLOW_TEST_POSTGRES: postgres://postgres:local-ci-only@localhost:5432/postgres
       - run: pnpm bench:canvas
 
   shared-ledger:
@@ -92,7 +104,7 @@ jobs:
       - run: node --test --test-name-pattern="parent cancellation immediately|uncertain manual delivery|delayed credential lookup|late duplicate redrive|parallel cancellation|failed page GET" apps/server/test/composition.test.mjs apps/server/test/sync.test.mjs
         env:
           DRAFLOW_TEST_SHARED: postgres://postgres:local-ci-only@localhost:5432/postgres
-      - run: node --test --test-name-pattern="incremental tokens|parallel pages retain|two parallel imports|parallel receiver cooldown|occupied host|first GET attempt|during rate-limit wait" apps/server/test/sync.test.mjs
+      - run: node --test --test-name-pattern="incremental tokens|parallel pages retain|two parallel imports|parallel receiver cooldown|occupied host|first GET attempt|during rate-limit wait|expired receiver keys" apps/server/test/sync.test.mjs
         env:
           DRAFLOW_TEST_SHARED: postgres://postgres:local-ci-only@localhost:5432/postgres
       - run: node --test apps/server/test/operator.test.mjs apps/server/test/business.test.mjs && node apps/server/test/operator-bench.mjs
