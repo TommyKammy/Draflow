@@ -206,6 +206,7 @@ test('publisher previews an order draft before publication', async ({ page }) =>
     await expect(result.getByText(/GET .*このホストの許可設定と一致 · 資格情報 orders-read/)).toHaveCount(2);
     await expect(result.getByText(/POST .*一致する送信許可なし · 資格情報 orders-send/)).toHaveCount(2);
     await expect(result.getByText(/資格情報なし（照合対象外）/)).toHaveCount(2);
+    await expect(result.getByText(/送信不可 · POST · https:.*totals · 認証設定の不一致 · 資格情報 orders-send/)).toHaveCount(2);
     await expect(page.getByRole('status')).toContainText('稼働版との差分と送信許可');
     await expect(result.getByRole('button', { name: '比較した下書きを公開・有効化' })).toHaveCount(0);
     await page.getByRole('button', { name: '影響を確認' }).press('Enter');

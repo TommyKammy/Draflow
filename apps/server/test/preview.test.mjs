@@ -437,7 +437,17 @@ test('order grant comparison predicts removed and added sends against the curren
   const diff = check();
   assert.equal(diff.activeRevision, 1);
   assert.deepEqual(diff, operate('admin', query));
-  assert.equal(setup(t).h.compareHttpGrants(draft).activeRevision, null);
+  const neighbor = setup(t);
+  assert.equal(neighbor.h.compareHttpGrants(draft).activeRevision, null);
+  const neighborFlow = structuredClone(flow);
+  neighborFlow.nodes.find((n) => n.id === 'send').parameters.url = 'https://neighbor.example.test/totals';
+  neighbor.h.publish(flow);
+  neighbor.h.activate(flow.id, neighbor.h.publish(neighborFlow));
+  const theirDiff = neighbor.operate('publisher', query);
+  assert.equal(theirDiff.activeRevision, 2);
+  assert.deepEqual(theirDiff.changes[0].removed.map((e) => [e.destination, e.grantStatus]),
+    [['https://neighbor.example.test/totals', 'noGrant']]);
+  assert.deepEqual(check(), diff);
   assert.ok(!('review' in diff));
   assert.ok(!JSON.stringify(diff).includes('PRIVATE'));
   assert.deepEqual(diff.changes.map((c) => c.after.nodeId), ['hook', 'timer']);
@@ -456,6 +466,12 @@ test('order grant comparison predicts removed and added sends against the curren
     return requests.splice(0);
   };
   assert.deepEqual((await run('hook', 'success')).at(-1), expectedRequest(diff.changes[0].removed[0]));
+  operate('admin', { op: 'credentials', target: 'orders-send', enabled: false, request: randomUUID(), reason: 'access-change' });
+  resolutions.length = 0;
+  assert.equal(check().changes[0].removed[0].grantStatus, 'unavailable');
+  assert.deepEqual([requests, resolutions], [[], []]);
+  assert.deepEqual((await run('hook', 'error')).map(([method]) => method), ['GET']);
+  assert.deepEqual(resolutions, ['orders-read']);
   grants.push({ ...grants[1], origin: next, id: 'shipping' });
   assert.equal(check().changes[0].added[0].grantStatus, 'matched');
   operate('admin', { op: 'credentials', target: 'shipping', enabled: false, request: randomUUID(), reason: 'access-change' });
@@ -465,6 +481,38 @@ test('order grant comparison predicts removed and added sends against the curren
   assert.deepEqual((await run('timer', 'error')).map(([method]) => method), ['GET']);
   operate('admin', { op: 'credentials', target: 'shipping', enabled: true, request: randomUUID(), reason: 'access-change' });
   assert.deepEqual((await run('timer', 'success')).at(-1), expectedRequest(diff.changes[0].added[0]));
+});
+
+test('grant comparison distinguishes changed destinations and refs even when both versions are blocked', async (t) => {
+  const flow = singleRequest(), read = flow.nodes[1];
+  const { requests, options } = receiver([], () => ({}));
+  const resolutions = [];
+  options.httpAuth.resolve = (id) => { resolutions.push(id); return 'secret'; };
+  const { h } = setup(t, options);
+  read.parameters.url = 'http://old.example.test/orders?PRIVATE';
+  h.activate(flow.id, h.publish(flow));
+  const draft = structuredClone(flow);
+  draft.nodes[1].parameters.url = 'https://PRIVATE:PRIVATE@new.example.test/orders#PRIVATE';
+  draft.nodes[1].credentials.httpAuth = 'next-ref';
+  const compare = () => h.compareHttpGrants(draft);
+  const report = compare();
+  assert.equal(report.changes.length, 1);
+  const fields = (effects) => effects.map((e) => [e.destination, e.credentialRefs, e.grantStatus]);
+  assert.deepEqual(fields(report.changes[0].removed), [['http://old.example.test/orders', ['orders-read'], 'invalidDestination']]);
+  assert.deepEqual(fields(report.changes[0].added), [['https://new.example.test/orders', ['next-ref'], 'invalidDestination']]);
+  assert.ok(!JSON.stringify(report).includes('PRIVATE'));
+  draft.nodes[1].parameters.authentication = 'none';
+  assert.equal(compare().changes[0].added[0].grantStatus, 'invalidBinding');
+  assert.deepEqual([requests, resolutions], [[], []]);
+  const run = async () => {
+    const id = h.accept(flow.id, 'hook', { items: [{ json: {} }] });
+    await until(() => h.receipt(id).state === 'finished');
+    assert.equal(h.receipt(id).outcome, 'error');
+  };
+  await run();
+  h.activate(flow.id, h.publish(draft));
+  await run();
+  assert.deepEqual([requests, resolutions], [[], []]);
 });
 
 test('comparison distinguishes pinned child and compensation revisions', (t) => {
@@ -492,6 +540,8 @@ test('comparison distinguishes pinned child and compensation revisions', (t) => 
 
 test('a second call site to the same pinned child adds a second delivery', async (t) => {
   const { requests, options } = receiver([], () => ({ id: 'receipt' }));
+  const resolutions = [];
+  options.httpAuth.resolve = (id) => { resolutions.push(id); return 'token-' + id; };
   const { h } = setup(t, options);
   const parent = fixture('order-import'), leaf = fixture('process-order-batch');
   h.publish(leaf);
@@ -504,7 +554,8 @@ test('a second call site to the same pinned child adds a second delivery', async
   edge.from.node = call.id;
   edge.to.node = 'again';
   parent.connections.push(edge);
-  const [change] = h.comparePublication(parent).changes;
+  const [change] = h.compareHttpGrants(parent).changes;
+  assert.deepEqual([requests, resolutions], [[], []]);
   assert.deepEqual(change.addedCalls.map((s) => [s.nodeId, s.workflowId, s.revision]), [['again', leaf.id, 1]]);
   assert.deepEqual([change.removedCalls, change.added, change.removed], [[], [], []]);
   const run = async () => {
@@ -522,6 +573,8 @@ test('compensation site changes predict automatic recovery and reversal order wi
   const { requests, options } = receiver([
     { workflowId: 'release', nodeId: 'register', origin: 'https://sink.example.test', id: 'release', kind: 'bearer' },
   ], () => ({ id: 'receipt' }));
+  const resolutions = [];
+  options.httpAuth.resolve = (id) => { resolutions.push(id); return 'token-' + id; };
   const { h } = setup(t, options);
   let draft;
   publishCompensations(h, false, false, (flow) => {
@@ -530,13 +583,14 @@ test('compensation site changes predict automatic recovery and reversal order wi
   });
   const policy = draft.nodes[1].parameters.compensation;
   policy.when.equals = 'private-edited';
-  const predicateDiff = h.comparePublication(draft);
+  const predicateDiff = h.compareHttpGrants(draft);
   assert.equal(predicateDiff.changes[0].addedCalls[0].conditional, true);
   assert.ok(!JSON.stringify(predicateDiff).includes('private-'));
   policy.when.equals = 'private-order';
   policy.order = 0;
   policy.onFailure = true;
-  const [change] = h.comparePublication(draft).changes;
+  const [change] = h.compareHttpGrants(draft).changes;
+  assert.deepEqual([requests, resolutions], [[], []]);
   const rules = (sites) => sites.map((s) => [s.nodeId, s.workflowId, s.order, s.onFailure]);
   assert.deepEqual(rules(change.removedCalls), [['reserve', 'release', 3, false]]);
   assert.deepEqual(rules(change.addedCalls), [['reserve', 'release', 0, true]]);

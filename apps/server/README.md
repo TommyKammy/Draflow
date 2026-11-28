@@ -398,6 +398,8 @@ Both sides use the answering host’s current policy, including the current avai
 of selected credential versions. The baseline is the active revision in the same
 organization. With no active revision the report shows additions only. Unchanged
 effects are omitted, even if an administrator changed a grant since activation.
+Blocked HTTP entries show the configured method, credential reference and sanitized
+HTTP destination when known, so edits to two blocked bindings remain visible.
 Use the standalone check to see every current status. The comparison includes
 trigger, pinned child and compensation changes and returns no release token.
 
