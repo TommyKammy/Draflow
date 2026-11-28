@@ -50,15 +50,20 @@ function httpEffect(node: WorkflowNode, installed: NodeType, workflowId: string,
   const auth = page ? undefined : httpParameter('authentication', 'none');
   const endpoint = page ? node.parameters.url : httpParameter('url', '');
   const url = typeof endpoint === 'string' ? URL.parse(endpoint) : null;
-  if (ref && endpoint !== dynamic && (!url || !permitsCredentialDestination(url)))
-    return { kind: 'blocked', credentialRefs: [], ...(check && { grantStatus: 'invalidDestination' }) };
-  const blocked = page ? ref === '' :
+  const invalidBinding = page ? ref === '' :
     (auth !== dynamic && auth !== 'none' && auth !== 'credential') ||
     (auth === 'credential' && !ref) ||
     (ref !== undefined && (!ref || auth === 'none' || node.typeVersion !== 2));
-  if (blocked) return { kind: 'blocked', credentialRefs: [], ...(check && { grantStatus: 'invalidBinding' }) };
+  const invalidDestination = ref && endpoint !== dynamic && (!url || !permitsCredentialDestination(url));
+  if (!check && (invalidBinding || invalidDestination)) return { kind: 'blocked', credentialRefs: [] };
   const raw = page ? 'GET' : httpParameter('method', 'GET');
   const method = typeof raw === 'string' && /^[a-z0-9!#$%&'*+.^_`|~-]+$/i.test(raw) ? raw.toUpperCase() : null;
+  const destination = url && ['http:', 'https:'].includes(url.protocol) ? url.origin + url.pathname : null;
+  const credentialRefs = ref ? [ref] : [];
+  if (invalidBinding || invalidDestination) return {
+    kind: 'blocked', method, ...(destination && { destination }), credentialRefs,
+    grantStatus: invalidBinding ? 'invalidBinding' : 'invalidDestination',
+  };
   let grantStatus: GrantStatus | undefined;
   if (check) {
     if (auth === dynamic) grantStatus = 'runtime';
@@ -69,8 +74,7 @@ function httpEffect(node: WorkflowNode, installed: NodeType, workflowId: string,
   }
   return {
     kind: method === null ? 'unknown' : ['GET', 'HEAD'].includes(method) ? 'read' : 'write',
-    method, destination: url && ['http:', 'https:'].includes(url.protocol) ? url.origin + url.pathname : null,
-    credentialRefs: ref ? [ref] : [],
+    method, destination, credentialRefs,
     ...(!page && !ref && { mayRedirect: true }),
     ...(grantStatus && { grantStatus }),
   };
@@ -212,7 +216,7 @@ type Trigger = Preview['triggers'][number];
 
 function effectKey(e: PublicationImpact) {
   return JSON.stringify([e.workflowId, e.revision, e.nodeId, e.phase, e.kind, e.method,
-    e.destination, e.mayRedirect, [...e.credentialRefs].sort()]);
+    e.destination, e.mayRedirect, e.grantStatus, [...e.credentialRefs].sort()]);
 }
 
 function triggerCondition(trigger: Trigger | undefined) {
@@ -225,10 +229,10 @@ function difference<T>(left: Map<string, T> | undefined, right: Map<string, T> |
   return Array.from(left ?? []).filter(([key]) => !right?.has(key)).map(([, value]) => value);
 }
 
-export function compareWorkflows(active: Workflow | null, proposed: Workflow, registry: NodeRegistry, load: Load) {
+export function compareWorkflows(active: Workflow | null, proposed: Workflow, registry: NodeRegistry, load: Load, check?: CheckGrant) {
   const previousSites: CallSites = new Map(), nextSites: CallSites = new Map();
-  const activePreview = active && previewWorkflow(active, registry, load, previousSites);
-  const draft = previewWorkflow(proposed, registry, load, nextSites);
+  const activePreview = active && previewWorkflow(active, registry, load, previousSites, check);
+  const draft = previewWorkflow(proposed, registry, load, nextSites, check);
   const before = new Map(activePreview?.triggers.map((t) => [t.nodeId, t]));
   const after = new Map(draft.triggers.map((t) => [t.nodeId, t]));
   const changes = [];

@@ -514,11 +514,12 @@ $('previewForm').onsubmit = async (event) => {
       throw Error('JSON 形式を確認してください。');
     }
     const checkGrants = event.submitter === $('checkHttpGrants');
-    const compareActive = !checkGrants && $('compareActive').checked;
-    const preview = await api(checkGrants ? { op: 'checkHttpGrants', workflow } : { op: 'preview', workflow, compareActive }, true);
+    const compareActive = $('compareActive').checked;
+    const preview = await api({ op: checkGrants ? 'checkHttpGrants' : 'preview', workflow, compareActive }, true);
     if (request !== previewRequest) return;
     const box = $('previewResult');
     box.append(node('h3', preview.workflowName));
+    if (checkGrants) box.append(node('p', 'このホストの現在の許可設定を表示します。秘密値の取得や接続テストは行いません。'));
     if (compareActive) {
       box.append(node('p', preview.activeRevision === null ? '稼働版なし' : '比較元：稼働版 v' + preview.activeRevision));
       box.append(node('p', '起動条件と表示対象の外部操作を比較します。入力の絞り込み、式の内容、クエリ、ヘッダー、本文などの変更は対象外です。'));
@@ -535,11 +536,10 @@ $('previewForm').onsubmit = async (event) => {
         for (const effect of change.removed) showEffect(box, effect, '削除 · ');
         for (const effect of change.added) showEffect(box, effect, '追加 · ');
       }
-      showRelease(box, workflow, preview, request);
-      announce('稼働版との差分を表示しました。');
+      if (!checkGrants) showRelease(box, workflow, preview, request);
+      announce(checkGrants ? '稼働版との差分と送信許可を表示しました。' : '稼働版との差分を表示しました。');
       return;
     }
-    if (checkGrants) box.append(node('p', 'このホストの現在の許可設定を表示します。秘密値の取得や接続テストは行いません。'));
     if (!preview.triggers.length) box.append(node('p', '有効な起動ノードはありません。'));
     for (const trigger of preview.triggers) {
       line(box, trigger.nodeName, triggerCondition(trigger));

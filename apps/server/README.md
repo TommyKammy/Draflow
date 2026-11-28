@@ -391,6 +391,18 @@ each worker still checks its own configuration, resolves the secret and revalida
 authorization at dispatch. Secret availability, request header conflicts and receiver
 acceptance are checked only during execution.
 
+Select **稼働版と比較** when checking the draft to show additions and removals beside
+their HTTP grant status. The API and CLI accept `compareActive: true` on
+`checkHttpGrants`; embedded hosts can call `host.compareHttpGrants(workflow)`.
+Both sides use the answering host’s current policy, including the current availability
+of selected credential versions. The baseline is the active revision in the same
+organization. With no active revision the report shows additions only. Unchanged
+effects are omitted, even if an administrator changed a grant since activation.
+Blocked HTTP entries show the configured method, credential reference and sanitized
+HTTP destination when known, so edits to two blocked bindings remain visible.
+Use the standalone check to see every current status. The comparison includes
+trigger, pinned child and compensation changes and returns no release token.
+
 #### Compare a draft with the active revision
 
 Select **稼働版と比較** before **影響を確認**, or send
