@@ -649,7 +649,7 @@ test('two parallel imports share host slots and serialize versions of a business
       if (init.method !== 'POST') {
         const scope = new URL(url).pathname;
         const rows = Array.from({ length: 12 }, (_, i) => ({
-          ...change(scope + (i === 1 ? 0 : i), i === 1 ? 2 : 1),
+          ...change(scope + (i === 3 ? 0 : i), i === 3 ? 2 : 1),
           scope,
         }));
         return Response.json({ items: rows, nextCursor: null, syncToken: 'done' });
@@ -661,8 +661,8 @@ test('two parallel imports share host slots and serialize versions of a business
         totalPeak,
         [...active.values()].reduce((a, b) => a + b, 0),
       );
-      // Give the other workers time to claim their batches over a real DB connection.
-      await new Promise((resolve) => setTimeout(resolve, process.env.DRAFLOW_TEST_SHARED ? 200 : 8));
+      // Hold the first deliveries until both the host and this import have filled their slots.
+      await until(() => totalPeak >= 3 && peaks.get(scope) >= 2, 15000);
       const sequence = versions.get(id) ?? [];
       sequence.push(version);
       versions.set(id, sequence);

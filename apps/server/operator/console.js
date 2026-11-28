@@ -426,12 +426,43 @@ $('auditFilter').onsubmit = (e) => {
   audit();
 };
 
+function triggerCondition(trigger) {
+  const schedule = trigger.schedule;
+  return schedule
+    ? schedule.intervalMs ? (schedule.intervalMs / 1000) + ' 秒ごと'
+      : [schedule.minute, schedule.hour, schedule.day, schedule.month, schedule.weekday]
+          .map((value) => value ?? '*').join(' ') + ' ' + schedule.timezone
+    : trigger.path ?? trigger.type;
+}
+
+function showEffect(box, effect, prefix = '') {
+  const kinds = { read: '読み取り', write: '書き込み', unknown: '操作は実行時に決定', undeclared: '影響未宣言', blocked: '認証設定の不一致により送信不可' };
+  const owner = effect.revision === null ? effect.nodeName : effect.workflowId + ' v' + effect.revision + ' / ' + effect.nodeName;
+  const fields = [kinds[effect.kind], effect.method, effect.destination];
+  if (effect.destination === null) fields.push('送信先は実行時に確認');
+  if (effect.mayRedirect) fields.push('リダイレクト先へ送信する可能性あり');
+  if (effect.credentialRefs.length) fields.push('資格情報 ' + effect.credentialRefs.join(', '));
+  line(box, prefix + (effect.phase === 'compensation' ? '補償 · ' : '') + owner, fields.filter(Boolean).join(' · '));
+}
+
+function showCall(box, site, prefix) {
+  const source = site.sourceWorkflow + (site.sourceRevision === null ? '' : ' v' + site.sourceRevision) + ' / ' + site.nodeId;
+  const kind = { call: '子フロー', pages: 'ページ処理', compensation: '補償' }[site.kind];
+  const fields = [site.workflowId + ' v' + site.revision];
+  if (site.kind === 'compensation') {
+    fields.push('実行順 ' + site.order, site.onFailure ? '失敗時の自動補償を開始' : '自動開始なし');
+    fields.push(site.conditional ? '適用条件あり（値は非表示）' : '適用条件なし');
+  }
+  line(box, prefix + kind + ' · ' + source, fields.join(' · '));
+}
+
 let previewRequest = 0;
 function resetPreview() {
   previewRequest++;
   $('previewResult').replaceChildren();
 }
 $('draftFile').onchange = resetPreview;
+$('compareActive').onchange = resetPreview;
 $('previewForm').onsubmit = async (event) => {
   event.preventDefault();
   resetPreview();
@@ -447,29 +478,35 @@ $('previewForm').onsubmit = async (event) => {
     } catch {
       throw Error('JSON 形式を確認してください。');
     }
-    const preview = await api({ op: 'preview', workflow }, true);
+    const compareActive = $('compareActive').checked;
+    const preview = await api({ op: 'preview', workflow, compareActive }, true);
     if (request !== previewRequest) return;
     const box = $('previewResult');
     box.append(node('h3', preview.workflowName));
+    if (compareActive) {
+      box.append(node('p', preview.activeRevision === null ? '稼働版なし' : '比較元：稼働版 v' + preview.activeRevision));
+      box.append(node('p', '起動条件と表示対象の外部操作を比較します。入力の絞り込み、式の内容、クエリ、ヘッダー、本文などの変更は対象外です。'));
+      if (!preview.changes.length) box.append(node('p', '表示対象の差分はありません。'));
+      for (const change of preview.changes) {
+        const trigger = change.after ?? change.before;
+        box.append(node('h4', trigger.nodeName));
+        if (change.conditionChanged) {
+          if (change.before) line(box, '削除する起動条件', triggerCondition(change.before));
+          if (change.after) line(box, '追加する起動条件', triggerCondition(change.after));
+        }
+        for (const site of change.removedCalls) showCall(box, site, '削除 · ');
+        for (const site of change.addedCalls) showCall(box, site, '追加 · ');
+        for (const effect of change.removed) showEffect(box, effect, '削除 · ');
+        for (const effect of change.added) showEffect(box, effect, '追加 · ');
+      }
+      announce('稼働版との差分を表示しました。');
+      return;
+    }
     if (!preview.triggers.length) box.append(node('p', '有効な起動ノードはありません。'));
     for (const trigger of preview.triggers) {
-      const schedule = trigger.schedule;
-      const condition = schedule
-        ? schedule.intervalMs ? (schedule.intervalMs / 1000) + ' 秒ごと'
-          : [schedule.minute, schedule.hour, schedule.day, schedule.month, schedule.weekday]
-              .map((value) => value ?? '*').join(' ') + ' ' + schedule.timezone
-        : trigger.path ?? trigger.type;
-      line(box, trigger.nodeName, condition);
+      line(box, trigger.nodeName, triggerCondition(trigger));
       if (!trigger.effects.length) box.append(node('p', '外部操作はありません。'));
-      const kinds = { read: '読み取り', write: '書き込み', unknown: '操作は実行時に決定', undeclared: '影響未宣言', blocked: '認証設定の不一致により送信不可' };
-      for (const effect of trigger.effects) {
-        const owner = effect.revision === null ? effect.nodeName : effect.workflowId + ' v' + effect.revision + ' / ' + effect.nodeName;
-        const fields = [kinds[effect.kind], effect.method, effect.destination];
-        if (effect.destination === null) fields.push('送信先は実行時に確認');
-        if (effect.mayRedirect) fields.push('リダイレクト先へ送信する可能性あり');
-        if (effect.credentialRefs.length) fields.push('資格情報 ' + effect.credentialRefs.join(', '));
-        line(box, (effect.phase === 'compensation' ? '補償 · ' : '') + owner, fields.filter(Boolean).join(' · '));
-      }
+      for (const effect of trigger.effects) showEffect(box, effect);
     }
     announce('公開前の影響を表示しました。');
   } catch (error) {

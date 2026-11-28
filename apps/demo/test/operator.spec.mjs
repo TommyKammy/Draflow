@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import { NodeRegistry } from '@draflow/core';
 import { standardNodes } from '@draflow/nodes';
 import { NodeHost } from '../../server/dist/host.js';
+import { publish as publishCompensations } from '../../server/test/compensation-fixture.mjs';
 import { createOperatorServer } from '../../server/dist/operator-http.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -69,7 +70,11 @@ test('operators reconcile the same delivery in two tabs; a viewer can inspect th
       await p.goto(url);
       await p.getByLabel('組織 ID').fill(organization);
       await p.getByLabel('アクセストークン').fill(account.token);
-      await p.getByLabel('アクセストークン').press('Enter');
+      const [session] = await Promise.all([
+        p.waitForResponse((response) => new URL(response.url()).searchParams.get('op') === 'session'),
+        p.getByRole('button', { name: 'ログイン' }).click(),
+      ]);
+      expect(session.status()).toBe(200);
       await p.getByRole('combobox', { name: '状態', exact: true }).selectOption('review');
       await p.getByRole('button', { name: '検索', exact: true }).press('Enter');
       await p.getByRole('link', { name: flow.id, exact: true }).press('Enter');
@@ -184,6 +189,30 @@ test('publisher previews an order draft before publication', async ({ page }) =>
     await page.getByRole('button', { name: '影響を確認' }).press('Enter');
     await expect(page.getByRole('status')).toContainText('JSON 形式');
     expect(h.publish(JSON.parse(file))).toBe(1);
+    h.activate(changed.id, 1);
+    const compare = page.getByRole('checkbox', { name: '稼働版と比較' });
+    await compare.check();
+    await input.setInputFiles({ name: 'changed.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(changed)) });
+    await page.getByRole('button', { name: '影響を確認' }).press('Enter');
+    await expect(result).toContainText('比較元：稼働版 v1');
+    await expect(result).toContainText('削除 · ');
+    await expect(result).toContainText('資格情報 orders-read');
+    await expect(result).toContainText('追加 · ');
+    await expect(result).toContainText('認証設定の不一致により送信不可');
+    await input.setInputFiles({ name: 'original.json', mimeType: 'application/json', buffer: file });
+    await page.getByRole('button', { name: '影響を確認' }).press('Enter');
+    await expect(result).toContainText('表示対象の差分はありません。');
+    let compensationDraft;
+    publishCompensations(h, false, false, (flow) => { compensationDraft = structuredClone(flow); });
+    compensationDraft.nodes[1].parameters.compensation.onFailure = true;
+    await input.setInputFiles({ name: 'undo.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(compensationDraft)) });
+    await page.getByRole('button', { name: '影響を確認' }).press('Enter');
+    await expect(result).toContainText('削除 · 補償 · order-import / reserve');
+    await expect(result).toContainText('自動開始なし');
+    await expect(result).toContainText('追加 · 補償 · order-import / reserve');
+    await expect(result).toContainText('release v1 · 実行順 3 · 失敗時の自動補償を開始');
+    await compare.uncheck();
+    await expect(result).toBeEmpty();
   } finally {
     srv.closeAllConnections();
     await new Promise((resolve) => srv.close(resolve));

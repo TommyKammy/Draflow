@@ -220,6 +220,11 @@ export class ExecutionLedger {
     });
   }
 
+  activeRevision(id: string): number | null {
+    const row = this.#prepare('SELECT revision FROM active WHERE workflowId=?').get(id);
+    return row ? Number(row.revision) : null;
+  }
+
   publication(id: string, revision: number): PublishedWorkflow {
     const row = this.#prepare('SELECT document FROM publications WHERE workflowId=? AND revision=?').get(
       id,

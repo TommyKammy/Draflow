@@ -260,3 +260,191 @@ test('replaced nodes without wait or journal hooks do not dispatch children or r
   assert.deepEqual(h.compensationInfo(run).steps, []);
   assert.deepEqual(requests, []);
 });
+
+test('order comparison uses the active tenant revision, predicts the switch, and has no dispatch side effects', async (t) => {
+  const flow = fixture('order-sync'), draft = structuredClone(flow);
+  const send = draft.nodes.find((n) => n.id === 'send');
+  send.parameters.url = 'https://shipping.example.test/totals?token=PRIVATE';
+  send.credentials.httpAuth = 'shipping';
+  draft.nodes.find((n) => n.id === 'timer').disabled = true;
+  const grants = [
+    ['orders-read', 'read', 'https://orders.example.test'],
+    ['orders-send', 'send', 'https://orders.example.test'],
+    ['shipping', 'send', 'https://shipping.example.test'],
+  ].map(([id, nodeId, origin]) => ({ id, nodeId, origin, workflowId: flow.id, kind: 'bearer' }));
+  const { requests, options } = receiver(grants, () => [{ approved: true, amount: 7 }]);
+  const { h, operate } = setup(t, options);
+  const query = { op: 'preview', compareActive: true, workflow: draft };
+  for (const role of ['operator', 'viewer']) assert.throws(() => operate(role, query), (e) => e.status === 403);
+  h.activate(flow.id, h.publish(flow));
+  assert.equal(h.publish(draft), 2); // Published, still inactive.
+  const before = h.stats();
+  const diff = operate('publisher', query);
+  assert.deepEqual(diff, operate('admin', query));
+  assert.equal(diff.activeRevision, 1);
+  assert.ok(!JSON.stringify(diff).includes('PRIVATE'));
+  const [hook, timer] = diff.changes;
+  assert.equal(hook.after.nodeId, 'hook');
+  assert.equal(hook.conditionChanged, false);
+  assert.deepEqual(hook.removed.map(expectedRequest), [['POST', 'https://orders.example.test/totals', 'Bearer token-orders-send']]);
+  assert.deepEqual(hook.added.map(expectedRequest), [['POST', 'https://shipping.example.test/totals', 'Bearer token-shipping']]);
+  assert.equal(timer.before.nodeId, 'timer');
+  assert.equal(timer.after, null);
+  assert.deepEqual(timer.removed.map((e) => e.nodeId), ['read', 'send']);
+  assert.deepEqual(h.stats(), before);
+  assert.deepEqual(requests, []);
+  assert.deepEqual(operate('publisher', { op: 'audit' }), []);
+  assert.deepEqual(await h.history.list(flow.id), []);
+  const other = setup(t);
+  const fresh = other.h.comparePublication(draft);
+  assert.equal(fresh.activeRevision, null);
+  assert.equal(fresh.changes[0].before, null);
+  const neighbor = structuredClone(flow);
+  neighbor.nodes.find((n) => n.id === 'send').parameters.url = 'https://other-tenant.example.test/private';
+  other.h.publish(flow);
+  other.h.activate(flow.id, other.h.publish(neighbor));
+  assert.equal(other.operate('publisher', query).activeRevision, 2);
+  assert.equal(other.operate('publisher', query).changes[0].removed[0].destination, 'https://other-tenant.example.test/private');
+  assert.deepEqual(operate('publisher', query), diff);
+  const dispatch = async (path) => {
+    const id = h.acceptWebhook(path, h.webhook(path), { items: [{ json: {} }] });
+    await until(() => h.receipt(id).outcome === 'success');
+    return requests.splice(0).filter(([method]) => method === 'POST');
+  };
+  assert.deepEqual(await dispatch('/webhook/orders'), hook.removed.map(expectedRequest));
+  h.activate(flow.id, 2);
+  assert.deepEqual(await dispatch('/webhook/orders'), hook.added.map(expectedRequest));
+  const renamed = structuredClone(draft);
+  renamed.nodes.find((n) => n.id === 'send').name = 'Other label';
+  assert.deepEqual(h.comparePublication(renamed).changes, []);
+  const moved = structuredClone(draft);
+  moved.nodes.find((n) => n.id === 'hook').parameters.path = 'new-orders';
+  const [changed] = h.comparePublication(moved).changes;
+  assert.deepEqual([changed.before.path, changed.after.path, changed.added, changed.removed],
+    ['/webhook/orders', '/webhook/new-orders', [], []]);
+  const stale = h.webhook(changed.before.path);
+  assert.ok(!h.webhook(changed.after.path));
+  h.activate(flow.id, h.publish(moved));
+  assert.ok(!h.webhook(changed.before.path));
+  assert.throws(() => h.acceptWebhook(changed.before.path, stale, { items: [{ json: {} }] }));
+  assert.deepEqual(await dispatch(changed.after.path), hook.added.map(expectedRequest));
+  h.deactivate(flow.id);
+  assert.equal(h.comparePublication(draft).activeRevision, null);
+});
+
+test('comparison distinguishes pinned child and compensation revisions', (t) => {
+  const { h } = setup(t);
+  const child = fixture('process-order-batch'), parent = fixture('order-import');
+  h.publish(child);
+  h.activate(parent.id, h.publish(parent));
+  child.nodes[1].parameters.url = 'https://sink.example.test/changed';
+  parent.nodes[1].parameters.revision = h.publish(child);
+  const [page] = h.comparePublication(parent).changes;
+  assert.deepEqual(page.removed.map((e) => [e.phase, e.workflowId, e.revision]), [['execution', child.id, 1]]);
+  assert.deepEqual(page.added.map((e) => [e.phase, e.workflowId, e.revision]), [['execution', child.id, 2]]);
+  let draft;
+  publishCompensations(h, false, false, (flow) => { draft = structuredClone(flow); });
+  child.id = 'refund';
+  draft.nodes.find((n) => n.id === 'charge').parameters.compensation.revision = h.publish(child);
+  const [undo] = h.comparePublication(draft).changes;
+  assert.deepEqual(undo.removed.map((e) => [e.phase, e.workflowId, e.revision]), [['compensation', 'refund', 1]]);
+  assert.deepEqual(undo.added.map((e) => [e.phase, e.workflowId, e.revision]), [['compensation', 'refund', 2]]);
+});
+
+test('a second call site to the same pinned child adds a second delivery', async (t) => {
+  const { requests, options } = receiver([], () => ({ id: 'receipt' }));
+  const { h } = setup(t, options);
+  const parent = fixture('order-import'), leaf = fixture('process-order-batch');
+  h.publish(leaf);
+  const call = parent.nodes[1];
+  Object.assign(call, { type: 'draflow.call', parameters: { workflowId: leaf.id, revision: 1 } });
+  h.activate(parent.id, h.publish(parent));
+  parent.nodes.push({ ...call, id: 'again', name: 'Again' });
+  const edge = structuredClone(parent.connections[0]);
+  edge.id = 'call-again';
+  edge.from.node = call.id;
+  edge.to.node = 'again';
+  parent.connections.push(edge);
+  const [change] = h.comparePublication(parent).changes;
+  assert.deepEqual(change.addedCalls.map((s) => [s.nodeId, s.workflowId, s.revision]), [['again', leaf.id, 1]]);
+  assert.deepEqual([change.removedCalls, change.added, change.removed], [[], [], []]);
+  const run = async () => {
+    const id = h.accept(parent.id, 'schedule', { items: [{ json: { id: 'one' } }] });
+    await until(() => h.receipt(id).outcome === 'success');
+    return requests.splice(0).map(([, url]) => url);
+  };
+  const sink = leaf.nodes[1].parameters.url;
+  assert.deepEqual(await run(), [sink]);
+  h.activate(parent.id, h.publish(parent));
+  assert.deepEqual(await run(), [sink, sink]);
+});
+
+test('compensation site changes predict automatic recovery and reversal order without exposing predicates', async (t) => {
+  const { requests, options } = receiver([
+    { workflowId: 'release', nodeId: 'register', origin: 'https://sink.example.test', id: 'release', kind: 'bearer' },
+  ], () => ({ id: 'receipt' }));
+  const { h } = setup(t, options);
+  let draft;
+  publishCompensations(h, false, false, (flow) => {
+    flow.nodes[1].parameters.compensation.when = { field: 'order', equals: 'private-order' };
+    draft = structuredClone(flow);
+  });
+  const policy = draft.nodes[1].parameters.compensation;
+  policy.when.equals = 'private-edited';
+  const predicateDiff = h.comparePublication(draft);
+  assert.equal(predicateDiff.changes[0].addedCalls[0].conditional, true);
+  assert.ok(!JSON.stringify(predicateDiff).includes('private-'));
+  policy.when.equals = 'private-order';
+  policy.order = 0;
+  policy.onFailure = true;
+  const [change] = h.comparePublication(draft).changes;
+  const rules = (sites) => sites.map((s) => [s.nodeId, s.workflowId, s.order, s.onFailure]);
+  assert.deepEqual(rules(change.removedCalls), [['reserve', 'release', 3, false]]);
+  assert.deepEqual(rules(change.addedCalls), [['reserve', 'release', 0, true]]);
+  const failShipment = async () => {
+    const run = h.accept(draft.id, 'schedule', { items: [{ json: { order: 'private-order' } }] });
+    await until(() => h.receipt(run).outcome === 'error');
+    return run;
+  };
+  const original = await failShipment();
+  assert.equal(h.compensationInfo(original).state, 'idle');
+  h.compensate(original);
+  await until(() => h.compensationInfo(original).state === 'compensated');
+  const paths = () => requests.splice(0).map(([, url]) => new URL(url).pathname);
+  assert.deepEqual(paths(), ['/reserve', '/charge', '/refund', '/release']);
+  h.activate(draft.id, h.publish(draft));
+  const active = await failShipment();
+  await until(() => h.compensationInfo(active).state === 'compensated');
+  assert.deepEqual(paths(), ['/reserve', '/charge', '/release', '/refund']);
+});
+
+test('replacing an order schedule removes the old registration and dispatches from the new one', async (t) => {
+  const flow = fixture('order-sync');
+  flow.nodes.find((n) => n.id === 'timer').parameters.intervalSeconds = 1;
+  for (const n of flow.nodes.filter((n) => n.type === 'draflow.httpRequest')) {
+    delete n.credentials;
+    n.parameters.authentication = 'none';
+  }
+  const { requests, options } = receiver([], () => [{ amount: 7, approved: true }]);
+  const { h, operate } = setup(t, options);
+  h.activate(flow.id, h.publish(flow));
+  const draft = structuredClone(flow);
+  draft.nodes.find((n) => n.id === 'timer').id = 'new-timer';
+  draft.nodes.find((n) => n.id === 'read').parameters.url = 'https://shipping.example.test/source';
+  draft.nodes.find((n) => n.id === 'send').parameters.url = 'https://shipping.example.test/new-timer';
+  draft.connections.find((edge) => edge.from.node === 'timer').from.node = 'new-timer';
+  const diff = h.comparePublication(draft);
+  const removed = diff.changes.find((c) => !c.after), added = diff.changes.find((c) => !c.before);
+  for (const [revision, condition, effects] of [[1, removed.before, removed.removed], [2, added.after, added.added]]) {
+    if (revision === 2) h.activate(flow.id, h.publish(draft));
+    assert.deepEqual(condition.schedule, { intervalMs: 1000 });
+    await until(() => requests.some(([method, url]) => method === 'POST' && url === effects[1].destination));
+    await until(() => operate('publisher', { op: 'list', workflow: flow.id, revision, status: 'finished' }).length > 0);
+    const rows = operate('publisher', { op: 'list', workflow: flow.id, revision });
+    assert.ok(rows.every((r) => h.receipt(r.runId).triggerNodeId === condition.nodeId));
+    for (const effect of effects) {
+      const actual = requests.find(([, url]) => url === effect.destination);
+      assert.deepEqual(actual, expectedRequest(effect));
+    }
+  }
+});
